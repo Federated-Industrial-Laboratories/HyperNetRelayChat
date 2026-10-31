@@ -13,6 +13,9 @@ the first-release scope amendment, including encrypted private groups. The
 interfaces and integration gaps. The
 [protocol and permission proposal](Documentation/ProtocolPermissions.md) defines
 operation contracts, state transitions, worked traces and decisions still open.
+The [integration profile](Documentation/IntegrationProfile.md) specifies the
+required companion additions, directional privacy evidence and bounded federation
+authority model. These additions are not available in the released SDK.
 
 Product documentation is maintained with the source. Design changes use branches
 and pull requests. Release support and security properties will be stated only

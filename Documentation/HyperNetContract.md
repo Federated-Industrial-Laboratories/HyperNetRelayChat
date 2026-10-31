@@ -1,6 +1,6 @@
 # HRC HyperNet integration contract map
 
-Draft 1, 31 October 2026. [Product plan](ProductPlan.md) · [Protocol proposal](ProtocolPermissions.md)
+Draft 2, 31 October 2026. [Product plan](ProductPlan.md) · [Protocol proposal](ProtocolPermissions.md)
 
 This map records inspected source behaviour and HRC integration gaps. It does not claim that HRC has a working adapter or qualified deployment. The source contracts were inspected during the Core/Suite 0.9.1 hotfix and reconciled with the published release revisions below.
 
@@ -67,15 +67,21 @@ Outgoing `connect` context names the verified target network/incarnation/service
 
 Neither context establishes an HRC account, represented user, grant lifecycle, room membership, moderation role, recipient filter or original foreign actor. `expiresMs` is an initial bound, not evidence that authority cannot be revoked earlier. The HRC service cannot revalidate queued work's HyperNet authority merely by rereading old JSON.
 
+## Design response and implementation dependencies
+
+The [transport authority and federation profile](IntegrationProfile.md) defines the next design step against the inspected source. Core already has endpoint-only fresh session permits, and application streams already use the relay connector. The required additions expose verified results through the companion without duplicating governance. Incoming privacy remains direction-specific: public endpoints do not currently prove transit through a relay.
+
+The profile adopts HyperNet's existing finite permit lifetime, with strictly ordered HRC-owned controls. It does not promise an atomic transaction spanning HyperNet authority and HRC storage. The following interfaces remain unavailable in the released SDK until implemented and qualified.
+
 ## Gaps that must close before their dependent claims
 
 | Gap | Required outcome |
 | --- | --- |
 | Effective privacy fields absent | Extend a supported verified interface for selected/effective route privacy and relevant operator declarations, or explicitly display that HRC cannot verify them. Never infer independence from relay use. Product privacy indicators remain a release gate. |
-| No typed live authority token/recheck for HRC commit | Specify how HRC checks current application authority for work already received, including revocation races, expiry and disconnect. Existing transport write gating alone does not order an HRC database commit with a later HyperNet change. |
+| No typed live authority token/recheck for HRC commit | Implement the profile's action-bound fresh check through the existing endpoint-only Stream::Permit path, including expiry, disconnect and conservative deadlines. Existing transport write gating alone does not order an HRC database commit with a later HyperNet change. |
 | Refusal/closure loses structured cause | Translate only verified information; show unavailable/unknown outcome until a supported typed status/reason contract exists. HRC home pause/revoke remains separately inspectable. |
 | No portable original-actor proof for federation | Define accepted HRC origin attestation and original action authentication, or a reviewed HyperNet evidence extension. An admitted gateway is not a foreign author's identity. |
-| Remote source-authority freshness | Agree a bounded freshness model or destination barrier semantics; stale assertions cannot prove instantaneous cross-network revocation. |
+| Remote source-authority freshness | Preserve the existing five-second ordinary challenge bound and original source expiry, with home-owned withdrawal barriers; qualify the exact evidence/deadline mapping. |
 | Rust SDK and platform qualification | Implement a narrow adapter only after the contract is settled; qualify Linux with actual socket/security constraints and compatible Rust/toolchain dependencies. |
 
 HyperNet's current federation copies explicitly shared approved Pages. Its treaty/bridge trust pattern informs HRC, but it supplies no live chat forwarding contract. HRC's proposed separately admitted bilateral gateways require their own setup, evidence and tests. [Existing federation](https://github.com/Federated-Industrial-Laboratories/HyperNet/blob/4d4acac432f8de47298be0057c9dd69c313941bd/Documentation/Federation.md)
