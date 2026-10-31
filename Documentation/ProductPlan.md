@@ -6,6 +6,16 @@ The first-release scope is Linux first, service-readable community rooms, end-to
 
 The complete source draft follows. Confirmed requirements and proposed defaults retain their original distinction. Its HyperNet integration references describe the inspected 0.9.0 baseline; a versioned integration contract must account for subsequent permission changes before implementation. No application implementation or release qualification is claimed by this plan.
 
+## Accepted pilot and history decisions, 31 October 2026
+
+The initial pilot target per home service is eight interactive endpoint streams, two agent streams and two federation-direction streams, with two operator slots and two transition slots reserved. This is the accepted qualification target, not a measured capacity claim.
+
+Default service history is 30 days with a 10 GiB quota; default local history is seven days with a 512 MiB quota. Deduplication records last at least seven days and beyond the associated retry-window expiry; retry windows last at most 24 hours. Quota exhaustion rejects new work before silently shortening agreed retention. These defaults do not grant access beyond current membership or delegation.
+
+New or recovered devices receive future encrypted messages only by default, for confidential direct conversations and private groups. Existing authorised devices may retain their local archives. Access to earlier encrypted history is strictly optional, disabled by default, and requires deliberate, separately authorised disclosure. This decision does not select or enable an archive-transfer, backup or key-recovery mechanism.
+
+These decisions supersede the corresponding open choices in the preserved draft. Other technical defaults, resource budgets and integration contracts remain subject to design and qualification.
+
 ## Preserved source draft
 
 **Draft updated 31 October 2026.** HyperNet Relay Chat (HRC) is a Rust-based chat application using a native protocol over HyperNet, with an interactive GUI, a terminal interface, and an API for people and their authorised agents. It preserves IRC’s immediacy while adopting HyperNet’s identity, consent, and federation model.
