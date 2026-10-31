@@ -18,7 +18,10 @@ required companion additions, directional privacy evidence and bounded federatio
 authority model. These additions are not available in the released SDK. The
 [state and recovery specification](Documentation/StateAndRecovery.md) selects
 transactional storage, persistent MLS conversations, exact-content approval and
-owner-key account recovery. These designs still require implementation evidence.
+owner-key account recovery. The
+[text and search profile](Documentation/TextAndSearch.md) fixes Unicode semantics,
+identity lookup and bounded multilingual search. These designs still require
+implementation evidence.
 
 Product documentation is maintained with the source. Design changes use branches
 and pull requests. Release support and security properties will be stated only
