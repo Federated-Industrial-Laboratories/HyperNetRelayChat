@@ -15,7 +15,10 @@ interfaces and integration gaps. The
 operation contracts, state transitions, worked traces and decisions still open.
 The [integration profile](Documentation/IntegrationProfile.md) specifies the
 required companion additions, directional privacy evidence and bounded federation
-authority model. These additions are not available in the released SDK.
+authority model. These additions are not available in the released SDK. The
+[state and recovery specification](Documentation/StateAndRecovery.md) selects
+transactional storage, persistent MLS conversations, exact-content approval and
+owner-key account recovery. These designs still require implementation evidence.
 
 Product documentation is maintained with the source. Design changes use branches
 and pull requests. Release support and security properties will be stated only

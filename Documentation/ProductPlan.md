@@ -16,6 +16,10 @@ New or recovered devices receive future encrypted messages only by default, for 
 
 These decisions supersede the corresponding open choices in the preserved draft. Other technical defaults, resource budgets and integration contracts remain subject to design and qualification.
 
+## Accepted account recovery policy, 31 October 2026
+
+Account recovery uses an owner-held recovery signing key enrolled in advance. The supported protocol has no administrator override. Recovery authorises a fresh device and invalidates old device access; it does not supply message decryption keys or automatically restore earlier encrypted history. If every authorised device and the recovery key are lost, the user must create a new account. Existing future-only encrypted-history defaults remain in force.
+
 ## Preserved source draft
 
 **Draft updated 31 October 2026.** HyperNet Relay Chat (HRC) is a Rust-based chat application using a native protocol over HyperNet, with an interactive GUI, a terminal interface, and an API for people and their authorised agents. It preserves IRC’s immediacy while adopting HyperNet’s identity, consent, and federation model.
