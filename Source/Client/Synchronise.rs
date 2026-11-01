@@ -19,6 +19,7 @@ impl Worker {
             if page.is_empty() {
                 break;
             }
+            let complete = page.len() < 16;
             let last = page.last().map(|r| r.room);
             if last == after {
                 return Err(Error::Input);
@@ -28,6 +29,9 @@ impl Worker {
                 return Err(Error::Input);
             }
             after = last;
+            if complete {
+                break;
+            }
         }
         cache::save_rooms(&mut self.client.store, &rooms).map_err(|_| Error::Storage)?;
         self.snapshot.rooms = rooms;

@@ -738,7 +738,35 @@ impl Worker {
         target: Target,
         body: &B,
     ) -> Result<T> {
-        let r = self.client.call(op, target, body)?;
+        if !home::is_read_operation(op) {
+            return Err(Error::Input);
+        }
+        let action = self.client.prepare(
+            op,
+            target,
+            Value::serialized(body).map_err(|_| Error::Input)?,
+        )?;
+        let signed = self.client.sign(&action)?;
+        let key =
+            VerifyingKey::from_bytes(self.client.profile.registration.endpoint_key.as_bytes())
+                .map_err(|_| Error::Input)?;
+        let end = crate::clock::boot_ms()
+            .map_err(|_| Error::Clock)?
+            .saturating_add(10_000);
+        let r = retry_read(
+            end,
+            || {
+                self.shared.stop.load(Ordering::Acquire)
+                    || self.shared.disconnect.load(Ordering::Acquire)
+            },
+            |end| {
+                self.client
+                    .session()?
+                    .submit_read_until(&signed, &key, end)
+                    .map(|response| response.value().clone())
+                    .map_err(Error::from)
+            },
+        )?;
         match r.outcome {
             Outcome::Result { body } => body.deserialized().map_err(|_| Error::Input),
             outcome => Err(Error::from_outcome(outcome)),
@@ -764,6 +792,54 @@ impl Worker {
         let response = self.client.execute(&action)?;
         self.response(response)
     }
+}
+
+/// A verified temporary read refusal leaves this stream synchronized. Earlier
+/// refresh results remain available while only this exact read is attempted again.
+fn retry_read(
+    end: u64,
+    interrupted: impl Fn() -> bool,
+    mut attempt: impl FnMut(u64) -> Result<Response>,
+) -> Result<Response> {
+    for number in 0..5 {
+        if interrupted() {
+            return Err(Error::Offline);
+        }
+        if crate::clock::boot_ms().map_err(|_| Error::Clock)? >= end {
+            return Err(Error::Network(super::network::Error::Transport));
+        }
+        let response = attempt(end)?;
+        if crate::clock::boot_ms().map_err(|_| Error::Clock)? >= end {
+            return Err(Error::Network(super::network::Error::Transport));
+        }
+        let Outcome::Refused {
+            code: ErrorCode::Unavailable | ErrorCode::Overloaded | ErrorCode::RateLimited,
+            retry_after_ms,
+            ..
+        } = &response.outcome
+        else {
+            return Ok(response);
+        };
+        let now = crate::clock::boot_ms().map_err(|_| Error::Clock)?;
+        let delay = retry_after_ms.unwrap_or(1000).max(250);
+        let Some(until) = now.checked_add(delay).filter(|until| *until < end) else {
+            return Ok(response);
+        };
+        if number == 4 {
+            return Ok(response);
+        }
+        loop {
+            if interrupted() {
+                return Err(Error::Offline);
+            }
+            let now = crate::clock::boot_ms().map_err(|_| Error::Clock)?;
+            if now >= until {
+                break;
+            }
+            thread::sleep(Duration::from_millis((until - now).min(25)));
+        }
+    }
+    unreachable!("read attempt count is bounded")
 }
 
 #[path = "Commands.rs"]

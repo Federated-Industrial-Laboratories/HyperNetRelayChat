@@ -30,6 +30,14 @@ No conversation operation is prepared or replayed by session setup. Preparation
 failure diagnostics contain only the static adapter category and boot-time
 start, finish and original deadline, without identities or credential data.
 
+A temporary refusal of an authenticated view read retries that exact read on the
+same session, at most five attempts within its original ten-second budget. Retry
+guidance must fit that budget. Each attempt requires a new service authority
+check; earlier successful refresh reads are not restarted. Permanent refusals,
+invalid responses and transport loss end the attempt. Disconnect and shutdown
+interrupt retry waiting. This read path cannot submit mutations or recreate a
+pending message. Room lists stop when the final partial page is received.
+
 The command queue contains at most 32 bounded commands. Dispatch returns a local
 request number. Immutable snapshots carry that number on command status and
 operation delivery records. A frontend can distinguish the exact submitted text

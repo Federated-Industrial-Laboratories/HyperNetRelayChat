@@ -43,6 +43,10 @@ struct Probe {
     resolved_deliveries: Cell<u32>,
     recovered_selections: Cell<u32>,
     command: Cell<&'static str>,
+    phase: Cell<&'static str>,
+    request: Cell<Option<u64>>,
+    last_state: RefCell<String>,
+    trace: RefCell<std::collections::VecDeque<String>>,
 }
 
 impl Probe {
@@ -60,6 +64,10 @@ impl Probe {
             resolved_deliveries: Cell::new(0),
             recovered_selections: Cell::new(0),
             command: Cell::new("Open"),
+            phase: Cell::new("Opening"),
+            request: Cell::new(None),
+            last_state: RefCell::new(String::new()),
+            trace: RefCell::new(Default::default()),
         })
     }
     fn reopen(&mut self, path: &Path) -> Result<()> {
@@ -71,6 +79,8 @@ impl Probe {
             )
         })?;
         self.command.set("Reopen");
+        self.phase.set("Opening");
+        self.request.set(None);
         *self.last_backoff.borrow_mut() = None;
         Ok(())
     }
@@ -102,12 +112,15 @@ fn context(controller: &Probe, command: &str, view: &Snapshot) -> String {
         },
     );
     format!(
-        "principal={} command={command} connection={:?} lastVisible={} {selected} inspectionStale={} privacyPresent={}",
+        "principal={} command={command} phase={} request={:?} connection={:?} lastVisible={} {selected} inspectionStale={} privacyPresent={} recent={:?}",
         controller.principal,
+        controller.phase.get(),
+        controller.request.get(),
         view.connection,
         status.as_deref().unwrap_or("none"),
         view.inspection.stale,
-        view.privacy.is_some()
+        view.privacy.is_some(),
+        controller.trace.borrow()
     )
 }
 
@@ -133,6 +146,24 @@ fn command_name(command: &Command) -> &'static str {
 
 fn snapshot(controller: &Probe) -> Arc<Snapshot> {
     let view = controller.snapshot();
+    let state = format!(
+        "command={} phase={} request={:?} connection={:?} status={:?}",
+        controller.command.get(),
+        controller.phase.get(),
+        controller.request.get(),
+        view.connection,
+        view.status
+            .as_ref()
+            .map(|status| (status.request_id, &status.code))
+    );
+    if *controller.last_state.borrow() != state {
+        let mut trace = controller.trace.borrow_mut();
+        if trace.len() == 16 {
+            trace.pop_front();
+        }
+        trace.push_back(format!("bootMs={:?} {state}", hrc::clock::boot_ms().ok()));
+        *controller.last_state.borrow_mut() = state;
+    }
     *LAST_OBSERVATION.lock().unwrap_or_else(|e| e.into_inner()) =
         context(controller, controller.command.get(), &view);
     let backoff = match &view.connection {
@@ -182,6 +213,8 @@ fn wait(
 }
 
 fn completion(controller: &Probe, id: u64, label: &str, end: Instant) -> Arc<Snapshot> {
+    controller.phase.set("Completion");
+    controller.request.set(Some(id));
     let view = wait(controller, label, end, |v| {
         v.completions.iter().any(|c| c.request_id == id)
     });
@@ -221,17 +254,22 @@ fn completed(controller: &Probe, id: u64, label: &str, end: Instant) -> Arc<Snap
 fn dispatch(controller: &Probe, action: Command) -> u64 {
     let label = command_name(&action);
     controller.command.set(label);
-    controller.dispatch(action).unwrap_or_else(|error| {
+    controller.phase.set("Dispatch");
+    controller.request.set(None);
+    let id = controller.dispatch(action).unwrap_or_else(|error| {
         panic!(
             "{}: dispatch failed: {error}",
             context(controller, label, &snapshot(controller))
         )
-    })
+    });
+    controller.request.set(Some(id));
+    id
 }
 
 fn command(controller: &Probe, action: Command, end: Instant) -> (u64, Arc<Snapshot>) {
     let end = end.min(Instant::now() + Duration::from_secs(40));
     let label = command_name(&action);
+    controller.command.set(label);
     let connect = matches!(action, Command::Connect);
     let selection = match &action {
         Command::SelectRoom(room) => Some(*room),
@@ -276,6 +314,7 @@ fn command(controller: &Probe, action: Command, end: Instant) -> (u64, Arc<Snaps
             error.detail
         );
     }
+    controller.phase.set("ReadRecovery");
     let ready = wait(controller, label, end, |v| {
         assert_ne!(
             v.connection,
@@ -308,7 +347,10 @@ fn command(controller: &Probe, action: Command, end: Instant) -> (u64, Arc<Snaps
     (id, ready)
 }
 
-fn online(controller: &Probe, label: &str, end: Instant) {
+fn online(controller: &Probe, label: &'static str, end: Instant) {
+    controller.command.set(label);
+    controller.phase.set("BeforeDispatch");
+    controller.request.set(None);
     wait(controller, label, end, |view| {
         assert_ne!(
             view.connection,
