@@ -37,6 +37,8 @@ impl Fixture {
         fs::rename(self.root.join("Key"), self.root.join("Database.key")).unwrap();
         let endpoint = files::create_key(&self.root.join("Endpoint.key")).unwrap();
         let profile = client::Profile {
+            federation: None,
+            agreements: Vec::new(),
             server: service::Descriptor {
                 version: 1,
                 home: a.home,
@@ -329,7 +331,7 @@ fn cached_pages_and_bound_drafts_survive_restart_without_clock_or_transport() {
     };
     let f = Fixture::new();
     let mut store = f.create();
-    cache::initialize(&mut store).unwrap();
+    cache::initialize(&mut store, action().home).unwrap();
     let a = action();
     let Target::Room(room) = a.target else {
         unreachable!()
@@ -345,7 +347,7 @@ fn cached_pages_and_bound_drafts_survive_restart_without_clock_or_transport() {
         joined: true,
         unread: 1,
     };
-    cache::save_rooms(&mut store, &[summary]).unwrap();
+    cache::save_rooms(&mut store, room.home, &[summary]).unwrap();
     let mention = messaging::Mention {
         account: a.actor.represented(),
         start: 0,
@@ -406,7 +408,7 @@ fn cached_pages_and_bound_drafts_survive_restart_without_clock_or_transport() {
     .unwrap();
     drop(store);
     let mut store = f.open();
-    cache::initialize(&mut store).unwrap();
+    cache::initialize(&mut store, action().home).unwrap();
     let saved = cache::room(&mut store, room).unwrap();
     assert_eq!(
         cache::encode(&saved.events).unwrap(),
@@ -492,13 +494,14 @@ fn controller_starts_offline_and_preserves_correlated_drafts_with_one_store_owne
     use crate::client::{self, Command, ConnectionState, Controller, cache};
     let f = Fixture::new();
     let mut store = f.create();
-    cache::initialize(&mut store).unwrap();
+    cache::initialize(&mut store, action().home).unwrap();
     let a = action();
     let Target::Room(room) = a.target else {
         unreachable!()
     };
     cache::save_rooms(
         &mut store,
+        room.home,
         &[crate::conversations::Summary {
             confidentiality: RoomConfidentiality::Community,
             invited: false,
@@ -575,7 +578,7 @@ fn recipient_ignore_and_expiry_remove_local_presentations_without_erasing_drafts
     use crate::{client::cache, moderation::FilterState};
     let f = Fixture::new();
     let mut store = f.create();
-    cache::initialize(&mut store).unwrap();
+    cache::initialize(&mut store, action().home).unwrap();
     let a = action();
     let Target::Room(room) = a.target else {
         unreachable!()
@@ -605,6 +608,7 @@ fn recipient_ignore_and_expiry_remove_local_presentations_without_erasing_drafts
     outbox::save_draft(&mut store, room, "keep draft").unwrap();
     cache::save_filters(
         &mut store,
+        action().home,
         &[FilterState {
             subject: event.actor.represented(),
             ignored: true,
@@ -613,7 +617,7 @@ fn recipient_ignore_and_expiry_remove_local_presentations_without_erasing_drafts
     )
     .unwrap();
     assert!(cache::room(&mut store, room).unwrap().events.is_empty());
-    assert!(cache::filters(&mut store).unwrap()[0].ignored);
+    assert!(cache::filters(&mut store, action().home).unwrap()[0].ignored);
     cache::maintain(&mut store).unwrap();
     assert_eq!(
         outbox::draft(&mut store, room).unwrap().as_deref(),
@@ -804,5 +808,7 @@ fn identity_api_keeps_proof_bytes_and_exact_current_state() {
 
 #[path = "EncryptedArchive.rs"]
 mod encrypted_archive;
+#[path = "Federation.rs"]
+mod federation;
 #[path = "Trust.rs"]
 mod trust_checks;

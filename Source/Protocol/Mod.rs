@@ -3,6 +3,9 @@
 //! Verified signatures establish key possession, not room or delegation permission.
 #[path = "Cbor.rs"]
 mod cbor;
+#[path = "Federation.rs"]
+mod federation;
+pub use federation::*;
 #[path = "Frame.rs"]
 mod frame;
 #[path = "Lifecycle.rs"]

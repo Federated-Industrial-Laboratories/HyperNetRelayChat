@@ -6,6 +6,8 @@ pub(crate) mod continuity;
 mod inspection;
 #[path = "Lifecycle.rs"]
 pub(crate) mod lifecycle;
+#[path = "Proofs.rs"]
+pub mod proofs;
 use crate::{
     clock::TimeBounds,
     home::{self, types::*},
@@ -52,6 +54,31 @@ pub(crate) fn authenticate(
     verified: &VerifiedAction,
     session: &AuthenticatedSession,
 ) -> Domain<EndpointRecord> {
+    let current = authenticate_source(db, verified, session)?;
+    if let Actor::Delegated {
+        represented,
+        represented_security_generation,
+        ..
+    } = verified.action().actor
+    {
+        let generation: Option<u64> = db
+            .query_row(
+                "SELECT security FROM hrc_accounts WHERE id=?1",
+                [represented.to_string()],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if generation != Some(represented_security_generation) {
+            return deny("RepresentedBinding");
+        }
+    }
+    Ok(current)
+}
+pub(crate) fn authenticate_source(
+    db: &Connection,
+    verified: &VerifiedAction,
+    session: &AuthenticatedSession,
+) -> Domain<EndpointRecord> {
     let actor = &verified.action().actor;
     let Some(current) = endpoint(db, session.acting.account, session.acting.endpoint)? else {
         return deny("EndpointDisabled");
@@ -78,6 +105,9 @@ pub(crate) fn authenticate(
         ..
     } = actor
     {
+        if represented.origin != session.acting.account.origin {
+            return Ok(current);
+        }
         let generation: Option<u64> = db
             .query_row(
                 "SELECT security FROM hrc_accounts WHERE id=?1",
@@ -178,6 +208,14 @@ pub(crate) fn register(
     };
     let key = VerifyingKey::from_bytes(r.endpoint_key.as_bytes())
         .map_err(|_| rusqlite::Error::InvalidQuery)?;
+    db.execute(
+        "INSERT INTO federation_bindings VALUES(?1,?2,?3)",
+        params![
+            r.account.to_string(),
+            r.endpoint.as_hex(),
+            encode(&binding)?
+        ],
+    )?;
     let nickname = format!("account-{}", &r.account.local.as_hex()[..12]);
     db.execute("INSERT INTO hrc_accounts(id,account,class,recovery,security,revision,nickname,lookup) VALUES(?1,?2,?3,?4,1,1,?5,?5)",params![r.account.to_string(),encode(&r.account)?,class,r.recovery_key.as_bytes(),nickname])?;
     db.execute(
@@ -242,6 +280,7 @@ pub(crate) fn operate(db: &Transaction<'_>, action: &Action, now: TimeBounds) ->
                     action.actor.acting().account.to_string()
                 ],
             )?;
+            crate::federation::mark_identity_changed(db, action.actor.acting().account)?;
         }
         Operation::PresenceSet => {
             let body: Presence = unpack(&action.body)?;

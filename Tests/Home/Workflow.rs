@@ -1,6 +1,8 @@
 use super::*;
 #[path = "../Confidential/Workflow.rs"]
 mod confidential;
+#[path = "../Federation/Workflow.rs"]
+mod federation;
 #[path = "../Identity/Lifecycle.rs"]
 mod lifecycle;
 use crate::{conversations, delegation, identity, messaging, moderation};

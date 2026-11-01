@@ -29,12 +29,90 @@ struct Shared {
     cancel: AtomicBool,
     search_pending: AtomicBool,
     stream: Mutex<Option<Arc<crate::hypernet::Stream>>>,
+    queue: Mutex<QueueBudget>,
+}
+#[derive(Default)]
+struct QueueBudget {
+    closed: bool,
+    pending: usize,
 }
 pub struct Controller {
     shared: Arc<Shared>,
-    sender: SyncSender<(u64, Command)>,
+    sender: SyncSender<Queued>,
+    local_sender: SyncSender<Queued>,
     worker: Option<thread::JoinHandle<()>>,
     next_request: AtomicU64,
+}
+struct Queued {
+    id: u64,
+    command: Command,
+    admission_end: Instant,
+}
+#[derive(Debug, PartialEq, Eq)]
+enum Admission {
+    Run,
+    Wait,
+    Expired,
+}
+impl Queued {
+    fn local(command: &Command) -> bool {
+        matches!(
+            command,
+            Command::SaveDraft { .. }
+                | Command::SetPreferences(_)
+                | Command::SetRoomPreferences { .. }
+                | Command::CloseSearch
+                | Command::AbandonPending { .. }
+                | Command::TrustContact { .. }
+        )
+    }
+    fn new(id: u64, command: Command) -> Self {
+        Self {
+            id,
+            command,
+            admission_end: Instant::now() + Duration::from_secs(30),
+        }
+    }
+    fn admission(&self, desired: bool, online: bool, now: Instant) -> Admission {
+        let draft_only = matches!(&self.command, Command::Send { grant: Some(grant), .. }
+            if grant.scope.mode == delegation::Mode::Draft);
+        let effect = !draft_only
+            && matches!(
+                self.command,
+                Command::Send { .. }
+                    | Command::MarkRead { .. }
+                    | Command::CreateRoom { .. }
+                    | Command::CreatePrivateGroup { .. }
+                    | Command::CreateDirect { .. }
+                    | Command::Invite { .. }
+                    | Command::CryptoEnrol
+                    | Command::CryptoPublish { .. }
+                    | Command::CryptoInitialise { .. }
+                    | Command::CryptoCommit { .. }
+                    | Command::CryptoSync { .. }
+                    | Command::Join(_)
+                    | Command::Leave(_)
+                    | Command::SetTopic { .. }
+                    | Command::SetNickname(_)
+                    | Command::SetPresence(_)
+                    | Command::SetFilter { .. }
+                    | Command::SetRestriction { .. }
+                    | Command::CreateGrant(_)
+                    | Command::ChangeGrant { .. }
+                    | Command::DecideApproval { .. }
+                    | Command::SubmitCandidate(_)
+            );
+        // Deliberately offline commands retain their existing refusal/local-draft behaviour.
+        if !effect || !desired {
+            Admission::Run
+        } else if now >= self.admission_end {
+            Admission::Expired
+        } else if online {
+            Admission::Run
+        } else {
+            Admission::Wait
+        }
+    }
 }
 impl Controller {
     pub fn open(path: &Path) -> Result<Self> {
@@ -44,17 +122,24 @@ impl Controller {
         if !cache::validate_preferences(&preferences) {
             return Err(Error::Storage);
         }
-        let rooms = cache::rooms(&mut client.store).map_err(|_| Error::Storage)?;
-        let filters = cache::filters(&mut client.store).map_err(|_| Error::Storage)?;
+        let rooms = cache::rooms(&mut client.store)
+            .map_err(|_| Error::Storage)?
+            .into_iter()
+            .filter(|room| room.room.home == client.profile.active_server().home)
+            .collect();
+        let filters = cache::filters(&mut client.store, client.profile.active_server().home)
+            .map_err(|_| Error::Storage)?;
         let snapshot = Snapshot {
             revision: 0,
             account: client.profile.registration.account,
-            home: client.profile.server.home,
+            home: client.profile.active_server().home,
+            services: client.profile.service_choices(),
             classification: client.profile.registration.classification.clone(),
             nickname: String::new(),
             motd: String::new(),
             connection: ConnectionState::Offline,
             privacy: None,
+            federation_privacy: None,
             rooms,
             selected: None,
             search: None,
@@ -76,8 +161,10 @@ impl Controller {
             cancel: AtomicBool::new(false),
             search_pending: AtomicBool::new(false),
             stream: Mutex::new(None),
+            queue: Mutex::new(QueueBudget::default()),
         });
-        let (sender, receiver) = mpsc::sync_channel(32);
+        let (sender, receiver) = mpsc::sync_channel::<Queued>(32);
+        let (local_sender, local_receiver) = mpsc::sync_channel::<Queued>(32);
         let state = Arc::clone(&shared);
         let worker = thread::Builder::new()
             .name("hrc-client".into())
@@ -101,50 +188,69 @@ impl Controller {
                     w.error(e);
                 }
                 w.publish();
+                let mut held: Option<Queued> = None;
                 while !w.shared.stop.load(Ordering::Acquire) {
                     if w.shared.disconnect.swap(false, Ordering::AcqRel) {
                         w.offline();
                     }
-                    match receiver.recv_timeout(Duration::from_millis(100)) {
-                        Ok((id, command)) => {
-                            w.request = Some(id);
-                            let search =
-                                matches!(command, Command::Search(_) | Command::NextSearchPage);
-                            let result = w.command(command);
-                            if search {
-                                w.shared.search_pending.store(false, Ordering::Release);
+                    w.drain_local(&local_receiver, 4);
+                    if w.shared.stop.load(Ordering::Acquire) {
+                        break;
+                    }
+                    if w.shared.disconnect.swap(false, Ordering::AcqRel) {
+                        w.offline();
+                    }
+                    if let Some(queued) = &held {
+                        let online = w.snapshot.connection == ConnectionState::Online
+                            && w.client.session().is_ok();
+                        match queued.admission(w.desired, online, Instant::now()) {
+                            Admission::Wait => {
+                                w.tick();
+                                // Stop/disconnect retain their reserved atomic control path.
+                                thread::sleep(Duration::from_millis(25));
+                                continue;
                             }
-                            w.complete(id, result);
-                            w.request = None;
-                            w.operation = None;
-                            w.delivery_room = None;
+                            Admission::Expired => {
+                                let queued = held.take().expect("held command");
+                                w.admission_expired(queued.id);
+                                continue;
+                            }
+                            Admission::Run => {}
+                        }
+                        // A reconnect can finish after admission expiry; the check above is
+                        // repeated before this one consumption, never after an effect begins.
+                        let queued = held.take().expect("held command");
+                        w.run_command(queued);
+                        continue;
+                    }
+                    match receiver.recv_timeout(Duration::from_millis(100)) {
+                        Ok(queued) => {
+                            w.dequeued();
+                            let online = w.snapshot.connection == ConnectionState::Online
+                                && w.client.session().is_ok();
+                            if queued.admission(w.desired, online, Instant::now()) == Admission::Wait {
+                                w.snapshot.status = Some(Status {
+                                    request_id: Some(queued.id),
+                                    code: "CommandWaitingForConnection".into(),
+                                    detail: "Waiting for the current connection before starting this command.".into(),
+                                });
+                                w.publish();
+                            }
+                            held = Some(queued);
                         }
                         Err(mpsc::RecvTimeoutError::Disconnected) => break,
-                        Err(mpsc::RecvTimeoutError::Timeout) => {
-                            if w.desired && w.client.session().is_err() && Instant::now() >= w.retry
-                            {
-                                if let Err(e) = w.connect() {
-                                    w.error(e);
-                                }
-                                w.publish();
-                            } else if w.client.session().is_ok()
-                                && w.poll.elapsed() >= Duration::from_secs(5)
-                            {
-                                w.poll = Instant::now();
-                                if let Err(e) = w.refresh() {
-                                    w.error(e);
-                                }
-                                w.publish();
-                            }
-                        }
+                        Err(mpsc::RecvTimeoutError::Timeout) => w.tick(),
                     }
                 }
-                w.client.disconnect();
+                w.offline();
+                // Shutdown closes admission under the queue mutex before this final finite drain.
+                w.drain_local(&local_receiver, 32);
             })
             .map_err(|_| Error::Configuration)?;
         Ok(Self {
             shared,
             sender,
+            local_sender,
             worker: Some(worker),
             next_request: AtomicU64::new(1),
         })
@@ -185,16 +291,42 @@ impl Controller {
             }
             self.shared.cancel.store(false, Ordering::Release);
         }
-        match self.sender.try_send((id, command)) {
+        let result = (|| {
+            let mut queue = self
+                .shared
+                .queue
+                .lock()
+                .map_err(|_| DispatchError::Stopped)?;
+            if queue.closed {
+                return Err(DispatchError::Stopped);
+            }
+            if queue.pending >= 32 {
+                return Err(DispatchError::QueueFull);
+            }
+            let sender = if Queued::local(&command) {
+                &self.local_sender
+            } else {
+                &self.sender
+            };
+            queue.pending += 1;
+            match sender.try_send(Queued::new(id, command)) {
+                Ok(()) => Ok(()),
+                Err(error) => {
+                    queue.pending -= 1;
+                    Err(match error {
+                        TrySendError::Full(_) => DispatchError::QueueFull,
+                        TrySendError::Disconnected(_) => DispatchError::Stopped,
+                    })
+                }
+            }
+        })();
+        match result {
             Ok(()) => Ok(id),
             Err(error) => {
                 if search {
                     self.shared.search_pending.store(false, Ordering::Release);
                 }
-                Err(match error {
-                    TrySendError::Full(_) => DispatchError::QueueFull,
-                    TrySendError::Disconnected(_) => DispatchError::Stopped,
-                })
+                Err(error)
             }
         }
     }
@@ -211,7 +343,11 @@ impl Controller {
         }
     }
     pub fn shutdown(&mut self) {
-        self.shared.stop.store(true, Ordering::Release);
+        {
+            let mut queue = self.shared.queue.lock().unwrap_or_else(|e| e.into_inner());
+            queue.closed = true;
+            self.shared.stop.store(true, Ordering::Release);
+        }
         self.disconnect();
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
@@ -272,18 +408,73 @@ struct Worker {
     poll_room: usize,
 }
 impl Worker {
-    fn complete(&mut self, id: u64, result: Result<()>) {
+    fn dequeued(&self) {
+        let mut queue = self.shared.queue.lock().unwrap_or_else(|e| e.into_inner());
+        queue.pending -= 1;
+    }
+    fn drain_local(&mut self, receiver: &mpsc::Receiver<Queued>, limit: usize) {
+        for _ in 0..limit {
+            let Ok(queued) = receiver.try_recv() else {
+                break;
+            };
+            self.dequeued();
+            self.run_command(queued);
+        }
+    }
+    fn run_command(&mut self, queued: Queued) {
+        self.request = Some(queued.id);
+        let search = matches!(queued.command, Command::Search(_) | Command::NextSearchPage);
+        let result = self.command(queued.command);
+        if search {
+            self.shared.search_pending.store(false, Ordering::Release);
+        }
+        self.complete(queued.id, result);
+        self.request = None;
+        self.operation = None;
+        self.delivery_room = None;
+    }
+    fn tick(&mut self) {
+        if self.desired && self.client.session().is_err() && Instant::now() >= self.retry {
+            if let Err(error) = self.connect() {
+                self.error(error);
+            }
+            self.publish();
+        } else if self.client.session().is_ok() && self.poll.elapsed() >= Duration::from_secs(5) {
+            self.poll = Instant::now();
+            if let Err(error) = self.refresh() {
+                self.error(error);
+            }
+            self.publish();
+        }
+    }
+    fn admission_expired(&mut self, id: u64) {
+        let status = Status {
+            request_id: Some(id),
+            code: "CommandAdmissionExpired".into(),
+            detail: "The command did not start before its connection admission deadline.".into(),
+        };
+        self.record_completion(id, Some(status.clone()));
+        self.snapshot.status = Some(status);
+        self.publish();
+    }
+    fn record_completion(&mut self, id: u64, error: Option<Status>) {
         self.snapshot.completions.push(Completion {
             request_id: id,
-            error: result.as_ref().err().map(|e| Status {
-                request_id: Some(id),
-                code: e.code().into(),
-                detail: e.to_string(),
-            }),
+            error,
         });
         if self.snapshot.completions.len() > 64 {
             self.snapshot.completions.remove(0);
         }
+    }
+    fn complete(&mut self, id: u64, result: Result<()>) {
+        self.record_completion(
+            id,
+            result.as_ref().err().map(|e| Status {
+                request_id: Some(id),
+                code: e.code().into(),
+                detail: e.to_string(),
+            }),
+        );
         if let Err(error) = result {
             self.error(error);
         }
@@ -332,6 +523,7 @@ impl Worker {
         }
         self.snapshot.inspection.stale = true;
         self.snapshot.privacy = None;
+        self.snapshot.federation_privacy = None;
     }
     fn offline(&mut self) {
         self.desired = false;
@@ -445,6 +637,7 @@ impl Worker {
             }
         }
         self.snapshot.privacy = Some(self.client.session()?.privacy());
+        self.snapshot.federation_privacy = self.client.session()?.remote.clone();
         self.caught_up.clear();
         self.refresh()?;
         self.snapshot.connection = ConnectionState::Online;

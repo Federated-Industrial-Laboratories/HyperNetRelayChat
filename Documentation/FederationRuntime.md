@@ -8,13 +8,15 @@ community rooms, encrypted direct conversations and encrypted private groups.
 Each shared room has one authoritative home service. There is no onward
 forwarding, third-network origin, replicated writer or direct Internet fallback.
 
-The current implementation provides bounded signed federation object primitives,
-the HyperNet companion adapter, guarded home transactions, local endpoint
-continuity and confidential-conversation operations. It does not yet implement
-the gateway exchange, remote admission or foreign execution described here.
-In particular, the current home executor refuses agreement-bearing Actions and
-the ordinary service handshake authenticates locally enrolled endpoints only.
-This document does not claim a shipped or qualified federation runtime.
+The home/domain implementation includes the signed objects, dual-signature
+agreement acceptance, explicit remote admissions, verified origin continuity,
+purpose-bound bootstrap and shared local/remote execution. Tests use two guarded
+home stores and actual signatures, delegation and MLS operations. Transport
+evidence in those domain tests is synthetic: it does not establish that both
+HyperNet legs work. The gateway/client integration and real two-network
+qualification must complete before this document can describe a shipped or
+qualified federation runtime. The ordinary local handshake still authenticates
+locally enrolled endpoints only; remote execution has its own verified context.
 
 ## 1. Roles and the two transport legs
 
@@ -60,8 +62,8 @@ agreement references and operation IDs retain their existing encodings.
 bytes. Maps reject missing, unknown and duplicate fields. No compression,
 caller-selected public address or embedded executable content is supported.
 
-The required capability is `federation-runtime-1`. The following field drafts
-complete the currently unused federation primitives; they are not a compatible
+The required capability is `federation-runtime-1`. The following schemas
+complete the previously unused federation primitives; they are not a compatible
 reinterpretation of the earlier incomplete federation schema. Implementation
 must update the federation wire tables and vectors together. Existing local
 Action, endpoint-binding and endpoint-lifecycle objects keep their encodings.
@@ -82,6 +84,7 @@ retain `[1, role, object]` and the existing `HRC/1` external AAD.
 | 22 | `origin-identity-checkpoint` | The pinned origin service |
 | 23 | `federation-control` | Gateway for requests; receiving service for results/proof authorizations; agreement administration for administrative requests |
 | 24 | `origin-identity-page` | The pinned origin service |
+| 25 | `identity-freshness` | The pinned origin service; bounded identity observation, not endpoint transport authority |
 
 Role-specific tagged variants are closed enums. Verification selects the
 expected variant and signer role from the current exchange before interpreting
@@ -132,6 +135,13 @@ administrations sign the same payload. Room consent is also explicit at the
 home. The first profile fixes remote admission as per-endpoint approval and
 forbids onward sharing; an agreement cannot weaken either rule.
 
+A room identity is bound to one foreign origin service when it is first shared.
+That binding survives agreement revision, expiry and withdrawal. An agreement
+with a different foreign origin must use a separate room identity, so retained
+history cannot become a bridge to a third network. Each service retains at most
+1,024 such bindings; exceeding that bound refuses the new agreement without
+changing existing authority. Different rooms may use different bilateral peers.
+
 For a first direct room, both administrations can accept that empty agreement,
 approve the foreign endpoint with an empty room scope and verify its identity.
 A home user then creates the direct room/invitation through the ordinary home
@@ -149,25 +159,26 @@ setting grants plaintext keys for encrypted rooms or overrides endpoint archive
 retention. Agreement expiry must not exceed either administration's accepted
 consent expiry; HyperNet renewal remains an independent explicit operation.
 
-Codes 80-84 retain their names. Codes 85-89 are reserved below. Administration
+Codes 80-84 retain their names. Codes 85-89 complete the profile below. Administration
 requires a locally authenticated service-administration capability, not an
 ordinary room moderator or a gateway acting as an account.
 
 | Code | Operation | Body and result |
 | --- | --- | --- |
-| 80 | FederationPropose | `{agreement: Blob, expectedRevision}`; validates the local administration signature and stores a bounded pending proposal. |
-| 81 | FederationAccept | `{agreement: Blob, counterpartSignature: Blob, expectedRevision}`; both signatures must cover identical payload bytes; commits local acceptance. |
+| 80 | FederationPropose | Reserved transport operation. Current local administration validates and signs an agreement proposal file while the service is stopped; no network proposal handler is enabled. |
+| 81 | FederationAccept | Reserved transport operation. Current local administration supplies both signed agreement files and independent pins to guarded acceptance; both signatures must cover identical payload bytes. |
 | 82 | FederationWithdraw | `{agreement, request, reason}`; `reason` is a closed enum `administrative`, `expiry` or `identityChange`; returns the signed local stop/home barrier state. |
 | 83 | FederationExchange | The exact envelope in section 7; produces the original Action's home-signed response. |
 | 84 | FederationChallenge | `{agreement, subject, admission}`; authenticated gateway asks for a purpose-bound home challenge. |
 | 85 | FederationAdmitEndpoint | `{agreement, account, endpoint, bindingDigest, checkpoint, rooms, expiresMs, expectedRevision}`; home administration creates or replaces an explicit remote admission. |
-| 86 | FederationWithdrawEndpoint | `{agreement, admission, expectedRevision}`; withdraws that admission and applies dependent barriers. |
-| 87 | FederationIdentityPage | `{agreement, account, checkpoint, after, limit, authorization}`; returns an origin-signed bounded immutable proof page. |
-| 88 | FederationInspect | `{agreement, after, limit}`; bounded authorized agreement/admission/withdrawal inspection, not a public account directory. |
+| 86 | FederationWithdrawEndpoint | Local administration supplies exact `{id, revision}` admission reference; withdraws that admission and applies dependent barriers. No general gateway mutation is enabled. |
+| 87 | FederationIdentityPage | Closed `IdentityTransfer`: `read {account, checkpoint, after, limit, authorization}` returns an origin-signed page; `import {checkpoint: Blob, page: Blob}` updates only already-pinned identities referenced by this gateway's current admissions; `freshness {lease: Blob}` supplies a role-25 observation for exact imported heads. |
+| 88 | FederationInspect | Gateway request `{account, endpoint, bindingDigest}` finds one exact current admission under the outer agreement. Local administrative inspection separately reads an exact agreement reference, including expiry/withdrawal. Neither is a public account directory. |
 | 89 | FederationSession | `{request: Blob, endpointBinding: Blob, challenge: Blob, originAssertion: Blob}`; completes endpoint bootstrap and returns the home-signed RemoteSessionReady. |
 
-Codes 80-82 and 84-89 can be carried in a `FederationControl` object for
-administration or gateway control, without inventing an account actor. Its
+Enabled gateway operations use a `FederationControl` object without inventing
+an account actor. Reserved administrative transport codes are explicitly
+unsupported; the local stopped-service workflow is authoritative. Its
 closed variants are:
 
 ```
@@ -190,13 +201,22 @@ retryable pre-admission failure does not consume the mutation identity.
 Code 83 is the transport envelope, not a second Action around the original
 Action. Code 84 has a five-second challenge result, not a durable chat effect.
 
+Each forwarded query uses one serial gateway stream. Cancelling it closes that
+query's gateway stream and propagates the receiving home's cancellation token;
+the existing authenticated source control remains correlated with the original
+query. This does not manufacture a home-signed SearchCancel Action outcome.
+Cancellation or disconnection cannot change a previously committed effect.
+
 An admission result is
-`{id, revision, home, origin, agreement, acting: EndpointActor, checkpoint,
-rooms, notBeforeMs, expiresMs, state}`. State is `active` or `withdrawn`;
+`{reference: {id, revision}, home, origin, agreement, acting: EndpointActor,
+checkpoint, rooms, notBeforeMs, expiresMs, withdrawn}`. `withdrawn` is boolean;
 rooms are unique, at most 32, and a subset of the accepted agreement. Expiry is
 at most seven days and no later than the agreement expiry. Revision changes are
 monotonic; changing an endpoint generation requires fresh explicit approval.
 The zero `expectedRevision` means create; otherwise it must match current state.
+An identical retry of the latest admission request returns the original
+admission and revision while it remains current. Changed scope under the old
+revision conflicts. Withdrawal cannot be undone by replaying an earlier request.
 An admission names only the acting endpoint. It does not grant represented-user
 rights or permit every agent associated with that account.
 
@@ -524,11 +544,52 @@ transaction are unchanged by forwarding.
 
 ## 9. Withdrawal, expiry and recovery
 
+An identity checkpoint can remain valid for seven days as a cached proof. It
+does not establish that its endpoint list is still current for new encrypted
+publication. `IdentityFreshness` is a separate role-25 signed object:
+`{profile, home, origin, agreement, checkpoints, issuedMs, expiresMs}`. Its sorted
+unique checkpoint references name at most 32 origin accounts. Its lifetime is
+positive and at most five seconds, bounded further by the agreement and proof
+expiry. It conveys identity currentness only; it cannot authorize a sender or
+replace either HyperNet transport check.
+
+Explicit origin checkpoint export records a persistent watch for that account
+and agreement, with at most 256 watches per agreement. Continuity changes and
+nickname changes mark watched identities dirty in the same transaction as the
+local change. The origin service propagates changed signed checkpoints and
+bounded pages over its admitted gateway, acknowledges the watch only after the
+home confirms complete import, then signs short observations of the exact heads
+still current at the origin. Dirty-first work and account-ordered round-robin
+renewal are separate bounded queries; a busy account cannot hide untouched
+recipients from renewal. No network operation holds the home writer.
+
+The receiving home accepts observations only for independently pinned,
+completely imported identities in that gateway's admission scope. It checks
+the original signed expiry and records a conservative receiving boot deadline.
+Replaying the same observation cannot extend that deadline; restarting the home
+invalidates received observations. Agreement revision changes also invalidate
+them. The encrypted send and final commit boundary check all foreign acting,
+represented and operator identities. Missing or expired freshness creates an
+availability barrier, visible through `sendBarrier`, without adding a required
+MLS removal. Restoring freshness of unchanged heads releases that temporary
+barrier. An exact pending ciphertext may then be retried without advancing its
+sender ratchet again.
+
+This bounds an undisclosed origin identity change to the remaining original
+five-second observation lifetime. Receipt of the actual changed continuity
+proof immediately applies the stronger grant, approval and MLS removal barriers
+below. A disconnected origin cannot keep renewing observations, and a large or
+slow watch workload fails closed when renewal misses its deadline.
+
 Either administration records a durable local stop before sending a withdrawal
-request. The home commits the stop at a home position and returns
-`{agreement, request, requestDigest, barrierPosition, state: withdrawnAtHome}`
-under its service signature. A local state without that acknowledgement is
-`withdrawalRequested`; it must not claim a globally acknowledged stop.
+request. The home commits the stop at a home position and returns an
+`AgreementState` with `withdrawn: true` and `barrierPosition` inside the correlated
+home-signed `FederationControl::Result`. The origin verifies the exact request,
+signer, accepted agreement and original validity interval before retaining that
+home barrier and the signed acknowledgement. Its own local stop has no home
+position. The CLI reports `StoppedLocally` until it can report
+`HomeWithdrawalAcknowledged`; `--local-only` explicitly omits notification.
+Failure to notify leaves the durable local stop in place.
 
 Withdrawal, expired agreement/admission and verified endpoint/account recovery
 block affected new exchange and queued effects. In the same home transaction,
@@ -569,6 +630,7 @@ actor/represented-account budgets into a single gateway identity.
 | Forwarded Action | At most 48 KiB signed ordinary bytes or 224 KiB signed crypto bytes, plus a final exact envelope-size check before exposure. Other fixed evidence consumes at most 16 KiB; crypto keeps additional headroom. Oversize refuses before ratchet/outbox commit. |
 | Evidence | Checkpoint at most 8 KiB; assertion at most 8 KiB including at most three references; challenge/binding at most 2 KiB each; full chain limits from section 5. |
 | Proof cache | At most 256 imported accounts, eight active endpoints per account and 64 MiB aggregate verified proof storage. Do not evict evidence referenced by live admissions/rosters to make room; refuse capacity explicitly. |
+| Identity propagation | At most 256 persistent watched accounts per agreement; pages and freshness batches at most 32 accounts. Freshness lasts at most five seconds and cannot survive a home restart without new authenticated observation. Missed renewal is an availability barrier, not permission to retain stale recipients. |
 | Pending proof work | One page fetch per peer, two service-wide; at most 256 KiB unverified staging. No proof fetch holds a home transaction or extends a challenge. |
 | Checks and handshakes | At most four fresh checks per companion, one per incoming stream, including ordinary clients; respect the upstream serialized endpoint read. At most four HRC handshakes service-wide. |
 | Exchange | One active forwarded operation per gateway stream; queue before challenge issuance. At most four pending home challenges service-wide, two per gateway and one per exact subject. |

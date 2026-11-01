@@ -133,15 +133,23 @@ pub struct SearchView {
     pub cancelled: bool,
 }
 #[derive(Clone, Debug)]
+pub struct ServiceChoice {
+    pub home: ServiceId,
+    pub agreement: Option<AgreementRef>,
+    pub selected: bool,
+}
+#[derive(Clone, Debug)]
 pub struct Snapshot {
     pub revision: u64,
     pub account: AccountId,
     pub home: ServiceId,
+    pub services: Vec<ServiceChoice>,
     pub classification: AccountClass,
     pub nickname: String,
     pub motd: String,
     pub connection: ConnectionState,
     pub privacy: Option<crate::hypernet::Privacy>,
+    pub federation_privacy: Option<crate::protocol::RemoteSessionReady>,
     pub rooms: Vec<conversations::Summary>,
     pub selected: Option<RoomView>,
     pub search: Option<SearchView>,
@@ -168,6 +176,7 @@ pub enum RestrictionKind {
 pub enum Command {
     Connect,
     Disconnect,
+    SelectService(Option<AgreementRef>),
     Refresh,
     SelectRoom(RoomId),
     OpenEvent {

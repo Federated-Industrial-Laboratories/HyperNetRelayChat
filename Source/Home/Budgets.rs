@@ -123,6 +123,9 @@ pub(super) fn admit(db: &Transaction<'_>, action: &Action, now: u64) -> Domain<b
             cost: 60_000,
         });
     }
+    evaluate(db, budgets, now)
+}
+fn evaluate(db: &Transaction<'_>, budgets: Vec<Budget>, now: u64) -> Domain<bool> {
     let mut updated = Vec::new();
     for budget in budgets {
         let current: Option<(u64, u64)> = db
@@ -148,4 +151,17 @@ pub(super) fn admit(db: &Transaction<'_>, action: &Action, now: u64) -> Domain<b
         db.execute("INSERT INTO hrc_budgets VALUES(?1,?2,?3) ON CONFLICT(key) DO UPDATE SET credit=excluded.credit,updated=excluded.updated",params![key,credit,now])?;
     }
     Ok(true)
+}
+
+pub(crate) fn federation_budget(db: &Transaction<'_>, gateway: Id, now: u64) -> Domain<bool> {
+    evaluate(
+        db,
+        vec![Budget {
+            key: format!("federation:{gateway}"),
+            capacity: 4000,
+            rate: 2000,
+            cost: 1000,
+        }],
+        now,
+    )
 }

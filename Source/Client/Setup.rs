@@ -64,6 +64,8 @@ pub fn create(
     .map_err(|_| Error)?;
     outbox::initialize(&mut store).map_err(|_| Error)?;
     let profile = Profile {
+        federation: None,
+        agreements: Vec::new(),
         server,
         registration,
         companion,

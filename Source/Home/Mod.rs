@@ -18,6 +18,7 @@ use crate::{
     protocol::*,
     storage::{self, Commit, Store},
 };
+pub(crate) use budgets::federation_budget;
 pub use execution::read_operation as is_read_operation;
 pub use execution::{Resolve, ResolveResult};
 #[path = "Inspection.rs"]
@@ -36,6 +37,7 @@ pub struct Home {
     pub(crate) home: ServiceId,
     pub(crate) signer: SigningKey,
     pub(crate) information: ServiceInformation,
+    pub(crate) federation_boot: Id,
 }
 impl Home {
     pub fn create(mut store: Store, home: ServiceId, signer: SigningKey) -> Result<Self> {
@@ -54,11 +56,14 @@ impl Home {
         })?;
         crate::identity::continuity::initialize(&mut store, home)?;
         crate::confidential::initialize(&mut store)?;
+        crate::federation::initialize(&mut store)?;
+        crate::federation::reset_freshness(&mut store)?;
         Ok(Self {
             store,
             home,
             signer,
             information: ServiceInformation::default(),
+            federation_boot: Id::random().map_err(|_| Error::Invalid)?,
         })
     }
     pub fn open(mut store: Store, home: ServiceId, signer: SigningKey) -> Result<Self> {
@@ -80,11 +85,14 @@ impl Home {
         }
         crate::identity::continuity::initialize(&mut store, home)?;
         crate::confidential::initialize(&mut store)?;
+        crate::federation::initialize(&mut store)?;
+        crate::federation::reset_freshness(&mut store)?;
         Ok(Self {
             store,
             home,
             signer,
             information: ServiceInformation::default(),
+            federation_boot: Id::random().map_err(|_| Error::Invalid)?,
         })
     }
     pub fn with_motd(mut self, motd: String) -> Result<Self> {
@@ -191,6 +199,9 @@ impl Home {
         clock: TimeBounds,
         permit: &dyn Fn() -> bool,
     ) -> Result<RetryWindow> {
+        if endpoint.acting.account.origin != self.home.network {
+            return Err(Error::Refused("LocalEndpointOrigin"));
+        }
         let id = Id::random().map_err(|_| Error::Invalid)?;
         let result=self.store.write(|db|{
             let now=clock.refresh().map_err(|_|rusqlite::Error::InvalidQuery)?;
@@ -219,7 +230,7 @@ impl Home {
             )?;
             now.after_floor(floor)
                 .map_err(|_| rusqlite::Error::InvalidQuery)?;
-            retention::due(db, now.upper_ms)
+            Ok(retention::due(db, now.upper_ms)? || db.query_row("SELECT EXISTS(SELECT 1 FROM federation_agreements WHERE withdrawn=0 AND expires<=?1) OR EXISTS(SELECT 1 FROM federation_admissions WHERE withdrawn=0 AND expires<=?1)",[now.upper_ms],|r|r.get::<_,bool>(0))?)
         })?;
         if !due {
             return Ok(());
@@ -234,6 +245,7 @@ impl Home {
             if now.after_floor(floor).is_err() {
                 return Err(rusqlite::Error::InvalidQuery);
             }
+            crate::federation::expire_in(db, now)?;
             retention::clean(db, now.upper_ms)?;
             db.execute(
                 "UPDATE hrc_meta SET clock_floor=?1 WHERE singleton=1",

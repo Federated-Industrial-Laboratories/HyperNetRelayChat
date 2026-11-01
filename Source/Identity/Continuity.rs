@@ -131,6 +131,7 @@ pub(crate) fn append(
         "UPDATE identity_accounts SET head=?1,records=records+1,bytes=bytes+?2 WHERE account=?3",
         params![hash.as_bytes(), encoded.len(), account.to_string()],
     )?;
+    crate::federation::mark_identity_changed(db, account)?;
     Ok(position)
 }
 pub(crate) fn anchor(

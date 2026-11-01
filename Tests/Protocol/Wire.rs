@@ -401,6 +401,11 @@ fn forwarding_preserves_a_combined_depth_bound() {
     let signed = sign_action(&action, &key).unwrap();
     assert!(verify_action(&signed, &key.verifying_key()).is_ok());
     let envelope = FederationEnvelope {
+        profile: FEDERATION_PROFILE,
+        admission: AdmissionRef {
+            id: id(25),
+            revision: 1,
+        },
         agreement: AgreementRef {
             id: id(20),
             revision: 1,

@@ -10,6 +10,8 @@ fn offline(f: &Fixture) -> client::Client {
     let key = service::files::create_key(&f.root.join("Endpoint.key")).unwrap();
     let a = action();
     let profile = client::Profile {
+        federation: None,
+        agreements: Vec::new(),
         server: service::Descriptor {
             version: 1,
             home: a.home,
@@ -114,6 +116,7 @@ fn encrypted_archive_search_restart_filters_and_expiry_preserve_authenticated_ev
     let mut state = view(room, e.timestamp_ms);
     cache::save_rooms(
         &mut client.store,
+        room.home,
         &[conversations::Summary {
             room,
             name: "private".into(),

@@ -11,7 +11,9 @@ mod context;
 #[path = "Ipc.rs"]
 mod ipc;
 
-pub use authority::{AuthorityCheck, AuthorityObservation, Disposition};
+pub use authority::{
+    AuthorityAttestation, AuthorityCheck, AuthorityIdentity, AuthorityObservation, Disposition,
+};
 pub use context::{
     Assurance, AuthorityCapability, ConnectionStatus, Direction, IncomingPeer, OutgoingPeer, Peer,
     Privacy, Provenance, RelayPath, Status, TransportProtection,

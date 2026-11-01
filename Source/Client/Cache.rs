@@ -24,15 +24,23 @@ pub(super) fn decode<T: DeserializeOwned>(v: &[u8]) -> rusqlite::Result<T> {
         .deserialized()
         .map_err(|_| rusqlite::Error::InvalidQuery)
 }
-pub(super) fn initialize(store: &mut Store) -> storage::Result<()> {
+pub(super) fn initialize(store: &mut Store, origin: ServiceId) -> storage::Result<()> {
     let version=store.read(TIMEOUT,|db| {let exists:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='client_cache_meta' AND type='table')",[],|r|r.get(0))?;if exists {db.query_row("SELECT version FROM client_cache_meta WHERE singleton=1",[],|r|r.get::<_,u64>(0)).map(Some)}else{Ok(None)}})?;
-    if version == Some(1) {
+    if version == Some(2) {
         return Ok(());
+    }
+    if version == Some(1) {
+        return store.write(|db| {
+            db.execute_batch("ALTER TABLE client_filters RENAME TO client_filters_v1; CREATE TABLE client_filters(home TEXT NOT NULL,subject TEXT NOT NULL,ignored INTEGER NOT NULL,muted INTEGER NOT NULL,PRIMARY KEY(home,subject));")?;
+            db.execute("INSERT INTO client_filters SELECT ?1,subject,ignored,muted FROM client_filters_v1", [origin.to_string()])?;
+            db.execute_batch("DROP TABLE client_filters_v1; UPDATE client_cache_meta SET version=2 WHERE singleton=1;")?;
+            Ok(Commit::new((), b"HRC.ClientCache.Schema.2".to_vec()))
+        });
     }
     if version.is_some() {
         return Err(storage::Error::InvalidInput);
     }
-    store.write(|db|{db.execute_batch("CREATE TABLE client_cache_meta(singleton INTEGER PRIMARY KEY CHECK(singleton=1),version INTEGER NOT NULL);INSERT INTO client_cache_meta VALUES(1,1);CREATE TABLE client_rooms(id TEXT PRIMARY KEY,summary BLOB NOT NULL,cursor BLOB,members BLOB,updated INTEGER NOT NULL DEFAULT 0,gap TEXT);CREATE TABLE client_events(id TEXT PRIMARY KEY,room TEXT NOT NULL,sequence INTEGER NOT NULL,created INTEGER NOT NULL,event BLOB NOT NULL,bytes INTEGER NOT NULL,UNIQUE(room,sequence));CREATE INDEX client_events_room ON client_events(room,sequence);CREATE TABLE client_preferences(id TEXT PRIMARY KEY,value BLOB NOT NULL);CREATE TABLE client_candidates(id TEXT PRIMARY KEY,action BLOB NOT NULL,expires INTEGER NOT NULL);CREATE TABLE client_filters(subject TEXT PRIMARY KEY,ignored INTEGER NOT NULL,muted INTEGER NOT NULL);")?;Ok(Commit::new((),b"HRC.ClientCache.Schema.1".to_vec()))})
+    store.write(|db|{db.execute_batch("CREATE TABLE client_cache_meta(singleton INTEGER PRIMARY KEY CHECK(singleton=1),version INTEGER NOT NULL);INSERT INTO client_cache_meta VALUES(1,2);CREATE TABLE client_rooms(id TEXT PRIMARY KEY,summary BLOB NOT NULL,cursor BLOB,members BLOB,updated INTEGER NOT NULL DEFAULT 0,gap TEXT);CREATE TABLE client_events(id TEXT PRIMARY KEY,room TEXT NOT NULL,sequence INTEGER NOT NULL,created INTEGER NOT NULL,event BLOB NOT NULL,bytes INTEGER NOT NULL,UNIQUE(room,sequence));CREATE INDEX client_events_room ON client_events(room,sequence);CREATE TABLE client_preferences(id TEXT PRIMARY KEY,value BLOB NOT NULL);CREATE TABLE client_candidates(id TEXT PRIMARY KEY,action BLOB NOT NULL,expires INTEGER NOT NULL);CREATE TABLE client_filters(home TEXT NOT NULL,subject TEXT NOT NULL,ignored INTEGER NOT NULL,muted INTEGER NOT NULL,PRIMARY KEY(home,subject));")?;Ok(Commit::new((),b"HRC.ClientCache.Schema.2".to_vec()))})
 }
 pub(super) fn preferences<T: DeserializeOwned + Default>(
     store: &mut Store,
@@ -81,17 +89,19 @@ pub(super) fn rooms(store: &mut Store) -> storage::Result<Vec<conversations::Sum
 }
 pub(super) fn save_rooms(
     store: &mut Store,
+    home: ServiceId,
     rooms: &[conversations::Summary],
 ) -> storage::Result<()> {
-    if rooms.len() > 256 {
+    if rooms.len() > 256 || rooms.iter().any(|room| room.room.home != home) {
         return Err(storage::Error::InvalidInput);
     }
     store.write(|db|{
   // Disappeared or inaccessible rooms cannot retain an apparently current view.
   let ids:std::collections::BTreeSet<_>=rooms.iter().map(|r|r.room.to_string()).collect();
   let mut stmt=db.prepare("SELECT id FROM client_rooms")?;let old=stmt.query_map([],|r|r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;drop(stmt);
-  for id in old {if !ids.contains(&id){db.execute("DELETE FROM client_events WHERE room=?1",[&id])?;db.execute("DELETE FROM client_rooms WHERE id=?1",[&id])?;}}
+  for id in old {let room:RoomId=id.parse().map_err(|_|rusqlite::Error::InvalidQuery)?;if room.home==home&&!ids.contains(&id){db.execute("DELETE FROM client_events WHERE room=?1",[&id])?;db.execute("DELETE FROM client_rooms WHERE id=?1",[&id])?;}}
   for room in rooms {db.execute("INSERT INTO client_rooms(id,summary) VALUES(?1,?2) ON CONFLICT(id) DO UPDATE SET summary=excluded.summary",params![room.room.to_string(),encode(room)?])?;if !room.joined {db.execute("DELETE FROM client_events WHERE room=?1",[room.room.to_string()])?;db.execute("UPDATE client_rooms SET cursor=NULL,members=NULL WHERE id=?1",[room.room.to_string()])?;}}
+  let count:u64=db.query_row("SELECT count(*) FROM client_rooms",[],|r|r.get(0))?;if count>256{return Err(rusqlite::Error::InvalidQuery);}
   Ok(Commit::new((),encode(&("HRC.ClientRooms",digest(&rooms.iter().map(encode).collect::<rusqlite::Result<Vec<_>>>()?.concat())))?))
  })
 }
@@ -247,12 +257,15 @@ pub(super) fn complete_candidate(store: &mut Store, id: Id) -> storage::Result<(
     })
 }
 
-pub(super) fn filters(store: &mut Store) -> storage::Result<Vec<crate::moderation::FilterState>> {
+pub(super) fn filters(
+    store: &mut Store,
+    home: ServiceId,
+) -> storage::Result<Vec<crate::moderation::FilterState>> {
     store.read(TIMEOUT, |db| {
         let mut stmt = db.prepare(
-            "SELECT subject,ignored,muted FROM client_filters ORDER BY subject LIMIT 256",
+            "SELECT subject,ignored,muted FROM client_filters WHERE home=?1 ORDER BY subject LIMIT 256",
         )?;
-        stmt.query_map([], |r| {
+        stmt.query_map([home.to_string()], |r| {
             Ok(crate::moderation::FilterState {
                 subject: r
                     .get::<_, String>(0)?
@@ -267,21 +280,25 @@ pub(super) fn filters(store: &mut Store) -> storage::Result<Vec<crate::moderatio
 }
 pub(super) fn save_filters(
     store: &mut Store,
+    home: ServiceId,
     filters: &[crate::moderation::FilterState],
 ) -> storage::Result<()> {
     if filters.len() > 256 {
         return Err(storage::Error::InvalidInput);
     }
-    let old = self::filters(store)?;
+    let old = self::filters(store, home)?;
     if encode(&old)? == encode(&filters)? {
         return Ok(());
     }
     store.write(|db| {
-        db.execute("DELETE FROM client_filters", [])?;
+        db.execute(
+            "DELETE FROM client_filters WHERE home=?1",
+            [home.to_string()],
+        )?;
         for f in filters {
             db.execute(
-                "INSERT INTO client_filters VALUES(?1,?2,?3)",
-                params![f.subject.to_string(), f.ignored, f.muted],
+                "INSERT INTO client_filters VALUES(?1,?2,?3,?4)",
+                params![home.to_string(), f.subject.to_string(), f.ignored, f.muted],
             )?;
         }
         let ignored: std::collections::BTreeSet<_> = filters
@@ -295,12 +312,14 @@ pub(super) fn save_filters(
             .collect::<rusqlite::Result<Vec<_>>>()?;
         drop(stmt);
         for event in events {
-            if matches!(
-                event.kind,
-                Operation::MessageSend | Operation::MessageReply | Operation::MessageAction
-            ) && crate::conversations::subjects(&event.actor)
-                .iter()
-                .any(|subject| ignored.contains(subject))
+            if event.room.home == home
+                && matches!(
+                    event.kind,
+                    Operation::MessageSend | Operation::MessageReply | Operation::MessageAction
+                )
+                && crate::conversations::subjects(&event.actor)
+                    .iter()
+                    .any(|subject| ignored.contains(subject))
             {
                 db.execute(
                     "DELETE FROM client_events WHERE id=?1",

@@ -109,6 +109,7 @@ pub(crate) fn restriction(
 }
 pub(crate) fn access(db: &Connection, action: &Action, now: TimeBounds) -> Domain<Access> {
     let room = target(action)?;
+    crate::federation::actor_admitted(db, action.actor.acting(), room, now)?;
     let data: Option<(u64, u64, u64, u8)> = db
         .query_row(
             "SELECT sequence,revision,earliest,mode FROM hrc_rooms WHERE id=?1",
@@ -441,6 +442,11 @@ fn list(db: &Transaction<'_>, action: &Action, now: TimeBounds) -> Domain<Outcom
     for row in rows {
         let (room, name, topic, revision, sequence, joined, read, history_from, mode, invited) =
             row?;
+        match crate::federation::actor_admitted(db, action.actor.acting(), room, now) {
+            Ok(()) => {}
+            Err(Fault::Reject(..)) => continue,
+            Err(e) => return Err(e),
+        }
         if restriction(db, room, &action.actor, 2, now)? {
             continue;
         }

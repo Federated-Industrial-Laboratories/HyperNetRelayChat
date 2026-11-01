@@ -21,6 +21,7 @@ pub enum FrameKind {
     DeviceProof = 15,
     DeviceReceipt = 16,
     CryptoResponse = 17,
+    FederationControl = 18,
 }
 impl FrameKind {
     pub fn maximum_bytes(self) -> usize {
@@ -55,6 +56,7 @@ impl TryFrom<u8> for FrameKind {
             15 => Ok(Self::DeviceProof),
             16 => Ok(Self::DeviceReceipt),
             17 => Ok(Self::CryptoResponse),
+            18 => Ok(Self::FederationControl),
             _ => Err(Error::Feature),
         }
     }

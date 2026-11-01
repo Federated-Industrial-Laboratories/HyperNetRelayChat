@@ -28,11 +28,13 @@ fn snapshot() -> Snapshot {
         revision: 0,
         account,
         home,
+        services: Vec::new(),
         classification: AccountClass::Human,
         nickname: "Alice".into(),
         motd: String::new(),
         connection: hrc::client::ConnectionState::Offline,
         privacy: None,
+        federation_privacy: None,
         rooms: vec![summary.clone()],
         selected: Some(hrc::client::RoomView {
             crypto: None,

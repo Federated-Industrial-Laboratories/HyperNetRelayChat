@@ -10,6 +10,29 @@ impl Worker {
                 self.offline();
                 return Ok(());
             }
+            SelectService(agreement) => {
+                self.offline();
+                self.client.select_service(agreement)?;
+                self.snapshot.home = self.client.profile.active_server().home;
+                self.snapshot.services = self.client.profile.service_choices();
+                self.snapshot.rooms = cache::rooms(&mut self.client.store)
+                    .map_err(|_| Error::Storage)?
+                    .into_iter()
+                    .filter(|room| room.room.home == self.snapshot.home)
+                    .collect();
+                self.snapshot.selected = None;
+                self.snapshot.search = None;
+                self.snapshot.inspection = Inspection::default();
+                self.snapshot.inspection.stale = true;
+                self.snapshot.inspection.filters =
+                    cache::filters(&mut self.client.store, self.snapshot.home)
+                        .map_err(|_| Error::Storage)?;
+                self.snapshot.notifications.clear();
+                self.snapshot.deliveries.clear();
+                self.snapshot.nickname.clear();
+                self.snapshot.motd.clear();
+                return self.connect();
+            }
             Refresh => return self.refresh(),
             SelectRoom(room) => return self.select(room),
             OpenEvent { room, event } => return self.open_event(room, event),

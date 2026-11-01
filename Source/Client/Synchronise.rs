@@ -29,7 +29,8 @@ impl Worker {
             }
             after = last;
         }
-        cache::save_rooms(&mut self.client.store, &rooms).map_err(|_| Error::Storage)?;
+        cache::save_rooms(&mut self.client.store, self.snapshot.home, &rooms)
+            .map_err(|_| Error::Storage)?;
         self.snapshot.rooms = rooms;
         let account: identity::AccountView = self.read(
             Operation::AccountInspect,
@@ -110,8 +111,12 @@ impl Worker {
         let target = Target::Account(self.snapshot.account);
         self.snapshot.inspection.filters =
             self.pages(Operation::ModerationFilters, target.clone())?;
-        cache::save_filters(&mut self.client.store, &self.snapshot.inspection.filters)
-            .map_err(|_| Error::Storage)?;
+        cache::save_filters(
+            &mut self.client.store,
+            self.snapshot.home,
+            &self.snapshot.inspection.filters,
+        )
+        .map_err(|_| Error::Storage)?;
         self.snapshot.inspection.grants = self.pages(Operation::DelegationList, target.clone())?;
         self.snapshot.inspection.agents = self.pages(Operation::AgentList, target)?;
         self.snapshot.inspection.stale = false;
@@ -255,8 +260,9 @@ impl Worker {
             }
             Err(e) => return Err(e),
         };
-        let key = VerifyingKey::from_bytes(self.client.profile.server.signing_key.as_bytes())
-            .map_err(|_| Error::Configuration)?;
+        let key =
+            VerifyingKey::from_bytes(self.client.profile.active_server().signing_key.as_bytes())
+                .map_err(|_| Error::Configuration)?;
         let now = self
             .client
             .profile
@@ -444,7 +450,7 @@ impl Worker {
             .cursor
             .as_ref()
             .map(|c| {
-                VerifyingKey::from_bytes(self.client.profile.server.signing_key.as_bytes())
+                VerifyingKey::from_bytes(self.client.profile.active_server().signing_key.as_bytes())
                     .map_err(|_| Error::Input)
                     .and_then(|k| {
                         verify_cursor(&c.0, &k)

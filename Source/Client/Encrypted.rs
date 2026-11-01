@@ -110,7 +110,7 @@ impl Client {
             Value::serialized(body).map_err(|_| Error::Input)?,
         )?;
         if let Some(grant) = grant {
-            if grant.home != self.profile.server.home
+            if grant.home != self.profile.active_server().home
                 || grant.scope.agent != self.session()?.ready.acting
             {
                 return Err(Error::Input);

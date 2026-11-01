@@ -9,13 +9,14 @@ use crate::{
 fn worker() -> (Fixture, Worker, RoomId) {
     let fixture = Fixture::new();
     let mut store = fixture.create();
-    cache::initialize(&mut store).unwrap();
+    cache::initialize(&mut store, action().home).unwrap();
     let a = action();
     let Target::Room(room) = a.target else {
         unreachable!()
     };
     cache::save_rooms(
         &mut store,
+        room.home,
         &[conversations::Summary {
             confidentiality: RoomConfidentiality::Community,
             invited: false,
@@ -85,7 +86,13 @@ fn outcome(worker: &mut Worker, action: &Action, outcome: Outcome) -> Result<Val
         &server.verifying_key(),
     )
     .unwrap();
-    super::super::outbox::record(&mut worker.client.store, &signed, &verified, now).unwrap();
+    super::super::outbox::record(
+        &mut worker.client.store,
+        &signed,
+        &verified,
+        TimeBounds::test_now(),
+    )
+    .unwrap();
     worker.operation = Some(action.operation);
     worker.delivery_room = match action.target {
         Target::Room(room) => Some(room),
@@ -289,4 +296,209 @@ fn permanent_view_authentication_failure_keeps_commit_but_stops_reconnect() {
             .detail
             .contains("SessionAuthenticationFailed")
     );
+}
+
+#[test]
+fn queued_effect_uses_worker_readiness_and_original_deadline_not_published_online() {
+    let (_fixture, mut worker, _) = worker();
+    worker.publish();
+    let queued = Queued::new(78, Command::SetNickname("Bób界".into()));
+    worker.error(unavailable());
+    assert_eq!(
+        worker.shared.snapshot.lock().unwrap().connection,
+        ConnectionState::Online
+    );
+    assert!(matches!(
+        worker.snapshot.connection,
+        ConnectionState::Backoff { .. }
+    ));
+    assert_eq!(
+        queued.admission(worker.desired, false, Instant::now()),
+        Admission::Wait
+    );
+    let retry = worker.retry;
+    worker.tick();
+    assert_eq!(worker.retry, retry);
+    assert!(worker.client.pending().unwrap().is_empty());
+    assert!(worker.snapshot.deliveries.is_empty());
+    assert_eq!(queued.id, 78);
+    assert!(matches!(&queued.command, Command::SetNickname(name) if name == "Bób界"));
+    assert_eq!(
+        queued.admission(true, true, queued.admission_end - Duration::from_millis(1)),
+        Admission::Run
+    );
+    // A synchronous reconnect completing too late cannot start the held command.
+    assert_eq!(
+        queued.admission(true, true, queued.admission_end),
+        Admission::Expired
+    );
+    worker.admission_expired(queued.id);
+    let completion = worker.snapshot.completions.last().unwrap();
+    assert_eq!(completion.request_id, queued.id);
+    assert_eq!(
+        completion.error.as_ref().unwrap().code,
+        "CommandAdmissionExpired"
+    );
+    assert!(worker.snapshot.deliveries.is_empty());
+    assert_eq!(worker.retry, retry);
+}
+
+#[test]
+fn deliberate_offline_never_reconnects_or_prepares_a_queued_effect() {
+    let (_fixture, mut worker, _) = worker();
+    worker.offline();
+    let queued = Queued::new(78, Command::SetNickname("Bób界".into()));
+    assert_eq!(
+        queued.admission(worker.desired, false, Instant::now()),
+        Admission::Run
+    );
+    worker.run_command(queued);
+    let completion = worker.snapshot.completions.last().unwrap();
+    assert_eq!(completion.request_id, 78);
+    assert_eq!(completion.error.as_ref().unwrap().code, "Offline");
+    assert!(!worker.desired);
+    assert!(worker.snapshot.deliveries.is_empty());
+    assert!(worker.client.pending().unwrap().is_empty());
+}
+
+#[test]
+fn reserved_disconnect_releases_one_held_request_without_starting_it() {
+    let (fixture, worker, room) = worker();
+    drop(worker);
+    let mut controller = Controller::open(&fixture.root).unwrap();
+    let connect = controller.dispatch(Command::Connect).unwrap();
+    let wait = |test: &dyn Fn(&Snapshot) -> bool| {
+        let end = Instant::now() + Duration::from_secs(3);
+        loop {
+            let snapshot = controller.snapshot();
+            if test(&snapshot) {
+                return snapshot;
+            }
+            assert!(Instant::now() < end, "bounded command observation expired");
+            thread::sleep(Duration::from_millis(5));
+        }
+    };
+    wait(&|v| {
+        v.completions.iter().any(|c| c.request_id == connect)
+            && matches!(v.connection, ConnectionState::Backoff { .. })
+    });
+    let request = controller
+        .dispatch(Command::SetNickname("Bób界".into()))
+        .unwrap();
+    let waiting = wait(&|v| {
+        v.status.as_ref().is_some_and(|s| {
+            s.request_id == Some(request) && s.code == "CommandWaitingForConnection"
+        })
+    });
+    assert!(!waiting.completions.iter().any(|c| c.request_id == request));
+    assert!(
+        !waiting
+            .deliveries
+            .iter()
+            .any(|d| d.request_id == Some(request))
+    );
+    let draft = controller
+        .dispatch(Command::SaveDraft {
+            room,
+            text: "new typing while reconnect waits".into(),
+            mentions: vec![],
+        })
+        .unwrap();
+    let saved = wait(&|v| v.completions.iter().any(|c| c.request_id == draft));
+    assert!(
+        saved
+            .completions
+            .iter()
+            .find(|c| c.request_id == draft)
+            .unwrap()
+            .error
+            .is_none()
+    );
+    assert!(!saved.completions.iter().any(|c| c.request_id == request));
+    // Both lanes share the original finite queue budget while one effect is held.
+    for n in 0..32 {
+        controller
+            .dispatch(Command::SetNickname(format!("pending{n}")))
+            .unwrap();
+    }
+    assert!(matches!(
+        controller.dispatch(Command::SaveDraft {
+            room,
+            text: "not accepted".into(),
+            mentions: vec![],
+        }),
+        Err(DispatchError::QueueFull)
+    ));
+    controller.disconnect();
+    let stopped = wait(&|v| v.completions.iter().any(|c| c.request_id == request));
+    assert_eq!(
+        stopped
+            .completions
+            .iter()
+            .find(|c| c.request_id == request)
+            .unwrap()
+            .error
+            .as_ref()
+            .unwrap()
+            .code,
+        "Offline"
+    );
+    assert!(
+        !stopped
+            .deliveries
+            .iter()
+            .any(|d| d.request_id == Some(request))
+    );
+    assert_eq!(stopped.connection, ConnectionState::Offline);
+    controller.shutdown();
+    let mut reopened = Client::open_offline(&fixture.root).unwrap();
+    assert_eq!(
+        reopened.draft(room).unwrap().as_deref(),
+        Some("new typing while reconnect waits")
+    );
+}
+
+#[test]
+fn shutdown_persists_every_accepted_local_draft_and_closes_admission() {
+    let (fixture, worker, room) = worker();
+    drop(worker);
+    let mut controller = Controller::open(&fixture.root).unwrap();
+    let first = controller
+        .dispatch(Command::SaveDraft {
+            room,
+            text: "older typing".into(),
+            mentions: vec![],
+        })
+        .unwrap();
+    let last = controller
+        .dispatch(Command::SaveDraft {
+            room,
+            text: "latest typing".into(),
+            mentions: vec![],
+        })
+        .unwrap();
+    controller.shutdown();
+    let snapshot = controller.snapshot();
+    for id in [first, last] {
+        assert!(
+            snapshot
+                .completions
+                .iter()
+                .any(|c| c.request_id == id && c.error.is_none())
+        );
+    }
+    assert!(matches!(
+        controller.dispatch(Command::SaveDraft {
+            room,
+            text: "too late".into(),
+            mentions: vec![]
+        }),
+        Err(DispatchError::Stopped)
+    ));
+    let mut reopened = Client::open_offline(&fixture.root).unwrap();
+    assert_eq!(
+        reopened.draft(room).unwrap().as_deref(),
+        Some("latest typing")
+    );
+    assert!(reopened.pending().unwrap().is_empty());
 }

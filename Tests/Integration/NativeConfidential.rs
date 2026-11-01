@@ -99,23 +99,18 @@ fn net<T>(value: client::Result<T>) -> Result<T> {
     value.map_err(|e| e.code().into())
 }
 fn transient(error: &client::Error) -> bool {
-    matches!(
-        error,
+    match error {
+        client::Error::Network(error) => error.retryable_session(),
         client::Error::Clock
-            | client::Error::Unknown
-            | client::Error::Network(
-                client::network::Error::Companion
-                    | client::network::Error::Connect
-                    | client::network::Error::Handshake
-                    | client::network::Error::Transport
-                    | client::network::Error::Clock
-            )
-            | client::Error::Refused {
-                code: ErrorCode::Unavailable | ErrorCode::RateLimited | ErrorCode::Overloaded,
-                ..
-            }
-    )
+        | client::Error::Unknown
+        | client::Error::Refused {
+            code: ErrorCode::Unavailable | ErrorCode::RateLimited | ErrorCode::Overloaded,
+            ..
+        } => true,
+        _ => false,
+    }
 }
+
 fn available(outcome: &Outcome) -> Option<u64> {
     match outcome {
         Outcome::Refused {

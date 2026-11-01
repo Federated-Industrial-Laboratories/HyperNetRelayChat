@@ -31,6 +31,16 @@ acknowledgement-loss recovery and before final HyperNet grant revocation, using
 the existing Alice, Bob and Agent profiles and live service. It opens one Store
 owner per profile; no CLI process accesses those profiles concurrently.
 
+For independent local-client qualification, set `configuration.localClientOnly`
+to true or `HYPERNET_HRC_LOCAL_CLIENT_ONLY=1`. This mode creates the real service,
+three profiles and one room through shipped commands, joins Bob and Agent, then
+runs the Controller immediately. After all Controller profiles close, it creates
+and revokes an exact fixture grant, runs the same bot cases and final HyperNet
+authority refusal. Its result is `NativeLocalClientWorkflow`, with
+`conversationBaselineIncluded=false`; it does not claim to rerun the separate
+conversation baseline, acknowledgement-loss or service-restart cases. Reuse their
+identified existing evidence only when that source and behaviour remain applicable.
+
 The example checks persistent Controller send/receive, three distinct identities,
 request/completion and delivery/event correlation, Unicode typed mentions,
 unread state and mention notifications, current ignore filtering, indexed search
@@ -103,6 +113,15 @@ qualification report. Every subprocess has a deadline; service and proxy cleanup
 runs even after a failed assertion. Never point this destructive finite fixture
 at ordinary user profiles, installed services or production grants.
 
+Set `configuration.suiteBinary` or `HYPERNET_HRC_SUITE_BINARY` to the exact installed
+Suite executable for failure diagnostics. Before teardown, the driver uses the
+supported `streams status` command to retain each companion's at most eight recent
+errors and connection count. Collection is limited to six seconds in total and
+the remaining conversation deadline, with at most two seconds per companion.
+Diagnostic failure does not replace the original workflow failure. CLI result
+records include boot-time start and finish; connection-preparation stderr retains
+the static adapter failure category. No diagnostic triggers another effect or retry.
+
 The baseline qualifies community conversations. The optional confidential helper
 below adds native encrypted client scenarios. Independently administered
 federation requires its own real integration scenario before release. A helper's
@@ -120,6 +139,13 @@ withdrawal. No process shares its Alice, Bob or Agent profile while it runs.
 The private request contains `alice`, `bob`, `agent`, the typed existing community
 `room` identity, and `bobRecovery`, the separately held fixture owner-key path.
 The key is used only by the production device-proof API and never enters output.
+
+For independent confidential qualification, select `configuration.confidentialClientOnly`
+or `HRC_NATIVE_CONFIDENTIAL_ONLY=1`. This mode uses the same shipped CLI setup,
+three profiles and room joins, then runs the confidential helper and final actual
+HyperNet authority refusal. It reports `conversationBaselineIncluded=false` and
+does not rerun unrelated baseline or Controller scenarios. It cannot be combined
+with local-client-only mode. Its original overall and per-step deadlines remain.
 
 The helper uses public production Client APIs and the profiles' real admitted
 HyperNet sessions and signed clock. It creates and joins an explicitly invited
@@ -167,3 +193,63 @@ shapes. Delegated send preflight rejects denied/expired access with the exact
 matching event was published. Availability, malformed input and unrelated failures
 cannot satisfy those refusal cases. The prior M4 qualification tree and its
 recorded results remain separate from this updated candidate.
+
+## Two-network federation extension
+
+`NativeFederation.py` receives two independently administered installed HyperNet
+contexts. The maintained installed fixture creates separate bootstrap identities,
+administrators, voter sets, authority endpoints and native Suite companions. It
+uses eight authority containers and the existing bounded route and application
+services. Both networks can run on the same qualification host; this does not
+establish independent host failure domains. Durable authority and HRC stores stay
+on disk. Only signed, boot-bound clock observations may use the qualified ephemeral
+clock directory.
+
+Build `cargo build --example native-federation-client` from the same candidate as
+the normal binary and set `HRC_NATIVE_FEDERATION_CLIENT` to its exact executable.
+The installed runner selects this workflow with `--hrc-federation`. It does not
+run the single-network conversation or Page federation workflow first. The helper
+uses the shipped CLI to create both HRC services, independently enroll Alice,
+Bob and Bob's agent, create separate gateway/attestor keys, exchange descriptors,
+sign matching agreements against explicit pins, import bounded owner-continuity
+pages, approve exact endpoints and install the destination companion route.
+A setup-only agreement has no rooms; its next revision explicitly shares the
+community room, private group and direct conversation. Client selection retains
+the origin account, endpoint keys and origin HyperNet companion.
+
+The Rust helper uses real Client APIs and sessions for remote human and
+independent-agent messages, foreign delegated scope, encrypted private-group and
+direct conversation membership, explicit contact pinning, Unicode mentions,
+restart of the local encrypted index and current recipient-ignore filtering.
+It verifies exact ciphertext replay and original event identity. A signed action
+with a substituted origin is sent over the actual endpoint stream; its refusal
+must be signed and correlated by the origin, and history must show no effect.
+A short-lived delegation must expire without publishing its prepared operation.
+
+Two private control markers request stopping and restarting the origin service.
+After its original five-second identity lease expires, a local sender must receive
+a non-consuming availability refusal for an already prepared ciphertext. The
+room retains its MLS roster. Restarting the origin must renew the lease through
+the real gateway; retrying the exact ciphertext must yield one event. The helper
+then performs owner-key recovery at the origin and waits for the running service
+to publish the changed checkpoint automatically. No manual proof import occurs
+in this scenario. The home must establish the old endpoint's removal barrier and
+refuse its queued old-generation operation. The separately held recovery key is
+loaded only through the production device API and never printed.
+
+After clients release their stores, the shipped withdrawal command durably stops
+the origin and requests the home's signed acknowledgement. The driver checks the
+actual home barrier through stopped-service inspection. After the origin restarts,
+the previously eligible independent agent must receive the signed, correlated
+`AgreementWithdrawn` refusal; its retained draft survives and home history contains
+no corresponding event. Gateway status samples
+record observed connection identities and reuse; these samples are explicitly
+not a complete connection census. Existing 16-concurrent and 128-total fixture
+connection limits remain unchanged.
+
+The Rust helper has a 45-second per-step watchdog and a bounded overall budget,
+with two-second operation pacing. Exact retries retain the original ID, digest,
+signed bytes and deadline and respect supplied retry guidance. High-level crypto
+failures are not blindly repeated. The Python owner has its own fixture deadline
+and exact process cleanup. Successful compilation is not a native qualification
+result; the first two-network run remains required before release.

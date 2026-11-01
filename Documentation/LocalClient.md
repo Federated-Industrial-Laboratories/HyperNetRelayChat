@@ -19,10 +19,39 @@ The five-second background refresh interval starts after a successful refresh
 finishes, including initial connection and explicit commands. A slow refresh does
 not schedule an immediate second full refresh.
 
+Session setup allows at most three attempts within one original 30-second
+deadline. Each HyperNet preparation wait is at most 10 seconds; each HRC
+handshake is at most five seconds within that same deadline. Incomplete HRC
+handshakes and typed HyperNet Timeout, Unavailable, Closed, Capacity, Busy or
+NotActive preparation failures can obtain a fresh stream. Explicit Refused,
+invalid protocol/frame/version, private-path or ownership failures are terminal;
+Controller and bot reconnect classification preserves that distinction.
+No conversation operation is prepared or replayed by session setup. Preparation
+failure diagnostics contain only the static adapter category and boot-time
+start, finish and original deadline, without identities or credential data.
+
 The command queue contains at most 32 bounded commands. Dispatch returns a local
 request number. Immutable snapshots carry that number on command status and
 operation delivery records. A frontend can distinguish the exact submitted text
 from later typing. Historical recovered operations have no local request number.
+When connection is still desired, the worker can retain one unstarted
+state-changing command ahead of that queue while the connection recovers. Its
+30-second admission deadline starts at dispatch, including queue time. The worker
+honours existing reconnect backoff and checks the original deadline again before
+starting any effect, even when synchronous reconnection finishes late. The same
+request and command are consumed once; this mechanism never reruns a started
+command or prepares a replacement effect identity. `CommandWaitingForConnection`
+shows the pending request; `CommandAdmissionExpired` reports expiry without a
+delivery identity or a changed connection retry schedule. Deliberate offline
+mode retains normal refusal and local-draft behaviour. Reserved disconnect and
+shutdown controls remain available while a command is held. Read-only commands
+retain their existing explicit current-read failures and offline cache behaviour.
+Local draft/preference writes, retry abandonment and search close use a local
+lane sharing that same 32-item queued budget. At most four local commands run
+per worker turn, so they remain responsive during reconnect backoff without
+starving an eligible effect. Shutdown atomically closes queue admission, then
+drains accepted local work only; it does not execute queued network effects.
+Local persistence errors remain visible on their original completions.
 Effect completion succeeds only after every requested effect and its required
 local persistence succeeds. A later room, grant or inspection refresh can fail
 without changing that confirmed outcome or replaying the effect. The original
@@ -201,3 +230,64 @@ with its grant inspection, exact candidates and decrypted proposal content.
 Preflight permission failures report `OperationDenied` or `OperationExpired`;
 temporary non-admission reports `OperationTemporarilyUnavailable`. These failures
 do not claim that a message was committed or delivered.
+
+## Federation service selection
+
+An endpoint keeps its original account, signing key, recovery model and HyperNet
+companion. Selecting a foreign room home first authenticates the endpoint to its
+origin service. The origin then forwards a separate signed bootstrap through an
+independently admitted destination companion. The client verifies the remote
+home signature, exact request digest, endpoint binding and home retry window.
+A foreign home cannot replace the endpoint's origin account or key.
+
+Import the two service descriptors through a deliberate trusted exchange. The
+agreement's embedded keys do not establish those trust pins. Both administrations
+must sign the same agreement. The following command stores those signatures and
+selects the foreign home for subsequent CLI, GUI, TUI and bot sessions:
+
+```sh
+hrc federation client-select --directory PROFILE \
+  --home-descriptor HOME_DESCRIPTOR --origin-descriptor ORIGIN_DESCRIPTOR \
+  --home-signature HOME_SIGNATURE --origin-signature ORIGIN_SIGNATURE
+```
+
+Use `--trust-only` on a home-side client to verify the remote participants'
+origin continuity without selecting a foreign home. At most two bilateral
+agreements are retained in one profile. Profile input is bounded to 1 MiB,
+including encoded signatures; each agreement retains the ordinary wire bounds.
+Registration profiles without federation fields remain compatible.
+
+The GUI connection details list the configured conversation services. The TUI
+and GUI accept `/network local` and `/network AGREEMENT_ID`; `/who` lists the
+choices. Switching services closes the current stream, preserves drafts and
+uncertain operations under their original home, and authenticates a fresh
+session for the selected service. CLI clients can select their origin again with
+`hrc federation client-local --directory PROFILE`. Origin-owned account and
+endpoint administration use the local selection. No network route is inferred
+from an account identifier or silently replaced by a direct connection.
+
+Room caches, active ignore/mute lists and retry selection are scoped to the home
+service. Switching does not erase another home's retained rooms or drafts. The
+aggregate cache and outbox limits still apply. The filter-schema migration moves
+existing filters into the original local service exactly once.
+
+Privacy details distinguish the endpoint's transport observation from the source
+and destination leg observations verified at remote admission. Admission is a
+historical observation; both current permissions are checked again for every
+forwarded action. Disconnect clears the displayed admission observations. The
+client does not assert physical relay-operator independence from these receipts.
+`hrc profile session` includes the signed remote-admission fields as structured
+output alongside the ordinary endpoint transport properties.
+
+A remote query owns one serial gateway stream. Cancelling it closes that stream
+and propagates bounded cancellation to the home query. The client discards that
+query result and reconnects with current permission; it does not report a
+home-signed cancellation outcome or replay the query as a mutation. Other clients
+retain their own streams. Pending sends keep their exact durable identities and
+are resolved separately after reconnect.
+
+Encrypted remote contacts require independently pinned origin service evidence
+and the same explicit contact-anchor acceptance as local contacts. A foreign
+owner's grant proof selects its signed origin continuity head. The home grant
+position is never compared with an unrelated origin history position. Origin
+assertions and exact owner-signed grant bytes remain bound to that checkpoint.

@@ -85,20 +85,18 @@ impl Error {
     pub(crate) fn retry_delay_ms(&self) -> Option<u64> {
         use network::Error as Network;
         match self {
-            Self::Clock
-            | Self::Unknown
-            | Self::Network(
-                Network::Companion
-                | Network::Connect
-                | Network::Handshake
-                | Network::Transport
-                | Network::Clock,
-            ) => Some(0),
+            Self::Clock | Self::Unknown => Some(0),
+            Self::Network(error) if error.retryable_session() => Some(0),
             Self::Refused {
                 code: ErrorCode::Unavailable | ErrorCode::RateLimited | ErrorCode::Overloaded,
                 retry_after_ms,
                 ..
-            } => Some(retry_after_ms.unwrap_or(1000).min(60000)),
+            }
+            | Self::Network(Network::ForwardRefused {
+                code: ErrorCode::Unavailable | ErrorCode::RateLimited | ErrorCode::Overloaded,
+                retry_after_ms,
+                ..
+            }) => Some(retry_after_ms.unwrap_or(1000).min(60000)),
             _ => None,
         }
     }
@@ -109,6 +107,7 @@ pub struct Client {
     pub store: Store,
     pub(super) key: SigningKey,
     session: Option<Session>,
+    directory: std::path::PathBuf,
 }
 impl Client {
     pub fn open_offline(directory: &Path) -> Result<Self> {
@@ -120,8 +119,10 @@ impl Client {
             store,
             key,
             session: None,
+            directory: directory.to_owned(),
         };
-        super::cache::initialize(&mut client.store).map_err(|_| Error::Storage)?;
+        super::cache::initialize(&mut client.store, client.profile.server.home)
+            .map_err(|_| Error::Storage)?;
         crate::crypto::initialize(&mut client.store).map_err(|_| Error::Storage)?;
         super::archive::initialize(&mut client.store).map_err(|_| Error::Storage)?;
         super::cache::maintain(&mut client.store).map_err(|_| Error::Storage)?;
@@ -151,6 +152,15 @@ impl Client {
             session.close();
         }
     }
+    pub fn select_service(&mut self, agreement: Option<AgreementRef>) -> Result<()> {
+        let mut profile = self.profile.clone();
+        profile.federation = agreement;
+        profile.validate_federation().map_err(|_| Error::Input)?;
+        self.disconnect();
+        super::federation::save(&self.directory, &profile).map_err(|_| Error::Storage)?;
+        self.profile = profile;
+        Ok(())
+    }
     pub fn prepare(&self, operation: Operation, target: Target, body: Value) -> Result<Action> {
         Ok(self.session()?.action(operation, target, body)?)
     }
@@ -159,7 +169,7 @@ impl Client {
         self.execute_signed(&bytes)
     }
     pub fn sign(&self, action: &Action) -> Result<Vec<u8>> {
-        if action.home != self.profile.server.home
+        if action.home != self.profile.active_server().home
             || action.actor.acting() != &self.session()?.ready.acting
         {
             return Err(Error::Input);
@@ -195,7 +205,12 @@ impl Client {
         self.execute(&action)
     }
     pub fn pending(&mut self) -> Result<Vec<outbox::Pending>> {
-        outbox::pending(&mut self.store, &self.key.verifying_key()).map_err(|_| Error::Storage)
+        let home = self.profile.active_server().home;
+        Ok(outbox::pending(&mut self.store, &self.key.verifying_key())
+            .map_err(|_| Error::Storage)?
+            .into_iter()
+            .filter(|p| p.action.action().home == home)
+            .collect())
     }
     /// Resolve original identities before retrying any effect. No replacement operation is created.
     pub fn resolve_pending(&mut self) -> Result<Vec<Response>> {

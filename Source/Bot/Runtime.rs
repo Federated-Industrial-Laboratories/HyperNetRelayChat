@@ -24,7 +24,7 @@ pub(super) fn run(config: Config, stop: Arc<AtomicBool>, on_ready: impl FnOnce()
     if config
         .rooms
         .iter()
-        .any(|r| r.home != client.profile.server.home)
+        .any(|r| r.home != client.profile.active_server().home)
     {
         return Err(Error::Configuration);
     }
@@ -173,16 +173,9 @@ impl<F: FnOnce()> Startup<F> {
     }
 }
 pub(super) fn retry_delay(error: &Error) -> Option<u64> {
-    use client::network::Error as Network;
     match error {
-        Error::Client(client::Error::Clock)
-        | Error::Client(client::Error::Network(
-            Network::Companion
-            | Network::Connect
-            | Network::Handshake
-            | Network::Transport
-            | Network::Clock,
-        )) => Some(0),
+        Error::Client(client::Error::Clock) => Some(0),
+        Error::Client(client::Error::Network(error)) if error.retryable_session() => Some(0),
         Error::RetryLater { delay_ms } => Some((*delay_ms).min(60000)),
         _ => None,
     }
@@ -315,7 +308,7 @@ fn pull(
         },
         grant,
     )?;
-    let key = VerifyingKey::from_bytes(client.profile.server.signing_key.as_bytes())
+    let key = VerifyingKey::from_bytes(client.profile.active_server().signing_key.as_bytes())
         .map_err(|_| Error::State)?;
     let cursor = verify_cursor(&page.cursor.0, &key).map_err(|_| Error::State)?;
     let now = client
@@ -324,7 +317,7 @@ fn pull(
         .sample()
         .map_err(|_| client::Error::Clock)?;
     if cursor.value().room != room
-        || cursor.value().home != client.profile.server.home
+        || cursor.value().home != client.profile.active_server().home
         || cursor.value().account != actor.represented()
         || now.upper_ms >= cursor.value().expires_ms
         || page.events.len() > 32

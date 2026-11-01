@@ -298,11 +298,13 @@ fn certified_denial_remains_distinct_from_local_unavailability() {
     let denied = check(&a, &s);
     assert!(denied.certified());
     assert!(!denied.permitted());
+    assert!(denied.attestation().is_none());
     assert_eq!(denied.authority().unwrap().code(), 7);
     mode.store(1, Ordering::Release);
     let absent = check(&a, &s);
     assert!(!absent.certified());
     assert!(!absent.usable());
+    assert!(absent.attestation().is_none());
     assert_eq!(absent.disposition(), Disposition::Unavailable);
 }
 
@@ -407,10 +409,45 @@ fn observation_expires_and_cannot_authorize_a_different_stream() {
     thread::sleep(Duration::from_millis(110));
     assert_eq!(observed.disposition(), Disposition::Expired);
     assert!(!observed.permitted());
+    assert!(observed.attestation().is_none());
     assert!(matches!(
         s.send_observed(&observed, b"expired"),
         Err(Error::NotActive)
     ));
+}
+
+#[test]
+fn origin_attestation_retains_checked_receipt_identity_and_original_lifetime() {
+    let fixture = Fixture::new(normal);
+    let adapter = fixture.agent();
+    let stream = incoming(&adapter);
+    let checked = check(&adapter, &stream);
+    let evidence = checked.attestation().unwrap();
+    assert!(evidence.permitted());
+    assert_eq!(evidence.action_digest(), id(1));
+    assert_eq!(evidence.identity().session, id(6));
+    assert_eq!(evidence.identity().generation, 1);
+    assert_eq!(evidence.identity().companion_instance, id(12));
+    assert_eq!(evidence.identity().endpoint_instance, id(13));
+    assert_eq!(evidence.identity().control_generation, 1);
+    assert_eq!(evidence.authority().configuration(), id(15));
+    assert_eq!(evidence.authority().state(), id(16));
+    assert_eq!(evidence.authority().statement_digest(), id(17));
+    assert_eq!(evidence.privacy().relay_service(), Some(id(10).as_str()));
+    assert_eq!(
+        evidence.privacy().attachment_profile_digest(),
+        Some(id(11).as_str())
+    );
+    assert_eq!(stream.peer().endpoint(), id(5));
+    let serialized = serde_json::to_value(&checked).unwrap();
+    assert_eq!(
+        evidence.not_after_boot_ms(),
+        serialized["usableUntilBootMs"].as_u64().unwrap()
+    );
+    assert_eq!(evidence.nonce(), serialized["nonce"].as_str().unwrap());
+    stream.close();
+    assert!(!evidence.permitted());
+    assert!(checked.attestation().is_none());
 }
 
 #[test]

@@ -143,6 +143,30 @@ pub fn delivery(delivery: &hrc::client::Delivery) -> String {
         Some(Outcome::Unknown) => "Outcome unknown; resolve the original operation".into(),
     }
 }
+pub fn federation_privacy(
+    remote: Option<&hrc::protocol::RemoteSessionReady>,
+) -> Vec<(&'static str, String)> {
+    let Some(remote) = remote else {
+        return Vec::new();
+    };
+    let route = |p: &hrc::protocol::FederationPrivacy| {
+        format!(
+            "TLS 1.3 to final service; relay {}",
+            if p.attested_relay() {
+                "approved attachment"
+            } else {
+                "not reported"
+            }
+        )
+    };
+    vec![
+        ("Federation origin", remote.origin.to_string()),
+        ("Federation home", remote.home.to_string()),
+        ("Source leg at admission", route(&remote.source_privacy)),
+        ("Destination leg at admission", route(&remote.destination_privacy)),
+        ("Federation observation", "Admission observations; both permissions are checked again for each action. Physical relay independence is not independently verified.".into()),
+    ]
+}
 pub fn privacy(privacy: Option<&Privacy>) -> Vec<(&'static str, String)> {
     let Some(p) = privacy else {
         return vec![("Route", "No current observation".into())];

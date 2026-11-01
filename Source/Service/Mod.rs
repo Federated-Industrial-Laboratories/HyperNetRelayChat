@@ -2,6 +2,8 @@
 //! HRC service setup and its HyperNet-only transport lifecycle.
 #[path = "Admission.rs"]
 mod admission;
+#[path = "FederationSetup.rs"]
+pub mod federation;
 #[path = "Files.rs"]
 pub mod files;
 #[path = "Io.rs"]

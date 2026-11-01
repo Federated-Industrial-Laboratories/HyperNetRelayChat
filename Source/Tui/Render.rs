@@ -274,6 +274,26 @@ fn content(model: &Model, columns: usize, wide: bool) -> Vec<String> {
         }
         Panel::Status => {
             raw.push(format!("Account {}", snapshot.account));
+            for choice in &snapshot.services {
+                raw.push(format!(
+                    "{} service {}: /network {}",
+                    if choice.selected {
+                        "Selected"
+                    } else {
+                        "Available"
+                    },
+                    choice.home,
+                    choice
+                        .agreement
+                        .map(|a| a.id.to_string())
+                        .unwrap_or_else(|| "local".into())
+                ));
+            }
+            raw.extend(
+                display::federation_privacy(snapshot.federation_privacy.as_ref())
+                    .into_iter()
+                    .map(|(label, value)| format!("{label}: {value}")),
+            );
             raw.extend(
                 display::privacy(snapshot.privacy.as_ref())
                     .into_iter()

@@ -98,7 +98,15 @@ impl App {
         egui::ScrollArea::vertical().show(ui, |ui| {
             ui.heading("Connection and privacy"); ui.label(display::connection(&snapshot));
             ui.label(format!("Account {}",snapshot.account)); ui.label(format!("Home {}",snapshot.home));
+            ui.label("Conversation service");
+            for choice in &snapshot.services {
+                let name = if choice.agreement.is_none() { "Local origin".to_owned() } else { format!("Federated home {}", choice.home) };
+                if ui.selectable_label(choice.selected, name).clicked() && !choice.selected {
+                    self.model.dispatch(Command::SelectService(choice.agreement));
+                }
+            }
             for (label,value) in display::privacy(snapshot.privacy.as_ref()) { ui.horizontal_wrapped(|ui| { ui.strong(label); ui.label(value); }); }
+            for (label,value) in display::federation_privacy(snapshot.federation_privacy.as_ref()) { ui.horizontal_wrapped(|ui| { ui.strong(label); ui.label(value); }); }
             ui.label("Community messages are readable by their home service. Confidential messages require endpoint encryption; transport protection and relay privacy are separate properties.");
             ui.separator(); ui.heading("Delivery states");
             ui.label("Committed means the home service acknowledged its durable commit. It does not mean another person received or read the message.");

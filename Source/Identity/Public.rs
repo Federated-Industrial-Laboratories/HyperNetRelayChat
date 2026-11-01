@@ -13,6 +13,8 @@ pub struct PublicIdentityRequest {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PublicIdentity {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_checkpoint: Option<Blob>,
     pub identity: IdentitySnapshot,
     pub continuity: crate::home::InspectionPage<ContinuityRecord>,
 }
@@ -21,7 +23,7 @@ pub(crate) fn read(db: &Connection, action: &Action, now: TimeBounds) -> Domain<
         return invalid("AccountTarget");
     };
     let request: PublicIdentityRequest = unpack(&action.body)?;
-    if request.room.home != action.home || account.origin != action.home.network {
+    if request.room.home != action.home {
         return deny("IdentityOrigin");
     }
     let mut room_action = action.clone();
@@ -61,6 +63,18 @@ pub(crate) fn read(db: &Connection, action: &Action, now: TimeBounds) -> Domain<
     if !shares {
         return deny("SharedRoomIdentity");
     }
+    if account.origin != action.home.network {
+        let (identity, checkpoint) = crate::federation::foreign_identity(db, account)?;
+        let continuity =
+            crate::federation::foreign_page(db, account, request.after, request.limit)?;
+        return Ok(Outcome::Result {
+            body: value(&PublicIdentity {
+                identity,
+                continuity,
+                origin_checkpoint: Some(checkpoint),
+            })?,
+        });
+    }
     let identity = continuity::snapshot(db, action.home, account)?;
     let continuity = lifecycle::continuity_page(
         db,
@@ -72,6 +86,7 @@ pub(crate) fn read(db: &Connection, action: &Action, now: TimeBounds) -> Domain<
     )?;
     Ok(Outcome::Result {
         body: value(&PublicIdentity {
+            origin_checkpoint: None,
             identity,
             continuity,
         })?,

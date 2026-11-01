@@ -128,6 +128,9 @@ impl Peer {
     pub fn service(&self) -> &str {
         self.common().service.as_str()
     }
+    pub fn endpoint(&self) -> &str {
+        self.common().endpoint.as_str()
+    }
     pub fn protocol(&self) -> &str {
         &self.common().protocol
     }
@@ -456,6 +459,12 @@ impl Privacy {
     }
     pub fn provenance(&self) -> Provenance {
         self.provenance
+    }
+    pub fn relay_service(&self) -> Option<&str> {
+        self.relay_service.as_ref().map(Id::as_str)
+    }
+    pub fn attachment_profile_digest(&self) -> Option<&str> {
+        self.attachment_profile_digest.as_ref().map(Id::as_str)
     }
 }
 

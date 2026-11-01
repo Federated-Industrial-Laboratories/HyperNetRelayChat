@@ -61,6 +61,14 @@ impl Client {
         let mut after = records.len() as u64;
         let retained = after;
         let mut current = None;
+        let identity_server = self
+            .profile
+            .identity_server(account.origin)
+            .map_err(|_| Error::Configuration)?
+            .clone();
+        let identity_key = VerifyingKey::from_bytes(identity_server.signing_key.as_bytes())
+            .map_err(|_| Error::Configuration)?;
+        let mut checkpoint_digest = None;
         loop {
             let page: identity::PublicIdentity = self.read_as(
                 Operation::AccountPublicIdentity,
@@ -73,7 +81,31 @@ impl Client {
                 },
                 grant,
             )?;
-            if page.identity.account != account || page.identity.home != room.home {
+            if page.identity.account != account || page.identity.home != identity_server.home {
+                return Err(Error::Input);
+            }
+            if account.origin != room.home.network {
+                let bytes = page.origin_checkpoint.as_ref().ok_or(Error::Input)?;
+                let checkpoint = verify_origin_identity_checkpoint(&bytes.0, &identity_key)
+                    .map_err(|_| Error::Input)?;
+                let value = checkpoint.value();
+                if value.origin != identity_server.home
+                    || value.account != account
+                    || cache::encode(&value.state).map_err(|_| Error::Input)?
+                        != cache::encode(&page.identity).map_err(|_| Error::Input)?
+                    || checkpoint_digest.is_some_and(|digest| digest != checkpoint.digest())
+                    || evidence.is_none()
+                        && !self
+                            .profile
+                            .clock
+                            .sample()
+                            .map_err(|_| Error::Clock)?
+                            .permits(value.issued_ms, value.expires_ms)
+                {
+                    return Err(Error::Input);
+                }
+                checkpoint_digest = Some(checkpoint.digest());
+            } else if page.origin_checkpoint.is_some() {
                 return Err(Error::Input);
             }
             if current
@@ -126,9 +158,7 @@ impl Client {
         } else {
             None
         };
-        let key = VerifyingKey::from_bytes(self.profile.server.signing_key.as_bytes())
-            .map_err(|_| Error::Configuration)?;
-        let checked = trust::check_chain(&key, records, |account, position| {
+        let checked = trust::check_chain(&identity_key, records, |account, position| {
             operator
                 .as_ref()
                 .filter(|c| c.latest().account == account)

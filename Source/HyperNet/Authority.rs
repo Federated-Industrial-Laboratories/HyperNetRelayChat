@@ -38,6 +38,82 @@ impl AuthorityObservation {
     pub fn code(&self) -> u64 {
         self.code
     }
+    pub fn configuration(&self) -> &str {
+        self.configuration.as_str()
+    }
+    pub fn epoch(&self) -> u64 {
+        self.epoch
+    }
+    pub fn height(&self) -> u64 {
+        self.height
+    }
+    pub fn state(&self) -> &str {
+        self.state.as_str()
+    }
+    pub fn statement_digest(&self) -> &str {
+        self.statement_digest.as_str()
+    }
+    pub fn evaluated_at_ms(&self) -> u64 {
+        self.evaluated_at_ms
+    }
+    pub fn expires_at_ms(&self) -> u64 {
+        self.expires_at_ms
+    }
+}
+
+struct ReceiptIdentity {
+    session: Id,
+    generation: u64,
+    companion_instance: Id,
+    endpoint_instance: Id,
+    control_generation: u64,
+}
+
+/// Validated receipt attributes; these values alone do not authorize an effect.
+pub struct AuthorityIdentity<'a> {
+    pub session: &'a str,
+    pub generation: u64,
+    pub companion_instance: &'a str,
+    pub endpoint_instance: &'a str,
+    pub control_generation: u64,
+}
+
+/// Borrowed evidence for a fresh origin attestation, never a portable permit.
+/// Callers must recheck `permitted()` immediately before using its original deadline.
+pub struct AuthorityAttestation<'a> {
+    check: &'a AuthorityCheck,
+    identity: &'a ReceiptIdentity,
+    authority: &'a AuthorityObservation,
+    privacy: &'a Privacy,
+}
+impl AuthorityAttestation<'_> {
+    pub fn permitted(&self) -> bool {
+        self.check.permitted()
+    }
+    pub fn action_digest(&self) -> &str {
+        self.check.action_digest.as_str()
+    }
+    pub fn nonce(&self) -> &str {
+        self.check.nonce.as_str()
+    }
+    pub fn not_after_boot_ms(&self) -> u64 {
+        self.check.usable_until_boot_ms
+    }
+    pub fn authority(&self) -> &AuthorityObservation {
+        self.authority
+    }
+    pub fn privacy(&self) -> &Privacy {
+        self.privacy
+    }
+    pub fn identity(&self) -> AuthorityIdentity<'_> {
+        AuthorityIdentity {
+            session: self.identity.session.as_str(),
+            generation: self.identity.generation,
+            companion_instance: self.identity.companion_instance.as_str(),
+            endpoint_instance: self.identity.endpoint_instance.as_str(),
+            control_generation: self.identity.control_generation,
+        }
+    }
 }
 
 /// An endpoint observation bound to this stream, action and original call deadline.
@@ -58,6 +134,7 @@ pub struct AuthorityCheck {
     lifecycle: Weak<Lifecycle>,
     epoch: u64,
     privacy: Option<Privacy>,
+    receipt_identity: Option<ReceiptIdentity>,
 }
 impl AuthorityCheck {
     pub fn disposition(&self) -> Disposition {
@@ -114,6 +191,17 @@ impl AuthorityCheck {
                 privacy.mark_historical();
             }
             privacy
+        })
+    }
+    pub fn attestation(&self) -> Option<AuthorityAttestation<'_>> {
+        if !self.permitted() {
+            return None;
+        }
+        Some(AuthorityAttestation {
+            check: self,
+            identity: self.receipt_identity.as_ref()?,
+            authority: self.authority.as_ref()?,
+            privacy: self.privacy.as_ref()?,
         })
     }
 }
@@ -215,6 +303,7 @@ impl Companion {
                     lifecycle: Arc::downgrade(&stream.life),
                     epoch,
                     privacy: None,
+                    receipt_identity: None,
                 });
             }
             Err(e) => return Err(e),
@@ -293,6 +382,17 @@ impl Companion {
         {
             return Err(Error::Protocol);
         }
+        let receipt_identity = if certified {
+            Some(ReceiptIdentity {
+                session: receipt.session.ok_or(Error::Protocol)?,
+                generation: receipt.generation.ok_or(Error::Protocol)?,
+                companion_instance: receipt.companion_instance.ok_or(Error::Protocol)?,
+                endpoint_instance: receipt.endpoint_instance.ok_or(Error::Protocol)?,
+                control_generation: receipt.control_generation.ok_or(Error::Protocol)?,
+            })
+        } else {
+            None
+        };
         let mut state = lock(&self.state)?;
         let context_current = {
             let local = lock(&stream.life.state)?;
@@ -328,6 +428,7 @@ impl Companion {
             lifecycle: Arc::downgrade(&stream.life),
             epoch: local.epoch,
             privacy,
+            receipt_identity,
         })
     }
 }

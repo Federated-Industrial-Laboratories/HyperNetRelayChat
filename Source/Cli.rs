@@ -10,6 +10,8 @@ use std::{
 type Result<T, E> = std::result::Result<T, E>;
 #[path = "CliEncryption.rs"]
 pub mod encryption_cli;
+#[path = "CliFederation.rs"]
+pub mod federation_cli;
 #[path = "CliIdentity.rs"]
 mod identity_cli;
 
@@ -449,7 +451,7 @@ pub fn profile(command: Profile) -> Result<Json, &'static str> {
         Profile::Session { profile } => {
             let c = open(&profile)?;
             Ok(
-                json!({"status":"Authenticated","session":c.session().map_err(|_| "SessionUnavailable")?.ready,"privacy":c.session().map_err(|_| "SessionUnavailable")?.privacy()}),
+                json!({"status":"Authenticated","session":c.session().map_err(|_| "SessionUnavailable")?.ready,"privacy":c.session().map_err(|_| "SessionUnavailable")?.privacy(),"federationAdmission":c.session().map_err(|_| "SessionUnavailable")?.remote}),
             )
         }
     }

@@ -59,6 +59,11 @@ enum Command {
         #[command(subcommand)]
         command: conversation::encryption_cli::Command,
     },
+    /// Configure explicit bilateral agreements and independently admitted gateways.
+    Federation {
+        #[command(subcommand)]
+        command: conversation::federation_cli::Command,
+    },
     Send(conversation::Send),
     History(conversation::History),
     Search(conversation::Search),
@@ -324,6 +329,7 @@ fn main() -> ExitCode {
                 Command::Profile { command } => conversation::profile(command),
                 Command::Room { command } => conversation::room(command),
                 Command::Crypto { command } => conversation::encryption_cli::run(command),
+                Command::Federation { command } => conversation::federation_cli::run(command),
                 Command::Send(request) => conversation::send(request),
                 Command::History(request) => conversation::history(request),
                 Command::Search(request) => conversation::search(request),

@@ -89,6 +89,12 @@ pub(crate) fn message(
     if !authority::required_removals(db, room, &members, now)?.is_empty() {
         return conflict("EncryptedAuthorityChanged");
     }
+    if !authority::fresh(db, room, &members, now)? {
+        return Err(Fault::Reject(
+            ErrorCode::Unavailable,
+            "OriginIdentityFreshnessUnavailable",
+        ));
+    }
     if !members.iter().any(|m| m.actor == action.actor) {
         return deny("SenderNotInEpoch");
     }
@@ -176,5 +182,9 @@ pub(crate) fn final_authority(
     if mode == 0 {
         return Ok(true);
     }
-    Ok(authority::required_removals(db, room, &authority::members(db, room)?, now)?.is_empty())
+    let members = authority::members(db, room)?;
+    Ok(
+        authority::required_removals(db, room, &members, now)?.is_empty()
+            && authority::fresh(db, room, &members, now)?,
+    )
 }

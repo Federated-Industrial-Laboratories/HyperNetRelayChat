@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Plain wire data. Construction or deserialization alone confers no authority.
+use super::federation::*;
 use super::{Error, Result};
 use ciborium::Value;
 use serde::{
@@ -300,6 +301,7 @@ operations! {
     CryptoEnrolEndpoint=70,CryptoPublishKeyPackage=71,CryptoPropose=72,CryptoCommit=73,CryptoEpochReady=74,
     CryptoInspect=75,CryptoWelcome=76,CryptoRecover=77,CryptoReport=78,CryptoHistory=79,
     FederationPropose=80,FederationAccept=81,FederationWithdraw=82,FederationExchange=83,FederationChallenge=84,
+    FederationAdmitEndpoint=85,FederationWithdrawEndpoint=86,FederationIdentityPage=87,FederationInspect=88,FederationSession=89,
     AccountRecover=90,AccountRotateRecovery=91,AccountEnrolEndpoint=92,AccountDisableEndpoint=93,
     AccountDevices=94,AccountContinuity=95,AccountLifecycleOutcome=96,AccountPublicIdentity=97,
     DirectCreate=100,
@@ -559,12 +561,13 @@ pub struct Approval {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FederationChallenge {
+    pub profile: u64,
+    pub admission: AdmissionRef,
+    pub subject: FederationSubject,
     pub home: ServiceId,
     pub origin: ServiceId,
     pub agreement: AgreementRef,
     pub gateway: Id,
-    pub action_digest: Id,
-    pub operation_id: OperationId,
     pub nonce: Id,
     pub service_boot: Id,
     pub issued_ms: u64,
@@ -584,11 +587,15 @@ pub struct AuthorityEvidence {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct OriginAssertion {
+    pub profile: u64,
+    pub admission: AdmissionRef,
+    pub subject: FederationSubject,
+    pub checkpoints: Vec<CheckpointRef>,
+    pub source_privacy: FederationPrivacy,
     pub origin: ServiceId,
     pub home: ServiceId,
     pub agreement: AgreementRef,
     pub challenge_digest: Id,
-    pub action_digest: Id,
     pub endpoint_binding_digest: Id,
     pub endpoint: Id,
     pub security_generation: u64,
@@ -643,12 +650,13 @@ pub struct SharedRoom {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FederationAgreement {
+    pub profile: u64,
     pub id: Id,
     pub revision: u64,
     pub home: ServiceId,
     pub origin: ServiceId,
-    pub home_gateway: Id,
-    pub origin_gateway: Id,
+    pub home_gateway: GatewayBinding,
+    pub origin_gateway: GatewayBinding,
     pub home_service_key: Id,
     pub origin_service_key: Id,
     pub origin_attestor_key: Id,
@@ -715,6 +723,8 @@ impl<'de> Deserialize<'de> for Blob {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FederationEnvelope {
+    pub profile: u64,
+    pub admission: AdmissionRef,
     pub agreement: AgreementRef,
     pub action: Blob,
     pub endpoint_binding: Blob,

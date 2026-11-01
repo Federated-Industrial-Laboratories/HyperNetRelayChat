@@ -18,6 +18,10 @@ use std::{
 };
 #[path = "Devices.rs"]
 mod devices;
+#[path = "FederationGateway.rs"]
+mod federation_gateway;
+#[path = "FederationOrigin.rs"]
+mod federation_origin;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -47,6 +51,12 @@ pub enum Error {
     AuthorityAdmissionStopped,
     #[error("the enclosing authority check deadline expired")]
     AuthorityAdmissionExpired,
+    #[error("the federation peer refused the current forwarding attempt")]
+    ForwardRefused {
+        code: ErrorCode,
+        detail: String,
+        retry_after_ms: Option<u64>,
+    },
 }
 impl Error {
     pub fn code(&self) -> &'static str {
@@ -64,6 +74,7 @@ impl Error {
             Self::AuthorityAdmissionBusy => "AuthorityAdmissionBusy",
             Self::AuthorityAdmissionStopped => "AuthorityAdmissionStopped",
             Self::AuthorityAdmissionExpired => "AuthorityAdmissionExpired",
+            Self::ForwardRefused { .. } => "FederationForwardRefused",
         }
     }
 }
@@ -77,6 +88,7 @@ const CAPABILITIES: &[&str] = &[
     "resume",
     "confidential-conversations",
     "endpoint-lifecycle",
+    FEDERATION_CAPABILITY,
 ];
 struct Shared {
     config: Config,
@@ -89,6 +101,7 @@ struct Shared {
     diagnostics: Option<Mutex<Budget>>,
     diagnostic_lines: AtomicUsize,
     authority_admission: admission::Admission,
+    federation_routes: Vec<Mutex<federation_origin::Outbound>>,
     stop: Arc<AtomicBool>,
 }
 impl Shared {
@@ -265,16 +278,7 @@ impl Budget {
     }
 }
 
-/// Run one home service. The caller controls shutdown; no network listener is opened.
-pub fn run(directory: &Path, stop: Arc<AtomicBool>) -> Result<()> {
-    run_with_ready(directory, stop, false, |_| Ok(()))
-}
-pub fn run_with_ready(
-    directory: &Path,
-    stop: Arc<AtomicBool>,
-    diagnostics: bool,
-    ready: impl FnOnce(&super::Descriptor) -> Result<()>,
-) -> Result<()> {
+fn load_shared(directory: &Path, stop: Arc<AtomicBool>, diagnostics: bool) -> Result<Shared> {
     let config = Config::load(directory).map_err(|_| Error::Configuration)?;
     let signer = files::key(&directory.join("Signing.key")).map_err(|_| Error::Configuration)?;
     let home = Home::open(
@@ -287,24 +291,42 @@ pub fn run_with_ready(
     .map_err(|_| Error::Configuration)?;
     config.clock.sample().map_err(|_| Error::Clock)?;
     let companion = Companion::new(&config.companion).map_err(|_| Error::Transport)?;
-    let status = companion.status().map_err(|_| Error::Transport)?;
-    if !status.check_authority().supported() || !status.check_authority().endpoint_ready() {
-        return Err(Error::Authority);
-    }
-    let shared = Arc::new(Shared {
+    let boot = home.federation_boot;
+    let federation_routes = federation_origin::load(directory)?;
+    let shared = Shared {
         config,
         signer,
         home: Mutex::new(home),
         companion,
-        boot: Id::random().map_err(|_| Error::State)?,
+        boot,
         handshakes: AtomicUsize::new(0),
         ingress: Mutex::new(Budget::new(64, 16)),
         diagnostics: diagnostics.then(|| Mutex::new(Budget::new(1, 8))),
         diagnostic_lines: AtomicUsize::new(128),
         authority_admission: admission::Admission::default(),
+        federation_routes,
         stop: Arc::clone(&stop),
-    });
+    };
+    Ok(shared)
+}
+
+/// Run one home service. The caller controls shutdown; no network listener is opened.
+pub fn run(directory: &Path, stop: Arc<AtomicBool>) -> Result<()> {
+    run_with_ready(directory, stop, false, |_| Ok(()))
+}
+pub fn run_with_ready(
+    directory: &Path,
+    stop: Arc<AtomicBool>,
+    diagnostics: bool,
+    ready: impl FnOnce(&super::Descriptor) -> Result<()>,
+) -> Result<()> {
+    let shared = Arc::new(load_shared(directory, Arc::clone(&stop), diagnostics)?);
+    let status = shared.companion.status().map_err(|_| Error::Transport)?;
+    if !status.check_authority().supported() || !status.check_authority().endpoint_ready() {
+        return Err(Error::Authority);
+    }
     ready(&shared.config.descriptor)?;
+    let _federation = federation_origin::Maintenance::start(Arc::clone(&shared))?;
     let mut connections: Vec<(Arc<Stream>, thread::JoinHandle<()>)> = Vec::new();
     let mut maintenance = Maintenance::new();
     while !stop.load(Ordering::Acquire) {
@@ -395,6 +417,9 @@ fn serve(shared: &Shared, stream: &Stream) -> Result<()> {
         Id::from_hex(peer.principal()).map_err(|_| shared.authentication("PrincipalEncoding"))?;
     let end = clock::boot_ms().map_err(|_| Error::Clock)? + 5000;
     let incoming = io::receive(stream, remaining(end)?).map_err(|_| Error::Transport)?;
+    if incoming.kind == FrameKind::FederationControl {
+        return federation_gateway::serve(shared, stream, incoming, principal, end, handshake);
+    }
     if incoming.kind == FrameKind::DeviceHello {
         return devices::serve(shared, stream, incoming, principal, end);
     }
@@ -510,12 +535,25 @@ fn serve(shared: &Shared, stream: &Stream) -> Result<()> {
         if incoming.kind == FrameKind::Close {
             return Ok(());
         }
-        if !matches!(incoming.kind, FrameKind::Action | FrameKind::CryptoAction) {
+        if !matches!(
+            incoming.kind,
+            FrameKind::Action | FrameKind::CryptoAction | FrameKind::FederationControl
+        ) {
             return Err(Error::Frame);
         }
         let now = clock::boot_ms().map_err(|_| Error::Clock)?;
         if !budget.admit(now) || !shared.ingress.lock().map_err(|_| Error::State)?.admit(now) {
             return Err(Error::RateLimited);
+        }
+        if incoming.kind == FrameKind::FederationControl {
+            federation_origin::bootstrap(
+                shared,
+                stream,
+                &session,
+                &endpoint.key,
+                &incoming.payload,
+            )?;
+            continue;
         }
         let verified =
             verify_action(&incoming.payload, &endpoint.key).map_err(|_| Error::Authentication)?;
@@ -523,6 +561,10 @@ fn serve(shared: &Shared, stream: &Stream) -> Result<()> {
             != verified.action().operation.is_crypto_transition()
         {
             return Err(Error::Frame);
+        }
+        if verified.action().home != home {
+            federation_origin::action(shared, stream, &session, &verified)?;
+            continue;
         }
         if verified.action().operation == Operation::SearchQuery {
             search(
@@ -733,4 +775,13 @@ fn search(
         }
         result
     })
+}
+
+/// Retry an already durable origin stop through its independently admitted gateway.
+pub fn notify_federation_withdrawal(
+    directory: &Path,
+    agreement: AgreementRef,
+) -> Result<crate::federation::AgreementState> {
+    let shared = load_shared(directory, Arc::new(AtomicBool::new(false)), false)?;
+    federation_origin::notify_withdrawal(&shared, agreement)
 }

@@ -34,6 +34,7 @@ allocating the payload. No compression, padding or trailing CBOR data is allowed
 | DeviceProof | 15 | 65,536 bytes |
 | DeviceReceipt | 16 | 65,536 bytes |
 | CryptoResponse | 17 | 262,144 bytes |
+| FederationControl | 18 | 65,536 bytes |
 
 A crypto class is valid only for KeyPackage publication, proposal, commit, epoch
 readiness, crypto inspection, Welcome or crypto recovery operations, or an envelope
@@ -143,6 +144,13 @@ The role is bound in both the protected media type and signed payload.
 | DeviceProof | 16 | `device-proof` | Proposed endpoint key and, when required, current owner recovery key |
 | DeviceReceipt | 17 | `device-receipt` | Exact receiving home service |
 | ReplacementKey | 18 | `replacement-key` | Proposed replacement recovery key |
+| GatewayMessage | 19 | `gateway-message` | Accepted gateway for hello/proof; receiving service for challenge/ready |
+| RemoteSessionRequest | 20 | `remote-session-request` | Exact origin endpoint |
+| RemoteSessionReady | 21 | `remote-session-ready` | Receiving home service |
+| OriginIdentityCheckpoint | 22 | `origin-identity-checkpoint` | Pinned origin service |
+| FederationControl | 23 | `federation-control` | Accepted gateway/admin for requests; receiving service for results and proof authorization |
+| OriginIdentityPage | 24 | `origin-identity-page` | Pinned origin service |
+| IdentityFreshness | 25 | `identity-freshness` | Pinned origin service; short observation of exact identity heads, never a HyperNet permit |
 
 The object's digest is SHA-256 of its exact canonical payload array, excluding
 the COSE wrapper. This lets both administrations sign identical agreement bytes.
@@ -240,8 +248,9 @@ operation-specific target compatibility remain feature-owner checks.
 | 50-52 | Approval.Prepare, Approve, Reject |
 | 60-66 | Moderation.Ignore, Mute, Silence, Kick, Ban, Filters, Restrictions |
 | 70-79 | Crypto.EnrolEndpoint, PublishKeyPackage, Propose, Commit, EpochReady, Inspect, Welcome, Recover, Report, History |
-| 80-84 | Federation.Propose, Accept, Withdraw, Exchange, Challenge |
+| 80-89 | Federation.Propose, Accept, Withdraw, Exchange, Challenge, AdmitEndpoint, WithdrawEndpoint, IdentityPage, Inspect, Session |
 | 90-96 | Account.Recover, RotateRecovery, EnrolEndpoint, DisableEndpoint, Devices, Continuity, LifecycleOutcome |
+| 97 | Account.PublicIdentity |
 | 100 | Direct.Create |
 
 Operation names describe contracts from the permission specification. Defining a
@@ -338,9 +347,15 @@ controller authority, grant mode, scope, expiry and one-use approval consumption
 An encrypted approval additionally requires the owner endpoint's verified
 plaintext/ciphertext handling specified by the state contract.
 
-`FederationAgreement` contains `id`, `revision`, `home`, `origin`, `homeGateway`,
+Federation runtime objects require `profile: 1` and capability
+`federation-runtime-1`. They complete the previously unused federation schemas;
+local Action and endpoint-binding bytes retain their existing encodings.
+
+`FederationAgreement` contains `profile`, `id`, `revision`, `home`, `origin`, `homeGateway`,
 `originGateway`, `homeServiceKey`, `originServiceKey`, `originAttestorKey`, `rooms`,
-`notBeforeMs` and `expiresMs`. Gateways are exact HyperNet application principals
+`notBeforeMs` and `expiresMs`. Each gateway is a closed object containing
+`network`, `destination`, `principal`, `serviceEndpoint`, `signingKey` and
+`protocol`. These are exact HyperNet application bindings
 admitted on the named receiving side: homeGateway receives origin-to-home
 exchange; originGateway receives home-to-origin exchange. Both services sign
 identical canonical agreement payload bytes after explicit local administration
@@ -355,15 +370,20 @@ belong to this home. Remote admission is explicit and per enrolled endpoint.
 Onward sharing and transitive third-network origin assertions are unsupported.
 Those fixed rules are not optional fields that an agreement can weaken.
 
-`FederationChallenge` contains `home`, `origin`, `agreement`, `gateway`,
-`actionDigest`, `operationId`, `nonce`, `serviceBoot`, `issuedMs` and `expiresMs`.
+`FederationChallenge` contains `profile`, `home`, `origin`, `agreement`, `gateway`,
+`admission`, `subject`, `nonce`, `serviceBoot`, `issuedMs` and `expiresMs`.
+`admission` contains `id` and `revision`. The closed subject is either
+`{kind: action, actionDigest, operationId}` or
+`{kind: session, requestDigest, request}`. Bootstrap evidence cannot authorize
+an Action, and an Action challenge cannot open a retry window.
 The represented interval is positive and at most five seconds. The home also
 retains the original boot-time deadline and gateway binding in its bounded,
 one-use challenge table. Restart discards pending challenges. No remote clock
 can extend that original home bound.
 
-`OriginAssertion` contains `origin`, `home`, `agreement`, `challengeDigest`,
-`actionDigest`, `endpointBindingDigest`, `endpoint`, `securityGeneration`,
+`OriginAssertion` contains `profile`, `origin`, `home`, `agreement`, `admission`,
+`subject`, `checkpoints`, `sourcePrivacy`, `challengeDigest`,
+`endpointBindingDigest`, `endpoint`, `securityGeneration`,
 `enrolmentGeneration`, `transportNetwork`, `transportPrincipal`,
 `transportSession`, `transportGeneration`, `transportGrant`,
 `transportGrantGeneration`, `sourceServiceBoot`, `controlGeneration`,
@@ -371,6 +391,12 @@ can extend that original home bound.
 `sourceEvaluatedMs`, `sourceNotAfterMs` and `sourceUncertaintyMs`.
 Its authority map contains `configuration`, `epoch`, `height`, `state`,
 `statementDigest`, `evaluatedAtMs` and `expiresAtMs`.
+`checkpoints` is a sorted unique list of at most three
+`{account, checkpointDigest}` references for the acting, operator and represented
+accounts belonging to the origin. Their independently verified continuity
+records establish classification and endpoint authority; the transport receipt
+alone does not establish them. `sourcePrivacy` uses the closed effective-privacy
+schema in [the federation runtime contract](FederationRuntime.md#6-fresh-source-evidence-and-privacy).
 
 Only a permitted, currently usable source check can produce this assertion.
 Source lifetime is positive, at most five seconds, and conservatively translated
@@ -381,7 +407,7 @@ source, challenge, credential and agreement expiry. Copying or forwarding never
 starts a new source lifetime.
 
 A Federation frame is unsigned canonical `[1, envelope]`; the envelope has
-`agreement`, `action`, `endpointBinding`, `challenge` and `originAssertion`.
+`profile`, `agreement`, `admission`, `action`, `endpointBinding`, `challenge` and `originAssertion`.
 The last four fields are byte strings containing their complete signed objects.
 The entire envelope, including all evidence, must fit its selected frame class.
 CryptoFederation permits a larger original crypto Action but does not enlarge
@@ -396,6 +422,13 @@ across these objects. Its current room and delegation policies can further refus
 an otherwise valid remote operation. Challenge consumption and a new outcome are
 atomic. An existing identical outcome does not create a second effect. Withdrawal
 uses the acknowledged home barrier described in the transport profile.
+
+Gateway handshake, bootstrap, signed identity checkpoints/pages and closed
+control schemas are specified in [FederationRuntime.md](FederationRuntime.md).
+They retain the ordinary canonical decoding bounds. An authenticated foreign
+execution uses an explicit verified remote context, never a fabricated local
+session. Its exact operation outcome and original home challenge consumption
+share the same guarded transaction as domain effects.
 
 ## Boundary evidence
 

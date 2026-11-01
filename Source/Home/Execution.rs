@@ -152,7 +152,16 @@ fn expected(db: &Connection, action: &Action) -> Domain<()> {
                     .reference
                     .generation
             }
-            Revision::Agreement | Revision::Epoch => {
+            Revision::Agreement => {
+                let reference = action
+                    .agreement
+                    .ok_or(Fault::Reject(ErrorCode::InvalidInput, "AgreementRevision"))?;
+                if *wanted != reference.revision {
+                    return conflict("AgreementRevision");
+                }
+                reference.revision
+            }
+            Revision::Epoch => {
                 return Err(Fault::Reject(
                     ErrorCode::UnsupportedFeature,
                     "RevisionFeature",
@@ -293,6 +302,45 @@ impl Home {
         permit: &dyn Fn() -> bool,
         cancel: &Cancellation,
     ) -> Result<Response> {
+        self.execute_context(
+            verified,
+            ExecutionContext::Local(session),
+            clock,
+            permit,
+            cancel,
+        )
+    }
+    pub fn execute_remote(
+        &mut self,
+        remote: &crate::federation::VerifiedRemoteSubmission,
+        clock: TimeBounds,
+        permit: &dyn Fn() -> bool,
+    ) -> Result<Response> {
+        self.execute_remote_cancellable(remote, clock, permit, &Cancellation::default())
+    }
+    pub fn execute_remote_cancellable(
+        &mut self,
+        remote: &crate::federation::VerifiedRemoteSubmission,
+        clock: TimeBounds,
+        permit: &dyn Fn() -> bool,
+        cancel: &Cancellation,
+    ) -> Result<Response> {
+        self.execute_context(
+            remote.action(),
+            ExecutionContext::Remote(remote),
+            clock,
+            permit,
+            cancel,
+        )
+    }
+    fn execute_context(
+        &mut self,
+        verified: &VerifiedAction,
+        context: ExecutionContext<'_>,
+        clock: TimeBounds,
+        permit: &dyn Fn() -> bool,
+        cancel: &Cancellation,
+    ) -> Result<Response> {
         let action = verified.action();
         let home = self.home;
         let signer = &self.signer;
@@ -303,7 +351,11 @@ impl Home {
             action_digest: verified.digest(),
             outcome,
         };
-        if action.home != home || action.agreement.is_some() {
+        if action.home != home
+            || matches!(context, ExecutionContext::Local(_))
+                && (action.agreement.is_some()
+                    || action.actor.acting().account.origin != home.network)
+        {
             return Ok(response(refusal(ErrorCode::Denied, "HomeBinding")));
         }
         if !permit() || clock.refresh().is_err() {
@@ -313,11 +365,19 @@ impl Home {
             )));
         }
         let rollback_reason = Cell::new(None);
+        let federation_boot = self.federation_boot;
         let result=self.store.write(|db|{
-            let commit=|outcome:Outcome|->rusqlite::Result<Commit<Outcome>>{let change=encode(&("HRC.Operation",verified.digest(),digest(&encode(&outcome)?)))?;Ok(Commit::new(outcome,change))};
+            let commit=|outcome:Outcome|->rusqlite::Result<Commit<Outcome>>{
+                if let ExecutionContext::Remote(remote)=context && !matches!(outcome,Outcome::Refused{..}) {
+                    let final_time=clock.refresh().map_err(|_|rusqlite::Error::InvalidQuery)?;
+                    if !permit()||cancel.is_cancelled()||crate::federation::final_check(db,remote,federation_boot,final_time).is_err(){rollback_reason.set(Some("FederationAuthorityUnavailable"));return Err(rusqlite::Error::InvalidQuery)}
+                    crate::federation::consume_in(db,remote)?;
+                }
+                let change=encode(&("HRC.Operation",verified.digest(),digest(&encode(&outcome)?)))?;Ok(Commit::new(outcome,change))};
             let now=match checked_clock(db,clock){Ok(now)=>now,Err(reason)=>return commit(refusal(ErrorCode::Unavailable,reason))};
             if !permit()||cancel.is_cancelled(){return commit(refusal(ErrorCode::Unavailable,"AuthorityUnavailable"));}
-            if let Err(error)=crate::identity::authenticate(db,verified,session){return match error{Fault::Sql(e)=>Err(e),Fault::Reject(code,detail)=>commit(refusal(code,detail))};}
+            crate::federation::expire_in(db,now)?;
+            if let Err(error)=context.authenticate(db,verified,federation_boot,now){return match error{Fault::Sql(e)=>Err(e),Fault::Reject(code,detail)=>commit(refusal(code,detail))};}
             let Some(expires)=window(db,action.operation_id.window,action.actor.acting())? else{return commit(refusal(ErrorCode::Denied,"RetryWindow"));};
             let existing:Option<RetainedOperation>=db.query_row("SELECT digest,action,outcome,read_only FROM hrc_operations WHERE window=?1 AND operation=?2",params![action.operation_id.window.as_hex(),action.operation_id.operation.as_hex()],|r|Ok(RetainedOperation{digest:r.get(0)?,action:r.get(1)?,outcome:r.get(2)?,read_only:r.get(3)?})).optional()?;
             let mut repeated_read=false;
@@ -333,7 +393,8 @@ impl Home {
             let admitted=(||->Domain<crate::delegation::Permit>{
                 expected(db,action)?;
                 if !matches!(action.actor,Actor::Delegated{..})&&action.approval.is_some(){return invalid("UnexpectedApproval");}
-                crate::delegation::authorize(db,action,now,verified.digest())
+                let p=crate::delegation::authorize(db,action,now,verified.digest())?;
+                match context { ExecutionContext::Local(_)=>Ok(p), ExecutionContext::Remote(remote)=>crate::federation::constrain(db,remote,p,now) }
             })();
             let mut admitted_permit=None;
             let outcome=match admitted {
@@ -344,8 +405,9 @@ impl Home {
                     match budgets::admit(db,action,now.lower_ms){Ok(true)=>{},Ok(false)=>return commit(refusal(ErrorCode::RateLimited,"OperationBudget")),Err(e)=>return Err(sql_fault(e))}
                     db.execute_batch("SAVEPOINT hrc_domain_effects")?;
                     match dispatch(db,verified,now,grant_permit,signer,cancel,information) {
-                        Ok(outcome)=>{crate::delegation::consume(db,grant_permit)?;db.execute_batch("RELEASE hrc_domain_effects")?;outcome},
+                        Ok(outcome)=>{if let ExecutionContext::Remote(remote)=context {crate::federation::record_creation(db,remote,&outcome).map_err(sql_fault)?;}crate::delegation::consume(db,grant_permit)?;db.execute_batch("RELEASE hrc_domain_effects")?;outcome},
                         Err(Fault::Sql(e))=>return Err(e),
+                        Err(Fault::Reject(ErrorCode::Unavailable,"OriginIdentityFreshnessUnavailable"))=>{rollback_reason.set(Some("OriginIdentityFreshnessUnavailable"));return Err(rusqlite::Error::InvalidQuery)},
                         Err(Fault::Reject(code,detail))=>{db.execute_batch("ROLLBACK TO hrc_domain_effects; RELEASE hrc_domain_effects")?;Outcome::Rejected{code,detail:detail.into()}},
                     }
                 },
@@ -383,6 +445,28 @@ impl Home {
                 Ok(response(refusal(ErrorCode::Overloaded, "StorageCapacity")))
             }
             Err(error) => Err(Error::Storage(error)),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ExecutionContext<'a> {
+    Local(&'a AuthenticatedSession),
+    Remote(&'a crate::federation::VerifiedRemoteSubmission),
+}
+impl ExecutionContext<'_> {
+    fn authenticate(
+        &self,
+        db: &Connection,
+        verified: &VerifiedAction,
+        boot: Id,
+        now: TimeBounds,
+    ) -> Domain<()> {
+        match self {
+            Self::Local(session) => {
+                crate::identity::authenticate(db, verified, session).map(|_| ())
+            }
+            Self::Remote(remote) => crate::federation::authenticate_in(db, remote, boot, now),
         }
     }
 }

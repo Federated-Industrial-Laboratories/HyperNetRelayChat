@@ -40,6 +40,8 @@ fn export_offline_presentation_fixture() {
     let home = base.home;
     let account = base.actor.represented();
     let profile = client::Profile {
+        federation: None,
+        agreements: Vec::new(),
         server: Descriptor {
             version: 1,
             home,
@@ -74,7 +76,7 @@ fn export_offline_presentation_fixture() {
     )
     .unwrap();
     outbox::initialize(&mut store).unwrap();
-    cache::initialize(&mut store).unwrap();
+    cache::initialize(&mut store, profile.server.home).unwrap();
     let confidential = std::env::var_os("HRC_PRESENTATION_CONFIDENTIAL").is_some();
     if confidential {
         crate::crypto::initialize(&mut store).unwrap();
@@ -109,7 +111,7 @@ fn export_offline_presentation_fixture() {
             unread: if confidential && i == 1 { 0 } else { 3 },
         })
         .collect();
-    cache::save_rooms(&mut store, &summaries).unwrap();
+    cache::save_rooms(&mut store, profile.server.home, &summaries).unwrap();
     let reader = AccountId {
         origin: home.network,
         local: super::id(20),

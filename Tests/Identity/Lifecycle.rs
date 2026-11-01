@@ -328,7 +328,7 @@ fn owner_recovery_atomically_fences_devices_grants_approvals_and_encrypted_roste
         run(&mut home, &agent, &prepare),
         Outcome::Committed { .. }
     ));
-    home.store.write(|db|{db.execute("INSERT INTO hrc_encrypted_rooms(room,barrier) VALUES(?1,0)",[room.to_string()])?;db.execute("INSERT INTO hrc_encrypted_roster(room,endpoint,account,represented,actor,credential) VALUES(?1,?2,?3,?3,?4,?4)",params![room.to_string(),owner.record.acting.endpoint.as_hex(),account.to_string(),encode(&owner.record.acting)?])?;Ok(Commit::new((),b"identity barrier fixture".to_vec()))}).unwrap();
+    home.store.write(|db|{db.execute("INSERT INTO hrc_encrypted_rooms(room,barrier) VALUES(?1,0)",[room.to_string()])?;db.execute("INSERT INTO hrc_encrypted_roster(room,endpoint,account,represented,actor,credential,registration) VALUES(?1,?2,?3,?3,?4,?4,X'')",params![room.to_string(),owner.record.acting.endpoint.as_hex(),account.to_string(),encode(&owner.record.acting)?])?;Ok(Commit::new((),b"identity barrier fixture".to_vec()))}).unwrap();
     let old_security = snapshot(&mut home, account).security_generation;
     let (key, request, transport) = device_request(account, 60, DevicePurpose::Recover, None);
     let challenge = home

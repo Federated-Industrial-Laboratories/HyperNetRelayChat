@@ -50,11 +50,13 @@ class Conversation:
     def cli(self, name, *arguments, failure=False):
         remaining = self.deadline - time.monotonic()
         assert remaining > 0, 'native HRC workflow deadline expired'
+        started = time.clock_gettime_ns(time.CLOCK_BOOTTIME)//1000000
         # Session setup has one 30 s budget; operation and durable I/O have their own bounds.
         result = subprocess.run([self.binary, *map(str, arguments)], capture_output=True,
                                 timeout=min(55, remaining))
         assert len(result.stdout) <= 1024*1024 and len(result.stderr) <= 65536
-        item = dict(case=name, exitCode=result.returncode,
+        item = dict(case=name, exitCode=result.returncode, startedBootMs=started,
+                    finishedBootMs=time.clock_gettime_ns(time.CLOCK_BOOTTIME)//1000000,
                     stdout=result.stdout.decode(errors='replace'), stderr=result.stderr.decode(errors='replace'))
         self.record(item)
         if failure:
@@ -187,6 +189,41 @@ class Conversation:
     def main(self):
         self.setup()
         room = self.room('Native room')
+        only_local = self.config.get('localClientOnly', False)
+        assert isinstance(only_local, bool), 'localClientOnly must be boolean'
+        setting = os.environ.get('HYPERNET_HRC_LOCAL_CLIENT_ONLY', '0')
+        assert setting in ('0', '1'), 'Invalid local-client workflow selection'
+        only_local = only_local or setting == '1'
+        only_confidential = self.config.get('confidentialClientOnly', False)
+        assert isinstance(only_confidential, bool), 'confidentialClientOnly must be boolean'
+        confidential_setting = os.environ.get('HRC_NATIVE_CONFIDENTIAL_ONLY', '0')
+        assert confidential_setting in ('0', '1'), 'Invalid confidential workflow selection'
+        only_confidential = only_confidential or confidential_setting == '1'
+        assert not (only_local and only_confidential), 'Select one independent client workflow'
+        if only_local or only_confidential:
+            binary = self.confidential_client_binary() if only_confidential else self.local_client_binary()
+            assert binary, 'Independent client workflow requires its executable'
+            for name in ('Bob', 'Agent'):
+                self.outcome(self.cli(name+'Joined','room','join','--profile',self.profiles[name],
+                                      '--room',address(room)))
+            if only_confidential:
+                self.confidential_client(room)
+                self.authority_refusal(room)
+                self.record(dict(case='NativeConfidentialClientWorkflow',passed=True,protocol='hrc/1',
+                                 realCliProvisioning=True,conversationBaselineIncluded=False,
+                                 confidentialClientIncluded=True,noDirectFallback=True))
+                return
+            self.local_client(room)
+            reference, _ = self.grant(room)
+            revoked = self.outcome(self.cli('LocalBotGrantRevoked','agent','revoke',
+                '--profile',self.profiles['Alice'],'--grant',reference['id'],
+                '--generation',reference['generation']))
+            self.bot(room, revoked)
+            self.authority_refusal(room)
+            self.record(dict(case='NativeLocalClientWorkflow',passed=True,protocol='hrc/1',
+                             realCliProvisioning=True,conversationBaselineIncluded=False,
+                             localControllerIncluded=True,botIncluded=True,noDirectFallback=True))
+            return
         other = self.room('Other room')
         for name in ('Bob','Agent'):
             for target in (room,other):
@@ -475,10 +512,49 @@ class Conversation:
         self.record(dict(case='NativeHyperNetAuthorityRefusalPreservesDraft',passed=True,
                          draftRetained=True,noPublication=True,noDirectFallback=True))
 
+    def diagnostics(self):
+        suite = self.config.get('suiteBinary') or os.environ.get('HYPERNET_HRC_SUITE_BINARY')
+        if not suite:
+            self.record(dict(case='NativeCompanionDiagnostics',available=False,reason='SuiteBinaryNotConfigured'))
+            return
+        until = min(self.deadline, time.monotonic()+6)
+        for name, companion in self.config['companions'].items():
+            remaining = until-time.monotonic()
+            if remaining <= 0:
+                break
+            item = dict(case='NativeCompanionDiagnostics',principal=name,
+                        observedBootMs=time.clock_gettime_ns(time.CLOCK_BOOTTIME)//1000000)
+            try:
+                result = subprocess.run([str(suite),'streams','status','--directory',companion['directory']],
+                                        capture_output=True,timeout=min(2,remaining))
+                item['exitCode'] = result.returncode
+                assert len(result.stdout) <= 16384 and len(result.stderr) <= 16384
+                if result.returncode == 0:
+                    status = json.loads(result.stdout)
+                    assert isinstance(status,dict)
+                    errors = status.get('recentErrors',[])
+                    assert isinstance(errors,list) and len(errors) <= 8
+                    assert all(isinstance(e,dict) for e in errors)
+                    item['recentErrors'] = [dict(bootMs=e.get('bootMs'),
+                                                message=str(e.get('message',''))[:256]) for e in errors]
+                    item['connections'] = len(status.get('connections',[]))
+                    item['status'] = status.get('status')
+                else:
+                    item['available'] = False
+            except (OSError, subprocess.TimeoutExpired, ValueError, AssertionError) as error:
+                item.update(available=False,error=type(error).__name__)
+            self.record(item)
+
 
 def run(configuration, controls, record):
     workflow = Conversation(configuration, controls, record)
     try:
         workflow.main()
+    except Exception:
+        try:
+            workflow.diagnostics()
+        except Exception as error:
+            record(dict(case='NativeCompanionDiagnostics',available=False,error=type(error).__name__))
+        raise
     finally:
         workflow.stop()
