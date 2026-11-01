@@ -5,22 +5,24 @@ transport diagnostics. It connects only to an existing, explicitly configured
 HyperNet Suite companion through its private Unix socket. It does not open an
 Internet listener, create a direct route or renew application consent.
 
-These commands qualify the transport dependency. They do not provide rooms,
-messages, persistence, delegation, federation or encrypted conversations. The
-complete chat protocol remains under design. There is no installable HRC release.
+These diagnostic commands qualify the transport dependency. Use the separate
+[conversation commands](ConversationSetup.md) for HRC service and endpoint setup.
+Diagnostic acknowledgements never claim that a chat message committed.
 
 ## Build and check
 
 Use Rust 1.96 or later on Linux. From the repository root:
 
 ```sh
+bash Tools/Native.sh
+source Tools/Environment.sh
 cargo build --locked
 bash Tools/Check.sh
 cargo install --locked --path .
 hrc --help
 ```
 
-`cargo install` installs the diagnostic executable into the selected Cargo binary
+`cargo install` installs the executable into the selected Cargo binary
 directory. It does not install or configure a system service. The crate is licensed under Apache-2.0 and marked `publish = false` during
 development. Generated binaries and
 Cargo's build cache are excluded from the repository. All maintained test bodies
@@ -88,7 +90,7 @@ application identity or a grant. Invalid requests receive no automatic response.
 The reply is eligible only while the fresh observation remains permitted and
 locally usable. The write is bounded by its remaining lifetime. No arbitrary
 message text, file, command, model call or durable effect is part of this protocol.
-The diagnostic protocol is distinct from the future HRC conversation wire format.
+The diagnostic protocol is distinct from the native `hrc/1` conversation wire format.
 
 Output is JSON Lines. The receiver emits `Waiting`, `Accepted`, and then
 `ProbeReplied` or a refusal. A successful caller emits `ProbeAcknowledged`.

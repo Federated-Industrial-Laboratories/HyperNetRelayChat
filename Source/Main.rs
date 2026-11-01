@@ -1,4 +1,6 @@
-//! Bounded operator diagnostics for the HyperNet transport boundary.
+//! HyperNet Relay Chat command-line interface.
+#[path = "Cli.rs"]
+mod conversation;
 use clap::{Args, Parser, Subcommand};
 use hrc::hypernet::{Companion, Peer};
 use serde_json::{Value, json};
@@ -11,7 +13,7 @@ const RESPONSE: &[u8; 8] = b"HRCack01";
 const ACTION: &[u8] = b"HRC transport diagnostic reply v1\0";
 
 #[derive(Parser)]
-#[command(version, about = "HyperNet Relay Chat transport diagnostics")]
+#[command(version, about = "HyperNet Relay Chat")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -19,6 +21,52 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Administer a home HRC service.
+    Service {
+        #[command(subcommand)]
+        command: conversation::Service,
+    },
+    /// Create and authenticate an endpoint.
+    Profile {
+        #[command(subcommand)]
+        command: conversation::Profile,
+    },
+    /// Join and manage conversations.
+    Room {
+        #[command(subcommand)]
+        command: conversation::Room,
+    },
+    Send(conversation::Send),
+    History(conversation::History),
+    Search(conversation::Search),
+    /// Inspect and control explicit agent permissions.
+    Agent {
+        #[command(subcommand)]
+        command: conversation::Agent,
+    },
+    Api(conversation::Api),
+    /// Read or preserve a local draft without a network connection.
+    Draft {
+        #[command(subcommand)]
+        command: conversation::Draft,
+    },
+    /// List uncertain operation identities without revealing message content.
+    Outbox {
+        #[arg(long)]
+        profile: PathBuf,
+    },
+    /// Submit an exact previously prepared candidate after its required approval.
+    Submit {
+        #[arg(long)]
+        profile: PathBuf,
+        #[arg(long)]
+        candidate: PathBuf,
+    },
+    /// Resolve uncertain operations without assigning replacement message IDs.
+    Resolve {
+        #[arg(long)]
+        profile: PathBuf,
+    },
     /// Inspect and qualify an explicitly configured HyperNet companion.
     Transport {
         #[command(subcommand)]
@@ -165,10 +213,30 @@ fn run(command: Transport) -> Result<(), Failure> {
 }
 
 fn main() -> ExitCode {
-    let Cli {
-        command: Command::Transport { command },
-    } = Cli::parse();
-    match run(command) {
+    let result = match Cli::parse().command {
+        Command::Transport { command } => run(command),
+        command => {
+            let result = match command {
+                Command::Service { command } => conversation::service(command),
+                Command::Profile { command } => conversation::profile(command),
+                Command::Room { command } => conversation::room(command),
+                Command::Send(request) => conversation::send(request),
+                Command::History(request) => conversation::history(request),
+                Command::Search(request) => conversation::search(request),
+                Command::Agent { command } => conversation::agent(command),
+                Command::Api(request) => conversation::api(request),
+                Command::Draft { command } => conversation::draft(command),
+                Command::Outbox { profile } => conversation::outbox(&profile),
+                Command::Submit { profile, candidate } => {
+                    conversation::submit(&profile, &candidate)
+                }
+                Command::Resolve { profile } => conversation::resolve(&profile),
+                Command::Transport { .. } => unreachable!(),
+            };
+            result.map_err(Failure).and_then(|v| output(&v))
+        }
+    };
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             // No peer prose, paths, payload or operating-system diagnostics reach the terminal.

@@ -1,3 +1,30 @@
 //! HyperNet Relay Chat integration boundaries.
 #[path = "HyperNet/Mod.rs"]
 pub mod hypernet;
+
+#[path = "Client/Mod.rs"]
+pub mod client;
+#[path = "Clock/Mod.rs"]
+pub mod clock;
+#[path = "Conversations/Mod.rs"]
+pub mod conversations;
+#[path = "Crypto/Mod.rs"]
+pub mod crypto;
+#[path = "Delegation/Mod.rs"]
+pub mod delegation;
+#[path = "Home/Mod.rs"]
+pub mod home;
+#[path = "Identity/Mod.rs"]
+pub mod identity;
+#[path = "Messaging/Mod.rs"]
+pub mod messaging;
+#[path = "Moderation/Mod.rs"]
+pub mod moderation;
+#[path = "Protocol/Mod.rs"]
+pub mod protocol;
+#[path = "Service/Mod.rs"]
+pub mod service;
+#[path = "Storage/Mod.rs"]
+pub mod storage;
+#[path = "Text/Mod.rs"]
+pub mod text;
