@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! HRC service setup and its HyperNet-only transport lifecycle.
+#[path = "Admission.rs"]
+mod admission;
 #[path = "Files.rs"]
 pub mod files;
 #[path = "Io.rs"]
