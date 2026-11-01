@@ -20,6 +20,9 @@ explicit agent delegation and two-network federation are required capabilities.
 The [local client guide](Documentation/LocalClient.md) covers drafts, connection
 states, contact trust and home-service selection. [Service bots](Documentation/ServiceBots.md)
 use the same scoped API and do not require a language model.
+The [installation guide](Documentation/Installation.md) covers packages and upgrades;
+the [operations guide](Documentation/Operations.md) describes stopped backups,
+continuity, retention and outage recovery.
 
 The [product plan](Documentation/ProductPlan.md) preserves the full proposal and
 the first-release scope amendment, including encrypted private groups. The

@@ -106,7 +106,7 @@ class Conversation:
         assert ready['status'] == 'Ready' and ready['home'] == self.home, ready
         self.record(dict(case='HrcServiceReady', passed=True, home=self.home))
 
-    def stop(self):
+    def stop(self, require_clean=False):
         if self.server is not None:
             if self.server.poll() is None:
                 self.server.terminate()
@@ -117,9 +117,13 @@ class Conversation:
                 out, err = self.server.communicate(timeout=5)
                 raise AssertionError('HRC service did not stop within its cleanup budget')
             assert len(out) <= 65536 and len(err) <= 65536
-            self.record(dict(case='HrcServiceStopped', exitCode=self.server.returncode,
+            exit_code = self.server.returncode
+            self.record(dict(case='HrcServiceStopped', exitCode=exit_code,
                              stdout=out.decode(errors='replace'), stderr=err.decode(errors='replace')))
             self.server = None
+            if require_clean:
+                assert exit_code == 0, 'HRC service did not complete orderly shutdown'
+                assert json.loads(out) == dict(status='Stopped'), 'Missing orderly shutdown result'
 
     def setup(self):
         companions = self.config['companions']
@@ -267,7 +271,7 @@ class Conversation:
         self.denied_send('Agent',room,'Expired permission effect',expiring,'OperationExpired')
         self.record(dict(case='NativeExpiredDelegationRefusesEffect',passed=True))
         self.filters(room)
-        self.stop(); self.start()
+        self.stop(require_clean=True); self.start()
         assert any(e['body'].get('text')==text for e in self.events('Alice',room,'café') if isinstance(e['body'],dict))
         self.acknowledgement_loss(room)
         self.local_client(room)
@@ -490,7 +494,7 @@ class Conversation:
             assert len(before)==1
             assert pending[0]['operationId']==before[0]['operationId']
             assert pending[0]['actionDigest']==before[0]['actionDigest']
-            self.stop(); self.start()
+            self.stop(require_clean=True); self.start()
             resolved = self.cli('ResolveAfterRestart','resolve','--profile',self.profiles['Bob'])
             assert resolved, 'Exact persisted operation was not resolved'
             self.cli('ResolveAgain','resolve','--profile',self.profiles['Bob'])
@@ -556,5 +560,7 @@ def run(configuration, controls, record):
         except Exception as error:
             record(dict(case='NativeCompanionDiagnostics',available=False,error=type(error).__name__))
         raise
+    else:
+        workflow.stop(require_clean=True)
     finally:
         workflow.stop()

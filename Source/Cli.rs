@@ -402,11 +402,19 @@ pub fn service(command: Service) -> Result<Json, &'static str> {
             directory,
             diagnostics,
         } => {
-            service::runtime::run_with_ready(
-                &directory,
-                Arc::new(AtomicBool::new(false)),
-                diagnostics,
-                |descriptor| {
+            let stop = Arc::new(AtomicBool::new(false));
+            let interrupt = signal_hook::flag::register(signal_hook::consts::SIGINT, stop.clone())
+                .map_err(|_| "SignalControlUnavailable")?;
+            let terminate =
+                match signal_hook::flag::register(signal_hook::consts::SIGTERM, stop.clone()) {
+                    Ok(id) => id,
+                    Err(_) => {
+                        signal_hook::low_level::unregister(interrupt);
+                        return Err("SignalControlUnavailable");
+                    }
+                };
+            let result =
+                service::runtime::run_with_ready(&directory, stop, diagnostics, |descriptor| {
                     use std::io::Write;
                     let mut out = std::io::stdout().lock();
                     serde_json::to_writer(
@@ -417,9 +425,10 @@ pub fn service(command: Service) -> Result<Json, &'static str> {
                     writeln!(out)
                         .and_then(|_| out.flush())
                         .map_err(|_| service::runtime::Error::State)
-                },
-            )
-            .map_err(|error| error.code())?;
+                });
+            signal_hook::low_level::unregister(interrupt);
+            signal_hook::low_level::unregister(terminate);
+            result.map_err(|error| error.code())?;
             Ok(json!({"status":"Stopped"}))
         }
     }

@@ -1,0 +1,46 @@
+name: Linux package
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      RUSTUP_TOOLCHAIN: 1.96.0
+      CARGO_BUILD_JOBS: 4
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install build dependencies
+        run: |
+          rustup toolchain install 1.96.0 --profile minimal
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential tcl pkg-config libssl-dev libfontconfig1-dev libxkbcommon-dev libwayland-dev libegl1-mesa-dev
+      - name: Build release executable and controlled SQLCipher
+        run: |
+          bash Tools/Native.sh
+          source Tools/Environment.sh
+          cargo build --locked --release --bin hrc
+          cargo metadata --locked --format-version 1 --filter-platform x86_64-unknown-linux-gnu > /dev/null
+      - name: Assemble package and inventory
+        run: |
+          python3 Tools/Package.py --binary target/release/hrc \
+            --sqlcipher-source target/sqlcipher-source \
+            --output "$RUNNER_TEMP/HRC-linux-x86_64.tar.gz" > "$RUNNER_TEMP/HRC-Package.json"
+          cd "$RUNNER_TEMP"
+          sha256sum HRC-linux-x86_64.tar.gz > HRC-SHA256SUMS
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: HRC-linux-x86_64
+          path: |
+            ${{ runner.temp }}/HRC-linux-x86_64.tar.gz
+            ${{ runner.temp }}/HRC-Package.json
+            ${{ runner.temp }}/HRC-SHA256SUMS
+          if-no-files-found: error
+          retention-days: 7
