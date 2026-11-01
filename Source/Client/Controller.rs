@@ -63,6 +63,7 @@ impl Queued {
                 | Command::SetRoomPreferences { .. }
                 | Command::CloseSearch
                 | Command::AbandonPending { .. }
+                | Command::TrustContact { .. }
         )
     }
     fn new(id: u64, command: Command) -> Self {
@@ -81,6 +82,14 @@ impl Queued {
                 Command::Send { .. }
                     | Command::MarkRead { .. }
                     | Command::CreateRoom { .. }
+                    | Command::CreatePrivateGroup { .. }
+                    | Command::CreateDirect { .. }
+                    | Command::Invite { .. }
+                    | Command::CryptoEnrol
+                    | Command::CryptoPublish { .. }
+                    | Command::CryptoInitialise { .. }
+                    | Command::CryptoCommit { .. }
+                    | Command::CryptoSync { .. }
                     | Command::Join(_)
                     | Command::Leave(_)
                     | Command::SetTopic { .. }
