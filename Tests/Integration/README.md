@@ -65,6 +65,11 @@ observed backoff entries, recovered selections and resolved original deliveries,
 helper resubmissions, not zero internal retries. Failure diagnostics name the
 principal, command and last visible status, with bounded native service logs
 providing the individual read-operation category when available.
+The helper retains at most sixteen observed connection/status transitions per
+principal, with boot time, command stage and request number. A failure therefore
+distinguishes waiting before dispatch from waiting for a specific completion.
+The trace contains no message content, keys or permission evidence and does not
+change deadlines, retries or effects.
 
 Cancellation is attempted while a real query is visibly running. Evidence says
 whether cancellation was observed or completion won the race; it does not claim

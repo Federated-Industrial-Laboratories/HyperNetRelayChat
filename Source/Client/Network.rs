@@ -382,9 +382,27 @@ impl Session {
     }
     /// Submit exactly the persisted bytes. An I/O error does not imply rejection.
     pub fn submit(&self, bytes: &[u8], key: &VerifyingKey) -> Result<Verified<Response>> {
+        self.submit_bounded(bytes, key, None)
+    }
+    /// Retry a read within its original caller budget; mutations cannot enter this path.
+    pub(crate) fn submit_read_until(
+        &self,
+        bytes: &[u8],
+        key: &VerifyingKey,
+        end: u64,
+    ) -> Result<Verified<Response>> {
+        self.submit_bounded(bytes, key, Some(end))
+    }
+    fn submit_bounded(
+        &self,
+        bytes: &[u8],
+        key: &VerifyingKey,
+        end: Option<u64>,
+    ) -> Result<Verified<Response>> {
         let action = verify_action(bytes, key).map_err(|_| Error::Authentication)?;
         if action.action().home != self.ready.home
             || action.action().actor.acting() != &self.ready.acting
+            || end.is_some() && !crate::home::is_read_operation(action.action().operation)
         {
             return Err(Error::Authentication);
         }
@@ -394,9 +412,18 @@ impl Session {
             FrameKind::Action
         };
         let frame = Frame::new(kind, bytes.to_vec()).map_err(|_| Error::Frame)?;
-        io::send(&self.stream, &frame, Duration::from_secs(5)).map_err(transport_failure)?;
-        let incoming =
-            io::receive(&self.stream, Duration::from_secs(10)).map_err(transport_failure)?;
+        let incoming = if let Some(end) = end {
+            let send_end = end.min(
+                clock::boot_ms()
+                    .map_err(|_| Error::Clock)?
+                    .saturating_add(5000),
+            );
+            io::send_before(&self.stream, &frame, send_end).map_err(transport_failure)?;
+            io::receive_before(&self.stream, end).map_err(transport_failure)?
+        } else {
+            io::send(&self.stream, &frame, Duration::from_secs(5)).map_err(transport_failure)?;
+            io::receive(&self.stream, Duration::from_secs(10)).map_err(transport_failure)?
+        };
         if let Some(remote) = &self.remote
             && let Some(error) = self.forwarding_refusal(
                 &incoming,
