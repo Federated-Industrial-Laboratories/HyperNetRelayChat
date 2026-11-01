@@ -1,7 +1,20 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Expiry excludes content immediately and removes bounded batches with their indexes.
 use super::types::*;
-use rusqlite::{Transaction, params};
+use rusqlite::{Connection, Transaction, params};
+pub(super) fn due(db: &Connection, now: u64) -> rusqlite::Result<bool> {
+    db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM hrc_events WHERE created<?1)
+         OR EXISTS(SELECT 1 FROM hrc_operations o JOIN hrc_windows w ON w.id=o.window WHERE o.created<?2 AND w.expires<?3)
+         OR EXISTS(SELECT 1 FROM hrc_approvals WHERE expires<?3)
+         OR EXISTS(SELECT 1 FROM hrc_restrictions WHERE expires<?3)
+         OR EXISTS(SELECT 1 FROM hrc_presence WHERE expires<?3)
+         OR EXISTS(SELECT 1 FROM hrc_invitations WHERE expires<?3)
+         OR EXISTS(SELECT 1 FROM hrc_budgets WHERE updated<?2)",
+        params![now.saturating_sub(RETENTION), now.saturating_sub(7 * DAY), now],
+        |r| r.get(0),
+    )
+}
 pub(super) fn clean(db: &Transaction<'_>, now: u64) -> rusqlite::Result<()> {
     let cutoff = now.saturating_sub(RETENTION);
     let removed:u64=db.query_row("SELECT COALESCE(sum(bytes),0) FROM (SELECT bytes FROM hrc_events WHERE created<?1 ORDER BY created LIMIT 128)",[cutoff],|r|r.get(0))?;

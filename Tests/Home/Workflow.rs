@@ -25,6 +25,33 @@ struct Fixture {
     root: PathBuf,
     key: storage::Key,
 }
+
+#[test]
+fn idle_maintenance_writes_only_when_retention_has_work() {
+    let fixture = Fixture::new();
+    let mut home = fixture.create();
+    let before = home.usage().unwrap().commit_counter;
+    home.maintain(TimeBounds::test_now()).unwrap();
+    assert_eq!(home.usage().unwrap().commit_counter, before);
+    home.store
+        .write(|db| {
+            db.execute("INSERT INTO hrc_budgets VALUES('expired',0,0)", [])?;
+            Ok(Commit::new((), b"expired budget fixture".to_vec()))
+        })
+        .unwrap();
+    let before = home.usage().unwrap().commit_counter;
+    home.maintain(TimeBounds::test_now()).unwrap();
+    assert_eq!(home.usage().unwrap().commit_counter, before + 1);
+    let remaining: u64 = home
+        .store
+        .read(Duration::from_secs(1), |db| {
+            db.query_row("SELECT count(*) FROM hrc_budgets", [], |r| r.get(0))
+        })
+        .unwrap();
+    assert_eq!(remaining, 0);
+    home.maintain(TimeBounds::test_now()).unwrap();
+    assert_eq!(home.usage().unwrap().commit_counter, before + 1);
+}
 impl Fixture {
     fn new() -> Self {
         let root = std::env::temp_dir().join(format!(

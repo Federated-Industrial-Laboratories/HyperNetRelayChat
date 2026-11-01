@@ -77,7 +77,7 @@ struct Shared {
     diagnostic_lines: AtomicUsize,
 }
 impl Shared {
-    fn report(&self, error: &Error) {
+    fn report(&self, event: &'static str, code: &'static str) {
         let Some(budget) = &self.diagnostics else {
             return;
         };
@@ -95,10 +95,50 @@ impl Shared {
         }
         drop(budget);
         // Only fixed categories enter diagnostics; no peer-controlled text or identifiers.
-        eprintln!(
-            "{{\"event\":\"SessionClosed\",\"code\":\"{}\"}}",
-            error.code()
-        );
+        eprintln!("{{\"event\":\"{event}\",\"code\":\"{code}\"}}");
+    }
+}
+/// Own at most one periodic storage task without performing disk work on accept.
+struct Maintenance {
+    last: std::time::Instant,
+    worker: Option<thread::JoinHandle<()>>,
+}
+impl Maintenance {
+    fn new() -> Self {
+        Self {
+            last: std::time::Instant::now(),
+            worker: None,
+        }
+    }
+    fn tick(&mut self, shared: &Arc<Shared>) {
+        if self.last.elapsed() < Duration::from_secs(30)
+            || self
+                .worker
+                .as_ref()
+                .is_some_and(|worker| !worker.is_finished())
+        {
+            return;
+        }
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+        self.last = std::time::Instant::now();
+        let shared = Arc::clone(shared);
+        self.worker = Some(thread::spawn(move || {
+            if let Ok(now) = shared.config.clock.sample()
+                && let Ok(mut home) = shared.home.try_lock()
+                && home.maintain(now).is_err()
+            {
+                shared.report("MaintenanceFailed", "ServiceStateUnavailable");
+            }
+        }));
+    }
+}
+impl Drop for Maintenance {
+    fn drop(&mut self) {
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
     }
 }
 struct Handshake<'a>(&'a AtomicUsize);
@@ -173,16 +213,9 @@ pub fn run_with_ready(
     });
     ready(&shared.config.descriptor)?;
     let mut connections: Vec<(Arc<Stream>, thread::JoinHandle<()>)> = Vec::new();
-    let mut maintained = std::time::Instant::now();
+    let mut maintenance = Maintenance::new();
     while !stop.load(Ordering::Acquire) {
-        if maintained.elapsed() >= Duration::from_secs(1) {
-            maintained = std::time::Instant::now();
-            if let Ok(now) = shared.config.clock.sample()
-                && let Ok(mut home) = shared.home.try_lock()
-            {
-                let _ = home.maintain(now);
-            }
-        }
+        maintenance.tick(&shared);
         let mut i = 0;
         while i < connections.len() {
             if connections[i].1.is_finished() {
@@ -192,9 +225,12 @@ pub fn run_with_ready(
                 i += 1;
             }
         }
-        let stream = match shared.companion.accept(Duration::from_secs(1)) {
+        let stream = match shared.companion.accept(Duration::from_secs(5)) {
             Ok(stream) => Arc::new(stream),
-            Err(crate::hypernet::Error::Timeout | crate::hypernet::Error::Refused) => continue,
+            Err(error @ (crate::hypernet::Error::Timeout | crate::hypernet::Error::Refused)) => {
+                shared.report("AcceptWaitEnded", error.code());
+                continue;
+            }
             Err(_) => {
                 for (stream, _) in &connections {
                     stream.close();
@@ -217,7 +253,7 @@ pub fn run_with_ready(
         let client = Arc::clone(&stream);
         let worker = thread::spawn(move || {
             if let Err(error) = serve(&state, &client) {
-                state.report(&error);
+                state.report("SessionClosed", error.code());
             }
             client.close();
         });

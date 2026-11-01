@@ -63,11 +63,18 @@ live database files to bypass that lease. The owner recovery key must be stored
 outside the device directory and kept separately; it is not an encryption-history
 backup. New-device encrypted history remains future-only.
 
-Add `--diagnostics` to `service run` to report fixed session failure categories on
+Add `--diagnostics` to `service run` to report fixed lifecycle categories on
 standard error. Diagnostics contain no messages, account identifiers or keys.
 Output is limited to a burst of eight lines, one line per second thereafter and
 128 lines per process. Client errors distinguish local configuration and storage,
 HyperNet preparation, session authentication, clock and handshake failures.
+`AcceptWaitEnded/Timeout` can mean an ordinary idle wait; it does not establish a
+failed client operation. Periodic retention runs in one background task every
+30 seconds and writes only when expired state exists. Every operation still
+enforces current access and expiry before returning content or applying effects.
+The companion accept wait allows five seconds for transport handoff, including
+its current privacy observation. HRC's subsequent handshake retains its separate
+five-second bound; acceptance never extends an authority observation's validity.
 
 ## Conversation operations
 

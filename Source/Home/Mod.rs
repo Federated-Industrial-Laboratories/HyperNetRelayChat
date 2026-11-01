@@ -193,6 +193,20 @@ impl Home {
         result.ok_or(Error::Refused("WindowUnavailable"))
     }
     pub fn maintain(&mut self, clock: TimeBounds) -> Result<()> {
+        let due = self.store.read(Duration::from_secs(2), |db| {
+            let now = clock.refresh().map_err(|_| rusqlite::Error::InvalidQuery)?;
+            let floor: u64 = db.query_row(
+                "SELECT clock_floor FROM hrc_meta WHERE singleton=1",
+                [],
+                |r| r.get(0),
+            )?;
+            now.after_floor(floor)
+                .map_err(|_| rusqlite::Error::InvalidQuery)?;
+            retention::due(db, now.upper_ms)
+        })?;
+        if !due {
+            return Ok(());
+        }
         self.store.write(|db| {
             let now = clock.refresh().map_err(|_| rusqlite::Error::InvalidQuery)?;
             let floor: u64 = db.query_row(

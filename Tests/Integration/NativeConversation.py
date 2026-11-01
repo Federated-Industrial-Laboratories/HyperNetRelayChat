@@ -96,7 +96,7 @@ class Conversation:
                         '--request', self.json_file(action))
 
     def start(self):
-        self.server = subprocess.Popen([self.binary, 'service', 'run', '--directory', str(self.service)],
+        self.server = subprocess.Popen([self.binary, 'service', 'run', '--directory', str(self.service), '--diagnostics'],
                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         assert select.select([self.server.stdout], [], [], 15)[0], 'HRC service readiness deadline'
         ready = json.loads(self.server.stdout.readline())
