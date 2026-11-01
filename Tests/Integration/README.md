@@ -239,8 +239,20 @@ the real gateway; retrying the exact ciphertext must yield one event. The helper
 then performs owner-key recovery at the origin and waits for the running service
 to publish the changed checkpoint automatically. No manual proof import occurs
 in this scenario. The home must establish the old endpoint's removal barrier and
-refuse its queued old-generation operation. The separately held recovery key is
-loaded only through the production device API and never printed.
+refuse its queued old-generation operation. Bounded private controls then stop
+the services for explicit operator admission of the new endpoint. The CLI exports
+the origin's exact current checkpoint identifier and admits it at the home; this
+must fail if the running origin had not already imported that checkpoint. There
+is no manual identity-import fallback. The new profile selects the same bilateral
+agreement, authenticates with its new endpoint key and retains the same account.
+Both encrypted rooms remove the old MLS leaf and explicitly admit a separately
+generated replacement key through package, commit, Welcome and Ready. The home
+participant retains the original contact anchor. Earlier ciphertext remains in
+permitted history without becoming decryptable by the recovered endpoint, while
+new messages must decrypt in both the private group and direct conversation.
+The separately held recovery key is loaded only through the production device
+API and never printed. Control requests carry the original step's boot deadline;
+CLI admission shares that deadline, and no restart extends the overall budget.
 
 After clients release their stores, the shipped withdrawal command durably stops
 the origin and requests the home's signed acknowledgement. The driver checks the

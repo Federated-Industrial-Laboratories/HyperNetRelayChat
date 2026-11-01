@@ -292,7 +292,12 @@ fn await_ready(run: &mut Run, alice: &mut Client, room: RoomId) -> Result<client
         }
     })
 }
-fn pair(run: &mut Run, alice: &mut Client, bob: &mut Client, room: RoomId) -> Result<()> {
+fn pair(
+    run: &mut Run,
+    alice: &mut Client,
+    bob: &mut Client,
+    room: RoomId,
+) -> Result<client::CryptoView> {
     commit(run.effect(
         "Bob",
         bob,
@@ -325,13 +330,154 @@ fn pair(run: &mut Run, alice: &mut Client, bob: &mut Client, room: RoomId) -> Re
     })?;
     let v = await_ready(run, alice, room)?;
     ensure(v.remote.members.len() == 2, "PairRosterSize")?;
+    Ok(v)
+}
+struct RecoveredRoom {
+    room: RoomId,
+    old_event: Id,
+    old_actor: EndpointActor,
+    recovered: EndpointActor,
+    old_roster: client::CryptoView,
+}
+fn readmit_encrypted_room(
+    run: &mut Run,
+    alice: &mut Client,
+    recovered: &mut Client,
+    scenario: RecoveredRoom,
+) -> Result<()> {
+    let old_anchor = scenario
+        .old_roster
+        .contacts
+        .iter()
+        .find(|contact| {
+            contact.account == scenario.old_actor.account
+                && contact.state == client::trust::TrustState::Trusted
+        })
+        .ok_or("OriginalPinnedContactMissing")?
+        .anchor;
+    let old_mls = scenario
+        .old_roster
+        .remote
+        .members
+        .iter()
+        .find(|member| member.credential.actor == scenario.old_actor)
+        .ok_or("OriginalMlsLeafMissing")?
+        .credential
+        .mls_key;
+    let before = run.step("RecoveredBob", "NoInheritedForeignRoomKeys", |_| {
+        net(recovered.crypto_inspect(scenario.room, None))
+    })?;
+    ensure(
+        before.local.is_none(),
+        "RecoveredForeignEndpointInheritedKeys",
+    )?;
+    run.step("Alice", "RemoveRecoveredForeignOldLeaf", |_| {
+        completed(net(alice.crypto_commit(
+            scenario.room,
+            &[],
+            &[scenario.old_actor.endpoint],
+            None,
+        ))?)
+    })?;
+    run.step("RecoveredBob", "PublishFutureForeignKeyPackage", |_| {
+        completed(net(recovered.crypto_publish(scenario.room, None))?)
+    })?;
+    let inspected = run.step("Alice", "VerifyPinnedForeignRecoveryContinuity", |_| {
+        pin(alice, scenario.room, None)
+    })?;
+    ensure(
+        inspected.contacts.iter().any(|contact| {
+            contact.account == scenario.recovered.account
+                && contact.anchor == old_anchor
+                && contact.state == client::trust::TrustState::Trusted
+        }),
+        "ForeignRecoveryChangedPinnedAnchor",
+    )?;
+    let package = inspected
+        .remote
+        .packages
+        .iter()
+        .find(|package| package.member.credential.actor == scenario.recovered)
+        .ok_or("RecoveredForeignPackageMissing")?;
+    ensure(
+        package.member.credential.mls_key != old_mls
+            && package.member.credential.mls_key != recovered.profile.registration.endpoint_key
+            && package.member.credential.mls_key != recovered.profile.registration.recovery_key,
+        "RecoveredForeignMlsKeyNotIndependent",
+    )?;
+    let digest = package.digest;
+    run.step("Alice", "ExplicitRecoveredForeignMlsAdmission", |_| {
+        completed(net(alice.crypto_commit(
+            scenario.room,
+            &[digest],
+            &[],
+            None,
+        ))?)
+    })?;
+    run.step("RecoveredBob", "TrustRecoveredForeignWelcome", |_| {
+        pin(recovered, scenario.room, None)
+    })?;
+    let ready = run.step(
+        "RecoveredBob",
+        "VerifyRecoveredForeignWelcomeAndReady",
+        |_| net(recovered.crypto_sync(scenario.room, None)),
+    )?;
+    ensure(
+        ready
+            .local
+            .as_ref()
+            .is_some_and(|local| local.active && local.epoch == ready.remote.epoch)
+            && ready
+                .remote
+                .members
+                .iter()
+                .any(|member| member.credential.actor == scenario.recovered)
+            && !ready
+                .remote
+                .members
+                .iter()
+                .any(|member| member.credential.actor == scenario.old_actor),
+        "RecoveredForeignRosterBinding",
+    )?;
+    await_ready(run, alice, scenario.room)?;
+    let old = run.step(
+        "RecoveredBob",
+        "RetainedForeignCiphertextWithoutOldPlaintext",
+        |_| history(recovered, scenario.room, None),
+    )?;
+    ensure(
+        old.events
+            .iter()
+            .any(|event| event.event == scenario.old_event)
+            && !matches!(
+                old.content.get(&scenario.old_event),
+                Some(MessageContent::Decrypted(_))
+            ),
+        "RecoveredForeignEndpointReadOldPlaintext",
+    )?;
+    let future = message("future-only foreign recovered endpoint");
+    let (event, prepared) = run.send("Alice", alice, scenario.room, &future, None)?;
+    ensure(prepared.encrypted, "RecoveredForeignPlaintextDowngrade")?;
+    let received = run.step("RecoveredBob", "DecryptNewForeignRoomMessage", |_| {
+        history(recovered, scenario.room, None)
+    })?;
+    ensure(
+        visible(&received, event, &future),
+        "RecoveredForeignFutureDecryption",
+    )?;
+    run.step("Alice", "SettleRecoveredForeignRoomSend", |_| {
+        history(alice, scenario.room, None)
+    })?;
     Ok(())
 }
+
 fn control(run: &mut Run, request: &Request, name: &'static str) -> Result<()> {
     run.step("Fixture", name, |end| {
-        files::create(
+        let remaining = end.saturating_duration_since(Instant::now()).as_millis() as u64;
+        let deadline = hrc::clock::boot_ms().map_err(|_| "ControlClock")? + remaining;
+        files::create_json(
             &request.controls.join(format!("{name}.request")),
-            b"HRC/1\n",
+            &json!({"version":1,"deadlineBootMs":deadline}),
         )
         .map_err(|_| "ControlRequest")?;
         let ack = request.controls.join(format!("{name}.done"));
@@ -555,7 +701,7 @@ fn workflow(run: &mut Run, r: &Request) -> Result<serde_json::Value> {
             completed(net(c.crypto_enrol())?)
         })?;
     }
-    pair(run, &mut alice, &mut bob, r.private)?;
+    let private_roster = pair(run, &mut alice, &mut bob, r.private)?;
     let original = messaging::Send {
         text: "@OriginBob federatedcafé e\u{301} 👩🏽‍🚀 مرحبا".into(),
         mentions: vec![messaging::Mention {
@@ -649,7 +795,7 @@ fn workflow(run: &mut Run, r: &Request) -> Result<serde_json::Value> {
             enabled: false,
         },
     )?)?;
-    pair(run, &mut alice, &mut bob, r.direct)?;
+    let direct_roster = pair(run, &mut alice, &mut bob, r.direct)?;
     let direct_text = message("confidential cross-network direct");
     let (dm, encrypted) = run.send("Bob", &mut bob, r.direct, &direct_text, None)?;
     ensure(encrypted.encrypted, "DirectPlaintextDowngrade")?;
@@ -924,6 +1070,84 @@ fn workflow(run: &mut Run, r: &Request) -> Result<serde_json::Value> {
         }),
         "RevokedAuthorityPublished",
     )?;
+    let recovered_actor = recovered
+        .endpoint
+        .clone()
+        .ok_or("RecoveredEndpointMissing")?;
+    ensure(
+        recovered_actor.account == bob_actor.account
+            && recovered_actor.endpoint != bob_actor.endpoint
+            && recovered_actor.security_generation == recovered.identity.security_generation,
+        "RecoveredForeignIdentityBinding",
+    )?;
+    run.step("RecoveredBob", "RequestExplicitForeignReadmission", |_| {
+        files::create_json(&r.controls.join("RecoveredEndpoint.json"), &recovered_actor)
+            .map_err(|_| "ReadmissionControlStorage".into())
+    })?;
+    alice.disconnect();
+    bob.disconnect();
+    agent.disconnect();
+    control(run, r, "StopForRecoveredAdmission")?;
+    control(run, r, "AdmitRecoveredBob")?;
+    control(run, r, "ResumeAfterRecoveredAdmission")?;
+    run.step("Alice", "ReconnectAfterExplicitHomeAdmission", |_| {
+        net(alice.connect())
+    })?;
+    run.step("Agent", "ReconnectAfterExplicitHomeAdmission", |_| {
+        net(agent.connect())
+    })?;
+    let mut new_bob = run.step("RecoveredBob", "AuthenticateNewForeignEndpoint", |_| {
+        net(Client::open(&recovery))
+    })?;
+    let admission: hrc::federation::RemoteAdmission =
+        files::json(&r.controls.join("RecoveredAdmission.json"))
+            .map_err(|_| "RecoveredAdmissionReceipt")?;
+    let session = net(new_bob.session())?;
+    let remote = session
+        .remote
+        .as_ref()
+        .ok_or("RecoveredForeignBootstrapMissing")?;
+    ensure(
+        session.ready.acting == recovered_actor
+            && remote.acting == recovered_actor
+            && remote.admission == admission.reference
+            && admission.acting == recovered_actor
+            && !admission.withdrawn
+            && remote.agreement == admission.agreement
+            && new_bob.profile.server.home == bob.profile.server.home
+            && new_bob.profile.active_server().home == alice.profile.active_server().home,
+        "RecoveredForeignAdmissionBinding",
+    )?;
+    run.step(
+        "RecoveredBob",
+        "EnrolIndependentRecoveredForeignMlsKey",
+        |_| completed(net(new_bob.crypto_enrol())?),
+    )?;
+    readmit_encrypted_room(
+        run,
+        &mut alice,
+        &mut new_bob,
+        RecoveredRoom {
+            room: r.private,
+            old_event: first,
+            old_actor: bob_actor.clone(),
+            recovered: recovered_actor.clone(),
+            old_roster: private_roster,
+        },
+    )?;
+    readmit_encrypted_room(
+        run,
+        &mut alice,
+        &mut new_bob,
+        RecoveredRoom {
+            room: r.direct,
+            old_event: dm,
+            old_actor: bob_actor.clone(),
+            recovered: recovered_actor,
+            old_roster: direct_roster,
+        },
+    )?;
+    new_bob.disconnect();
     // This independent endpoint remains eligible after its operator's human-key recovery.
     run.step(
         "Agent",
@@ -954,7 +1178,9 @@ fn workflow(run: &mut Run, r: &Request) -> Result<serde_json::Value> {
         json!({"status":"Passed","steps":run.steps,"exactRecoveries":run.replays,"independentNetworks":2,
         "remoteHuman":true,"remoteIndependentAgent":true,"remoteDelegation":true,"privateGroup":true,"direct":true,
         "exactCiphertextRetry":true,"leaseExpiryNonConsuming":true,"automaticOriginRecoveryFence":true,
-        "originTamperingRefused":true,"expiredDelegationRefused":true}),
+        "originTamperingRefused":true,"expiredDelegationRefused":true,
+        "foreignRecoveredAdmission":true,"foreignRecoveredPrivateGroup":true,"foreignRecoveredDirect":true,
+        "recoveredFutureOnlyDecryption":true}),
     )
 }
 fn withdrawn(run: &mut Run, r: &Request) -> Result<serde_json::Value> {

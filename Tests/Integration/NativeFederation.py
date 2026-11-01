@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import stat
 import time
 
 _spec = importlib.util.spec_from_file_location('HrcNativeConversation', Path(__file__).with_name('NativeConversation.py'))
@@ -153,14 +154,71 @@ def run(configuration, controls, record):
             stdout=subprocess.PIPE,stderr=subprocess.PIPE)
         handled = set()
         gateway_samples, sample_failures, next_sample = {}, 0, time.monotonic()
-        operations = {'PauseOrigin':origin.stop,'ResumeOrigin':origin.start}
+        def private_json(path, maximum):
+            information = path.lstat()
+            assert stat.S_ISREG(information.st_mode) and information.st_uid == os.geteuid()
+            assert information.st_mode & 0o777 == 0o600 and information.st_size <= maximum
+            return json.loads(path.read_bytes())
+        def stop_for_admission():
+            home.stop()
+            origin.stop()
+        def admit_recovered():
+            assert home.server is None and origin.server is None
+            actor = private_json(controls_path/'RecoveredEndpoint.json',8192)
+            assert actor['account'] == accounts['Bob'] and actor['endpoint'] != actors['Bob']['endpoint']
+            assert actor['securityGeneration'] == actors['Bob']['securityGeneration']+1
+            # The running origin has already established the home recovery barrier.
+            # Export only its exact checkpoint identifier; never import pages here.
+            cp = origin.cli('ExportAutomaticallyPropagatedRecoveryCheckpoint','federation','checkpoint',
+                '--directory',origin.service,'--agreement',reference_file,'--account',address(accounts['Bob']),
+                '--output',home.exchange/'RecoveredCheckpoint.cbor')
+            assert cp['checkpoint'] != admissions['Bob']['checkpoint']
+            proposed = dict(agreement=reference,account=accounts['Bob'],endpoint=actor['endpoint'],
+                bindingDigest=actor['bindingDigest'],checkpoint=cp['checkpoint'],rooms=[community,private,direct],
+                expiresMs=expiry,expectedRevision=0)
+            admitted = home.cli('ExplicitRecoveredForeignAdmission','federation','admit',
+                '--directory',home.service,'--request',home.json_file(proposed))
+            assert admitted['acting'] == actor and not admitted['withdrawn']
+            assert admitted['checkpoint'] == cp['checkpoint'] and admitted['rooms'] == proposed['rooms']
+            assert admitted['reference']['id'] != admissions['Bob']['reference']['id']
+            assert admitted['reference']['revision'] == 1
+            home.cli('SelectRecoveredBilateralProfile','federation','client-select',
+                '--directory',controls_path/'RecoveredBob','--home-descriptor',home_descriptor,
+                '--origin-descriptor',origin_descriptor,'--home-signature',signatures[0],
+                '--origin-signature',signatures[1])
+            receipt = controls_path/'RecoveredAdmission.json'
+            with receipt.open('x') as output:
+                receipt.chmod(0o600)
+                json.dump(admitted,output)
+            record(dict(case='RecoveredForeignEndpointExplicitlyAdmitted',passed=True,
+                sameAccount=True,automaticallyImportedCheckpoint=True,manualIdentityImports=0))
+        def resume_after_admission():
+            home.start()
+            origin.start()
+        operations = {'PauseOrigin':origin.stop,'ResumeOrigin':origin.start,
+            'StopForRecoveredAdmission':stop_for_admission,'AdmitRecoveredBob':admit_recovered,
+            'ResumeAfterRecoveredAdmission':resume_after_admission}
         while process.poll() is None:
             assert time.monotonic()<end, 'Federation helper deadline'
             for name,action in operations.items():
                 marker = controls_path/(name+'.request')
                 if marker.exists() and name not in handled:
-                    assert marker.is_file() and marker.read_bytes() == b'HRC/1\n'
-                    action(); handled.add(name)
+                    request_control = private_json(marker,256)
+                    assert set(request_control) == {'version','deadlineBootMs'} and request_control['version'] == 1
+                    boot_ms = lambda: time.clock_gettime_ns(time.CLOCK_BOOTTIME)//1000000
+                    remaining_ms = request_control['deadlineBootMs']-boot_ms()
+                    assert 0 < remaining_ms <= 45000
+                    # CLI mutations share the helper's original step deadline. No new
+                    # request identity or authority interval is created by this control.
+                    saved_deadlines = (home.deadline,origin.deadline)
+                    for flow in (home,origin):
+                        flow.deadline = min(flow.deadline,time.monotonic()+remaining_ms/1000)
+                    try:
+                        action()
+                    finally:
+                        home.deadline,origin.deadline = saved_deadlines
+                    assert boot_ms() < request_control['deadlineBootMs'] and process.poll() is None
+                    handled.add(name)
                     ack = controls_path/(name+'.done')
                     with ack.open('xb') as output:
                         ack.chmod(0o600); output.write(b'HRC/1\n')
