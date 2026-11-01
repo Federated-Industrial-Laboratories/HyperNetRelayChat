@@ -563,6 +563,54 @@ fn delegation_pause_revoke_and_exact_approval_never_expand_scope() {
     assert!(
         matches!(run(&mut home,&agent,&changed),Outcome::Rejected{detail,..} if detail=="ApprovalBinding")
     );
+    // Exercise the same final approval predicate after tentative effects and
+    // consumption, with an explicit later sample instead of a timing-sensitive sleep.
+    let signer = home.signer.clone();
+    let now = TimeBounds::test_now();
+    let rolled_back = home.store.write(|db| {
+        let permit = delegation::authorize(db, &candidate, now, digest)
+            .map_err(|_| rusqlite::Error::InvalidQuery)?;
+        assert!(permit.approval_current(now));
+        let expiry = permit.consume.unwrap().1;
+        let outcome = messaging::operate(
+            db,
+            &candidate,
+            now,
+            permit,
+            &signer,
+            &Cancellation::default(),
+        )
+        .map_err(|_| rusqlite::Error::InvalidQuery)?;
+        assert!(matches!(outcome, Outcome::Committed { .. }));
+        delegation::consume(db, permit)?;
+        let mut later = now;
+        later.lower_ms = expiry;
+        later.upper_ms = expiry;
+        let current = delegation::load(db, g.id).map_err(|_| rusqlite::Error::InvalidQuery)?;
+        assert!(later.permits(current.scope.not_before_ms, current.scope.expires_ms));
+        if !permit.approval_current(later) {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        Ok(Commit::new((), b"expired approval must roll back".to_vec()))
+    });
+    assert!(rolled_back.is_err());
+    let state = home
+        .store
+        .read(std::time::Duration::from_secs(1), |db| {
+            db.query_row(
+                "SELECT state FROM hrc_approvals WHERE id=?1",
+                [candidate.approval.unwrap().as_hex()],
+                |r| r.get::<_, u8>(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(state, 1);
+    assert!(
+        history(&mut home, &owner, r)
+            .events
+            .iter()
+            .all(|event| event.operation_id != candidate.operation_id)
+    );
     let committed = run(&mut home, &agent, &candidate);
     assert!(matches!(committed, Outcome::Committed { .. }));
     assert_eq!(run(&mut home, &agent, &candidate), committed);
@@ -1072,4 +1120,30 @@ fn draft_mode_can_be_inspected_and_rejected_but_cannot_approve_or_send() {
             .pending
             .is_empty()
     );
+}
+
+#[test]
+fn unwired_cancellation_never_claims_success() {
+    let f = Fixture::new();
+    let mut home = f.create();
+    let account = enrol(&mut home, 90, AccountClass::Human);
+    let query = action(
+        &account,
+        Operation::SearchCancel,
+        Target::Service,
+        &Resolve {
+            operation_id: OperationId {
+                window: Id::random().unwrap(),
+                operation: Id::random().unwrap(),
+            },
+            action_digest: Id::random().unwrap(),
+        },
+    );
+    assert!(matches!(
+        run(&mut home, &account, &query),
+        Outcome::Rejected {
+            code: ErrorCode::UnsupportedFeature,
+            ..
+        }
+    ));
 }

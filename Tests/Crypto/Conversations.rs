@@ -118,7 +118,11 @@ impl Client {
         let device = self.device.clone();
         device
             .prepare_message(self.store(), &context, roster, text, |action| {
-                encode(&action)
+                crate::protocol::sign_action(
+                    &action,
+                    &crate::protocol::SigningKey::from_bytes(&[91; 32]),
+                )
+                .map_err(|_| Error::Invalid)
             })
             .unwrap()
     }
@@ -150,7 +154,10 @@ fn incoming(message: &PreparedMessage) -> IncomingMessage<'_> {
     IncomingMessage {
         context: &message.context,
         ciphertext: &message.ciphertext,
-        action_digest: digest(&message.signed_action),
+        action_digest: crate::protocol::action_digest(
+            &message.context.action(message.ciphertext.clone()).unwrap(),
+        )
+        .unwrap(),
     }
 }
 fn delivery(prior: u64, sequence: u64) -> HomeDelivery {
@@ -212,6 +219,10 @@ fn pair() -> (Client, Client, ApprovedRoster) {
 fn durable_sender_outbox_receiver_restart_and_duplicates() {
     let (mut alice, mut bob, both) = pair();
     let message = alice.send(20, 1, &both, "hello e\u{301} 👨‍👩‍👧");
+    let key = crate::protocol::SigningKey::from_bytes(&[91; 32]).verifying_key();
+    let verified = crate::protocol::verify_action(&message.signed_action, &key).unwrap();
+    assert_eq!(verified.digest(), incoming(&message).action_digest);
+    assert_ne!(verified.digest(), digest(&message.signed_action));
     alice.restart();
     bob.restart();
     let retry = alice.send(20, 1, &both, "hello e\u{301} 👨‍👩‍👧");

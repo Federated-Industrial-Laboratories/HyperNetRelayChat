@@ -79,7 +79,13 @@ pub struct Inspection {
 pub(crate) struct Permit {
     pub history_from: u64,
     pub history_until: u64,
-    pub consume: Option<Id>,
+    pub consume: Option<(Id, u64)>,
+}
+impl Permit {
+    pub(crate) fn approval_current(self, now: TimeBounds) -> bool {
+        self.consume
+            .is_none_or(|(_, expires)| now.upper_ms < expires)
+    }
 }
 impl Default for Permit {
     fn default() -> Self {
@@ -197,7 +203,7 @@ pub(crate) fn authorize(
         {
             return deny("ApprovalBinding");
         }
-        Some(approval)
+        Some((approval, expires))
     } else {
         if action.approval.is_some() {
             return invalid("UnexpectedApproval");
@@ -211,7 +217,7 @@ pub(crate) fn authorize(
     })
 }
 pub(crate) fn consume(db: &Transaction<'_>, permit: Permit) -> rusqlite::Result<()> {
-    if let Some(id) = permit.consume
+    if let Some((id, _)) = permit.consume
         && db.execute(
             "UPDATE hrc_approvals SET state=3 WHERE id=?1 AND state=1",
             [id.as_hex()],

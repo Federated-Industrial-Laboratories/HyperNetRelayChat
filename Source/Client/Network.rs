@@ -104,7 +104,7 @@ impl Session {
             encode_hello(&hello).map_err(|_| Error::Frame)?,
             end,
         )?;
-        let incoming = io::receive(&stream, remaining(end)?).map_err(|_| Error::Handshake)?;
+        let incoming = io::receive(&stream, remaining(end)?).map_err(handshake_failure)?;
         if incoming.kind != FrameKind::Challenge {
             return Err(Error::Frame);
         }
@@ -137,7 +137,7 @@ impl Session {
             sign_proof(&proof, key).map_err(|_| Error::Frame)?,
             end,
         )?;
-        let incoming = io::receive(&stream, remaining(end)?).map_err(|_| Error::Handshake)?;
+        let incoming = io::receive(&stream, remaining(end)?).map_err(handshake_failure)?;
         if incoming.kind != FrameKind::Ready {
             return Err(Error::Frame);
         }
@@ -271,5 +271,12 @@ fn send(stream: &Stream, kind: FrameKind, payload: Vec<u8>, end: u64) -> Result<
         &Frame::new(kind, payload).map_err(|_| Error::Frame)?,
         remaining(end)?,
     )
-    .map_err(|_| Error::Handshake)
+    .map_err(handshake_failure)
+}
+
+fn handshake_failure(error: io::Error) -> Error {
+    match error {
+        io::Error::Frame => Error::Frame,
+        io::Error::Transport | io::Error::Deadline => Error::Handshake,
+    }
 }

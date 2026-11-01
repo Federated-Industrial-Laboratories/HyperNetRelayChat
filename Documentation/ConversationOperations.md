@@ -199,9 +199,11 @@ The service constructs literal quoted phrases; callers cannot submit FTS syntax.
 At most 16 terms and 1 KiB of input enter a query. Queries without a trigram term
 scan at most 256 candidates and 1 MiB before returning `QueryTooBroad`. Indexed
 queries can continue through bounded candidate batches. Each operation has a
-two-second storage deadline. The service owns cancellation tokens and signals them
-before waiting for the Home writer; iteration checks cancellation. Queueing a
-`SearchCancel` action behind a running query is not by itself cancellation.
+two-second storage deadline. The domain query accepts a cancellation token and checks it during iteration.
+This CLI slice does not yet wire a concurrent authenticated `SearchCancel` request
+to that token; it explicitly refuses cancellation as unsupported. Cancellation
+controls follow with the persistent local clients.
+Queueing a cancel action behind a running query is not by itself cancellation.
 
 Recipient ignore matches the acting account, represented account or operator and
 removes matching live pull delivery, history and search before presentation.
@@ -216,7 +218,7 @@ Conversation retention is 30 days with a 10 GiB content quota. Quota exhaustion
 refuses new content rather than shortening the promised interval. Expired content
 is excluded immediately from every query. `Home::maintain` and ordinary operations
 remove up to 128 expired events and their index entries per transaction. A running
-service schedules maintenance at least once per second; it remains subject to
+service schedules one background maintenance task every 30 seconds; it remains subject to
 the same current clock and storage health checks. No transcript is written to
 diagnostic output. Database, WAL and derived indexes have the same encrypted
 storage boundary.

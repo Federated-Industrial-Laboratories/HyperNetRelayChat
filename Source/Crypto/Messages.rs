@@ -482,9 +482,15 @@ fn resolved_candidate(
     incoming: &IncomingMessage<'_>,
 ) -> Result<Option<DeliveryOutcome>> {
     let operation = encode(&incoming.context.operation_id)?;
-    let own:Option<(Vec<u8>,Vec<u8>,String)>=tx.query_row("SELECT ciphertext,action,plaintext FROM crypto_outbox WHERE operation=?1 AND group_id=?2",rusqlite::params![operation,incoming.context.group.as_bytes().as_slice()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
-    if let Some((ciphertext, action, plaintext)) = own {
-        if ciphertext != incoming.ciphertext || digest(&action) != incoming.action_digest {
+    let own:Option<(Vec<u8>,Vec<u8>,String)>=tx.query_row("SELECT ciphertext,context,plaintext FROM crypto_outbox WHERE operation=?1 AND group_id=?2",rusqlite::params![operation,incoming.context.group.as_bytes().as_slice()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
+    if let Some((ciphertext, context, plaintext)) = own {
+        let context: EncryptionContext = decode(&context)?;
+        let expected = crate::protocol::action_digest(&context.action(ciphertext.clone())?)
+            .map_err(|_| Error::Invalid)?;
+        if context != *incoming.context
+            || ciphertext != incoming.ciphertext
+            || expected != incoming.action_digest
+        {
             return Err(Error::Conflict);
         }
         tx.execute(

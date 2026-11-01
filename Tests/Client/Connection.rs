@@ -49,3 +49,25 @@ fn session_retries_are_bounded_and_do_not_repeat_invalid_identity_or_frames() {
     );
     assert_eq!(calls, 0);
 }
+
+#[test]
+fn malformed_frame_header_keeps_its_permanent_classification() {
+    let mut attempts = 0;
+    let result = establish::<()>(clock::boot_ms().unwrap() + 30000, |_| {
+        attempts += 1;
+        FrameHeader::decode([0, 0, 0, 2, 255])
+            .map(|_| ())
+            .map_err(|_| io::Error::Frame)
+            .map_err(handshake_failure)
+    });
+    assert!(matches!(result, Err(Error::Frame)));
+    assert_eq!(attempts, 1);
+    assert!(matches!(
+        handshake_failure(io::Error::Transport),
+        Error::Handshake
+    ));
+    assert!(matches!(
+        handshake_failure(io::Error::Deadline),
+        Error::Handshake
+    ));
+}

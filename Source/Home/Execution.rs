@@ -216,7 +216,10 @@ fn dispatch(
                 return invalid("ServiceTarget");
             }
             let _: Resolve = unpack(&action.body)?;
-            Ok(Outcome::Result { body: Value::Null })
+            Err(Fault::Reject(
+                ErrorCode::UnsupportedFeature,
+                "ConcurrentSearchCancellation",
+            ))
         }
         _ => Err(Fault::Reject(
             ErrorCode::UnsupportedFeature,
@@ -283,10 +286,12 @@ impl Home {
                 if !matches!(action.actor,Actor::Delegated{..})&&action.approval.is_some(){return invalid("UnexpectedApproval");}
                 crate::delegation::authorize(db,action,now,verified.digest())
             })();
+            let mut admitted_permit=None;
             let outcome=match admitted {
                 Err(Fault::Sql(e))=>return Err(e),
                 Err(Fault::Reject(code,detail))=>Outcome::Rejected{code,detail:detail.into()},
                 Ok(grant_permit)=>{
+                    admitted_permit=Some(grant_permit);
                     match budgets::admit(db,action,now.lower_ms){Ok(true)=>{},Ok(false)=>return commit(refusal(ErrorCode::RateLimited,"OperationBudget")),Err(e)=>return Err(sql_fault(e))}
                     match dispatch(db,action,now,grant_permit,signer,cancel) {
                         Ok(outcome)=>{crate::delegation::consume(db,grant_permit)?;outcome},
@@ -299,6 +304,9 @@ impl Home {
             let final_time=match checked_clock(db,clock){Ok(now)=>now,Err(reason)=>{rollback_reason.set(Some(reason));return Err(rusqlite::Error::InvalidQuery);}};
             if !permit()||cancel.is_cancelled()||final_time.upper_ms>=expires {
                 rollback_reason.set(Some("AuthorityUnavailable"));return Err(rusqlite::Error::InvalidQuery);
+            }
+            if admitted_permit.is_some_and(|p|!p.approval_current(final_time)) && !matches!(outcome,Outcome::Rejected{..}) {
+                rollback_reason.set(Some("ApprovalExpiredAtCommit"));return Err(rusqlite::Error::InvalidQuery);
             }
             if let Actor::Delegated{grant,..}=action.actor
                 && !matches!(outcome,Outcome::Rejected{..}) {
