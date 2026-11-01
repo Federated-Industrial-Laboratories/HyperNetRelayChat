@@ -23,6 +23,18 @@ pub enum Error {
     #[error("an operation outcome remains unknown")]
     Unknown,
 }
+impl Error {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Configuration => "ClientConfigurationUnavailable",
+            Self::Storage => "ClientStorageUnavailable",
+            Self::Clock => "ClockUnavailable",
+            Self::Input => "InvalidOperation",
+            Self::Network(error) => error.code(),
+            Self::Unknown => "OutcomeUnknown",
+        }
+    }
+}
 pub type Result<T> = std::result::Result<T, Error>;
 pub struct Client {
     pub profile: Profile,

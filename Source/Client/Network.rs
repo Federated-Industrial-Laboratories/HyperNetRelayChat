@@ -11,6 +11,12 @@ use std::{collections::BTreeMap, time::Duration};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error("the configured HyperNet companion is unavailable")]
+    Companion,
+    #[error("HyperNet could not prepare the authorized connection")]
+    Connect,
+    #[error("the HRC session exchange did not complete")]
+    Handshake,
     #[error("HyperNet is unavailable; pending operation outcomes remain unresolved")]
     Transport,
     #[error("the pinned service or endpoint identity did not match")]
@@ -21,6 +27,20 @@ pub enum Error {
     Clock,
     #[error("the retry window expired")]
     Expired,
+}
+impl Error {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Companion => "CompanionUnavailable",
+            Self::Connect => "HyperNetPreparationUnavailable",
+            Self::Handshake => "HrcHandshakeUnavailable",
+            Self::Transport => "TransportUnavailable",
+            Self::Authentication => "SessionAuthenticationFailed",
+            Self::Frame => "InvalidSessionFrame",
+            Self::Clock => "ClockUnavailable",
+            Self::Expired => "RetryWindowExpired",
+        }
+    }
 }
 pub type Result<T> = std::result::Result<T, Error>;
 pub struct Session {
@@ -34,14 +54,14 @@ impl Session {
         if Id::from_bytes(key.verifying_key().to_bytes()) != profile.registration.endpoint_key {
             return Err(Error::Authentication);
         }
-        let companion = Companion::new(&profile.companion).map_err(|_| Error::Transport)?;
+        let companion = Companion::new(&profile.companion).map_err(|_| Error::Companion)?;
         let stream = companion
             .connect(
                 &profile.server.home.service.as_hex(),
                 PROTOCOL,
                 Duration::from_secs(10),
             )
-            .map_err(|_| Error::Transport)?;
+            .map_err(|_| Error::Connect)?;
         let Peer::Outgoing(_) = stream.peer() else {
             return Err(Error::Authentication);
         };
@@ -80,7 +100,7 @@ impl Session {
             encode_hello(&hello).map_err(|_| Error::Frame)?,
             end,
         )?;
-        let incoming = io::receive(&stream, remaining(end)?).map_err(|_| Error::Transport)?;
+        let incoming = io::receive(&stream, remaining(end)?).map_err(|_| Error::Handshake)?;
         if incoming.kind != FrameKind::Challenge {
             return Err(Error::Frame);
         }
@@ -113,7 +133,7 @@ impl Session {
             sign_proof(&proof, key).map_err(|_| Error::Frame)?,
             end,
         )?;
-        let incoming = io::receive(&stream, remaining(end)?).map_err(|_| Error::Transport)?;
+        let incoming = io::receive(&stream, remaining(end)?).map_err(|_| Error::Handshake)?;
         if incoming.kind != FrameKind::Ready {
             return Err(Error::Frame);
         }
@@ -213,7 +233,7 @@ impl Session {
 fn remaining(end: u64) -> Result<Duration> {
     let now = clock::boot_ms().map_err(|_| Error::Clock)?;
     if now >= end {
-        Err(Error::Transport)
+        Err(Error::Handshake)
     } else {
         Ok(Duration::from_millis(end - now))
     }
@@ -224,5 +244,5 @@ fn send(stream: &Stream, kind: FrameKind, payload: Vec<u8>, end: u64) -> Result<
         &Frame::new(kind, payload).map_err(|_| Error::Frame)?,
         remaining(end)?,
     )
-    .map_err(|_| Error::Transport)
+    .map_err(|_| Error::Handshake)
 }

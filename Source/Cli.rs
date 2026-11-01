@@ -82,6 +82,9 @@ pub enum Service {
     Run {
         #[arg(long)]
         directory: PathBuf,
+        /// Emit bounded session failure categories without conversation content.
+        #[arg(long)]
+        diagnostics: bool,
     },
 }
 #[derive(Args)]
@@ -301,7 +304,7 @@ fn json_value<T: serde::Serialize>(value: T) -> Result<Json, &'static str> {
     client::json::value(&value).map_err(|_| "Representation")
 }
 fn open(path: &Path) -> Result<client::Client, &'static str> {
-    client::Client::open(path).map_err(|_| "SessionUnavailable")
+    client::Client::open(path).map_err(|error| error.code())
 }
 fn call<T: serde::Serialize>(
     client: &mut client::Client,
@@ -363,10 +366,14 @@ pub fn service(command: Service) -> Result<Json, &'static str> {
         } => json_value(
             service::setup::enrol(&directory, &registration).map_err(|_| "EnrolmentFailed")?,
         ),
-        Service::Run { directory } => {
+        Service::Run {
+            directory,
+            diagnostics,
+        } => {
             service::runtime::run_with_ready(
                 &directory,
                 Arc::new(AtomicBool::new(false)),
+                diagnostics,
                 |descriptor| {
                     use std::io::Write;
                     let mut out = std::io::stdout().lock();
@@ -380,7 +387,7 @@ pub fn service(command: Service) -> Result<Json, &'static str> {
                         .map_err(|_| service::runtime::Error::State)
                 },
             )
-            .map_err(|_| "ServiceUnavailable")?;
+            .map_err(|error| error.code())?;
             Ok(json!({"status":"Stopped"}))
         }
     }

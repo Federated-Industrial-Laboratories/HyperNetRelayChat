@@ -31,6 +31,30 @@ pub enum Error {
     Frame,
     #[error("current authority is unavailable")]
     Authority,
+    #[error("a current clock observation is unavailable")]
+    Clock,
+    #[error("the session handshake expired")]
+    HandshakeExpired,
+    #[error("the current retry window could not be established")]
+    RetryWindow,
+    #[error("the ingress budget was exceeded")]
+    RateLimited,
+}
+impl Error {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Configuration => "ServiceConfigurationUnavailable",
+            Self::State => "ServiceStateUnavailable",
+            Self::Transport => "TransportUnavailable",
+            Self::Authentication => "SessionAuthenticationFailed",
+            Self::Frame => "InvalidSessionFrame",
+            Self::Authority => "CurrentAuthorityUnavailable",
+            Self::Clock => "ClockUnavailable",
+            Self::HandshakeExpired => "HandshakeExpired",
+            Self::RetryWindow => "RetryWindowUnavailable",
+            Self::RateLimited => "IngressRateLimited",
+        }
+    }
 }
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -49,6 +73,33 @@ struct Shared {
     boot: Id,
     handshakes: AtomicUsize,
     ingress: Mutex<Budget>,
+    diagnostics: Option<Mutex<Budget>>,
+    diagnostic_lines: AtomicUsize,
+}
+impl Shared {
+    fn report(&self, error: &Error) {
+        let Some(budget) = &self.diagnostics else {
+            return;
+        };
+        let Ok(now) = clock::boot_ms() else { return };
+        let Ok(mut budget) = budget.try_lock() else {
+            return;
+        };
+        if !budget.admit(now)
+            || self
+                .diagnostic_lines
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
+                .is_err()
+        {
+            return;
+        }
+        drop(budget);
+        // Only fixed categories enter diagnostics; no peer-controlled text or identifiers.
+        eprintln!(
+            "{{\"event\":\"SessionClosed\",\"code\":\"{}\"}}",
+            error.code()
+        );
+    }
 }
 struct Handshake<'a>(&'a AtomicUsize);
 impl Drop for Handshake<'_> {
@@ -87,11 +138,12 @@ impl Budget {
 
 /// Run one home service. The caller controls shutdown; no network listener is opened.
 pub fn run(directory: &Path, stop: Arc<AtomicBool>) -> Result<()> {
-    run_with_ready(directory, stop, |_| Ok(()))
+    run_with_ready(directory, stop, false, |_| Ok(()))
 }
 pub fn run_with_ready(
     directory: &Path,
     stop: Arc<AtomicBool>,
+    diagnostics: bool,
     ready: impl FnOnce(&super::Descriptor) -> Result<()>,
 ) -> Result<()> {
     let config = Config::load(directory).map_err(|_| Error::Configuration)?;
@@ -102,7 +154,7 @@ pub fn run_with_ready(
         signer.clone(),
     )
     .map_err(|_| Error::State)?;
-    config.clock.sample().map_err(|_| Error::Authority)?;
+    config.clock.sample().map_err(|_| Error::Clock)?;
     let companion = Companion::new(&config.companion).map_err(|_| Error::Transport)?;
     let status = companion.status().map_err(|_| Error::Transport)?;
     if !status.check_authority().supported() || !status.check_authority().endpoint_ready() {
@@ -116,6 +168,8 @@ pub fn run_with_ready(
         boot: Id::random().map_err(|_| Error::State)?,
         handshakes: AtomicUsize::new(0),
         ingress: Mutex::new(Budget::new(64, 16)),
+        diagnostics: diagnostics.then(|| Mutex::new(Budget::new(1, 8))),
+        diagnostic_lines: AtomicUsize::new(128),
     });
     ready(&shared.config.descriptor)?;
     let mut connections: Vec<(Arc<Stream>, thread::JoinHandle<()>)> = Vec::new();
@@ -162,7 +216,9 @@ pub fn run_with_ready(
         let state = Arc::clone(&shared);
         let client = Arc::clone(&stream);
         let worker = thread::spawn(move || {
-            let _ = serve(&state, &client);
+            if let Err(error) = serve(&state, &client) {
+                state.report(&error);
+            }
             client.close();
         });
         connections.push((stream, worker));
@@ -177,9 +233,9 @@ pub fn run_with_ready(
 }
 
 fn remaining(end: u64) -> Result<Duration> {
-    let now = clock::boot_ms().map_err(|_| Error::Authority)?;
+    let now = clock::boot_ms().map_err(|_| Error::Clock)?;
     if now >= end {
-        Err(Error::Authentication)
+        Err(Error::HandshakeExpired)
     } else {
         Ok(Duration::from_millis(end - now))
     }
@@ -207,7 +263,7 @@ fn serve(shared: &Shared, stream: &Stream) -> Result<()> {
         return Err(Error::Authentication);
     }
     let principal = Id::from_hex(peer.principal()).map_err(|_| Error::Authentication)?;
-    let end = clock::boot_ms().map_err(|_| Error::Authority)? + 5000;
+    let end = clock::boot_ms().map_err(|_| Error::Clock)? + 5000;
     let incoming = io::receive(stream, remaining(end)?).map_err(|_| Error::Transport)?;
     if incoming.kind != FrameKind::Hello {
         return Err(Error::Frame);
@@ -232,7 +288,7 @@ fn serve(shared: &Shared, stream: &Stream) -> Result<()> {
     if endpoint.principal != principal {
         return Err(Error::Authentication);
     }
-    let now = shared.config.clock.sample().map_err(|_| Error::Authority)?;
+    let now = shared.config.clock.sample().map_err(|_| Error::Clock)?;
     let challenge = SessionChallenge {
         home,
         account: hello.account,
@@ -275,11 +331,11 @@ fn serve(shared: &Shared, stream: &Stream) -> Result<()> {
             remaining(end)?.min(Duration::from_secs(1)),
         )
         .map_err(|_| Error::Authority)?;
-    let now = shared.config.clock.sample().map_err(|_| Error::Authority)?;
-    if now.upper_ms >= challenge.expires_ms
-        || clock::boot_ms().map_err(|_| Error::Authority)? >= end
-        || !check.permitted()
-    {
+    let now = shared.config.clock.sample().map_err(|_| Error::Clock)?;
+    if now.upper_ms >= challenge.expires_ms || clock::boot_ms().map_err(|_| Error::Clock)? >= end {
+        return Err(Error::HandshakeExpired);
+    }
+    if !check.permitted() {
         return Err(Error::Authority);
     }
     let window = shared
@@ -287,7 +343,7 @@ fn serve(shared: &Shared, stream: &Stream) -> Result<()> {
         .lock()
         .map_err(|_| Error::State)?
         .open_window(&endpoint, now, &|| check.permitted())
-        .map_err(|_| Error::Authority)?;
+        .map_err(|_| Error::RetryWindow)?;
     let session = AuthenticatedSession::new(
         &endpoint,
         principal,
@@ -325,9 +381,9 @@ fn serve(shared: &Shared, stream: &Stream) -> Result<()> {
         if !matches!(incoming.kind, FrameKind::Action | FrameKind::CryptoAction) {
             return Err(Error::Frame);
         }
-        let now = clock::boot_ms().map_err(|_| Error::Authority)?;
+        let now = clock::boot_ms().map_err(|_| Error::Clock)?;
         if !budget.admit(now) || !shared.ingress.lock().map_err(|_| Error::State)?.admit(now) {
-            return Err(Error::Authority);
+            return Err(Error::RateLimited);
         }
         let verified =
             verify_action(&incoming.payload, &endpoint.key).map_err(|_| Error::Authentication)?;

@@ -63,6 +63,12 @@ live database files to bypass that lease. The owner recovery key must be stored
 outside the device directory and kept separately; it is not an encryption-history
 backup. New-device encrypted history remains future-only.
 
+Add `--diagnostics` to `service run` to report fixed session failure categories on
+standard error. Diagnostics contain no messages, account identifiers or keys.
+Output is limited to a burst of eight lines, one line per second thereafter and
+128 lines per process. Client errors distinguish local configuration and storage,
+HyperNet preparation, session authentication, clock and handshake failures.
+
 ## Conversation operations
 
 ```sh
