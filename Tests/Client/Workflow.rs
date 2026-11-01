@@ -263,3 +263,23 @@ fn structured_api_preserves_ids_inside_operation_bodies() {
         a.actor.acting().account.local.as_hex()
     );
 }
+
+#[test]
+fn structured_api_rejects_duplicate_keys_before_signing() {
+    let a = action();
+    let json = crate::client::json::value(&a).unwrap();
+    let input = serde_json::to_string(&json).unwrap();
+    assert!(crate::client::json::action(input.as_bytes()).is_ok());
+    let operation = format!("\"operation\":{}", json["operation"]);
+    let duplicate_operation = input.replacen(&operation, &format!("{operation},{operation}"), 1);
+    let duplicate_body = input.replacen("\"text\":", "\"text\":\"replacement\",\"text\":", 1);
+    let duplicate_identity = input.replacen(
+        "\"endpoint\":",
+        "\"endpoint\":\"replacement\",\"endpoint\":",
+        1,
+    );
+    for duplicate in [duplicate_operation, duplicate_body, duplicate_identity] {
+        assert_ne!(duplicate, input);
+        assert!(crate::client::json::action(duplicate.as_bytes()).is_err());
+    }
+}

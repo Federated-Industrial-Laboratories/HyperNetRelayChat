@@ -92,6 +92,8 @@ Commands return structured JSON. Use the room identifier returned by create or
 list. `--reply EVENT` sends a reply, and `--action` sends a typed action message.
 Opaque identifiers and byte strings use lowercase hexadecimal in JSON, including
 inside result bodies. The native wire still uses canonical CBOR byte strings.
+Structured API requests reject duplicate JSON keys and use the native protocol's
+depth, collection and node bounds before constructing or signing an operation.
 History and search return a signed cursor; pass its hexadecimal bytes to
 `--cursor` for continuation. Access, current recipient filters and retention are
 checked on every read. Repeating a read obtains current authorized results.

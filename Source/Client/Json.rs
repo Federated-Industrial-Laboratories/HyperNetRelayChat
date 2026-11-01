@@ -17,7 +17,10 @@ pub fn action(bytes: &[u8]) -> Result<Action> {
     if bytes.len() > ORDINARY_FRAME_BYTES {
         return Err(Invalid);
     }
-    let mut json: Json = serde_json::from_slice(bytes).map_err(|_| Invalid)?;
+    // Preserve map entries until duplicate keys and the shared structural bounds are checked.
+    let raw: Value = serde_json::from_slice(bytes).map_err(|_| Invalid)?;
+    canonical_encode(&raw, ORDINARY_FRAME_BYTES).map_err(|_| Invalid)?;
+    let mut json = convert(raw)?;
     let body_json = json.get_mut("body").ok_or(Invalid)?.take();
     let mut action: Action = serde_json::from_value(json).map_err(|_| Invalid)?;
     use Operation::*;
