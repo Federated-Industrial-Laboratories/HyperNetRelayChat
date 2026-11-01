@@ -40,6 +40,18 @@ resumes current history without duplicate event IDs and sends the retained draft
 Commands are submitted once and results are asserted through actual immutable
 snapshots. The helper does not resubmit uncertain effects.
 
+Initial connection may complete with `OperationTemporarilyUnavailable` while the
+Controller reconnects automatically. The helper waits for `Online` with current
+inspection and privacy state within the original 40-second command budget; it
+does not dispatch another Connect. Other command errors fail the check. A send
+with a visibly pending delivery may recover only if the same request, operation
+ID and Action digest become committed through the Controller's own resolution.
+Permanent refusals, abandonment and replacement identities fail. Evidence counts
+observed backoff entries and resolved original deliveries, and claims zero
+helper resubmissions, not zero internal retries. Failure diagnostics name the
+principal, command and last visible status, with bounded native service logs
+providing the individual read-operation category when available.
+
 Cancellation is attempted while a real query is visibly running. Evidence says
 whether cancellation was observed or completion won the race; it does not claim
 that a small native query was interrupted inside SQL. A subsequent search checks

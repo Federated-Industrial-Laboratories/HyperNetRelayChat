@@ -197,6 +197,11 @@ impl Worker {
             Err(Error::Rejected {
                 code: ErrorCode::ResynchronisationRequired,
                 detail,
+            })
+            | Err(Error::Refused {
+                code: ErrorCode::ResynchronisationRequired,
+                detail,
+                ..
             }) => {
                 cache::invalidate(&mut self.client.store, room).map_err(|_| Error::Storage)?;
                 self.caught_up.remove(&room);

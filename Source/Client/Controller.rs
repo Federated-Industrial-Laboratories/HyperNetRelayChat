@@ -315,15 +315,23 @@ impl Worker {
             code: e.code().into(),
             detail: e.to_string(),
         });
-        if matches!(e, Error::Network(_) | Error::Clock | Error::Unknown) {
+        let retry = e.retry_delay_ms();
+        if retry.is_some() || matches!(e, Error::Network(_) | Error::Refused { .. }) {
             self.client.disconnect();
             self.stale();
             self.caught_up.clear();
+            *self.shared.stream.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            if retry.is_none() {
+                self.desired = false;
+                self.snapshot.connection = ConnectionState::Offline;
+                return;
+            }
             self.attempt = self.attempt.saturating_add(1);
             let jitter = Id::random()
                 .map(|id| u64::from(id.as_bytes()[0]) * 4)
                 .unwrap_or(500);
-            let delay = (1000u64 << self.attempt.min(5)).min(30000) + jitter;
+            let delay =
+                ((1000u64 << self.attempt.min(5)).min(30000) + jitter).max(retry.unwrap_or(0));
             self.retry = Instant::now() + Duration::from_millis(delay);
             self.snapshot.connection = if self.desired {
                 ConnectionState::Backoff {
@@ -346,22 +354,27 @@ impl Worker {
         self.snapshot.connection = ConnectionState::Resolving;
         self.publish();
         let pending = self.client.pending()?;
-        let resolved = self.client.resolve_pending()?;
         self.deliveries()?;
-        for response in resolved {
+        for p in pending.iter().filter(|p| !p.abandoned) {
+            let response = self
+                .client
+                .retry_pending(p.action.action().operation_id, p.action.digest())?;
             let original = match response.outcome {
                 Outcome::Result { body } => body
                     .deserialized::<home::ResolveResult>()
                     .ok()
                     .map(|r| (r.operation_id, r.action_digest, r.outcome)),
-                outcome => Some((response.operation_id, response.action_digest, outcome)),
+                outcome if response.operation_id == p.action.action().operation_id => {
+                    Some((response.operation_id, response.action_digest, outcome))
+                }
+                outcome => return Err(Error::from_outcome(outcome)),
             };
-            if let Some((operation_id, action_digest, outcome)) = original
-                && let Some(p) = pending.iter().find(|p| {
-                    p.action.action().operation_id == operation_id
-                        && p.action.digest() == action_digest
-                })
-            {
+            if let Some((operation_id, action_digest, outcome)) = original {
+                if p.action.action().operation_id != operation_id
+                    || p.action.digest() != action_digest
+                {
+                    return Err(Error::Input);
+                }
                 let request_id = self
                     .snapshot
                     .deliveries
@@ -384,15 +397,26 @@ impl Worker {
                         Target::Room(room) => Some(room),
                         _ => None,
                     },
-                    outcome: Some(outcome),
+                    outcome: Some(outcome.clone()),
                 });
+                // Retain each resolved identity before another read can fail.
+                // Temporary non-admission must remain pending for fresh resolution.
+                if matches!(
+                    outcome,
+                    Outcome::Refused { .. } | Outcome::Unknown | Outcome::Absent
+                ) {
+                    return Err(Error::from_outcome(outcome));
+                }
+            } else {
+                return Err(Error::Input);
             }
         }
-        self.snapshot.connection = ConnectionState::Online;
         self.snapshot.privacy = Some(self.client.session()?.privacy());
-        self.attempt = 0;
         self.caught_up.clear();
-        self.refresh()
+        self.refresh()?;
+        self.snapshot.connection = ConnectionState::Online;
+        self.attempt = 0;
+        Ok(())
     }
     fn deliveries(&mut self) -> Result<()> {
         for p in self.client.pending()? {
@@ -498,10 +522,7 @@ impl Worker {
                 });
                 Ok(body)
             }
-            Outcome::Refused { code, detail, .. } | Outcome::Rejected { code, detail } => {
-                Err(Error::Rejected { code, detail })
-            }
-            _ => Err(Error::Unknown),
+            outcome => Err(Error::from_outcome(outcome)),
         }
     }
     fn read<T: serde::de::DeserializeOwned, B: serde::Serialize>(
@@ -513,10 +534,7 @@ impl Worker {
         let r = self.client.call(op, target, body)?;
         match r.outcome {
             Outcome::Result { body } => body.deserialized().map_err(|_| Error::Input),
-            Outcome::Refused { code, detail, .. } | Outcome::Rejected { code, detail } => {
-                Err(Error::Rejected { code, detail })
-            }
-            _ => Err(Error::Unknown),
+            outcome => Err(Error::from_outcome(outcome)),
         }
     }
     fn effect<B: serde::Serialize>(

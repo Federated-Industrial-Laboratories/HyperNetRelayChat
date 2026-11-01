@@ -5,14 +5,18 @@ use hrc::{client::*, messaging, protocol::*};
 use serde::Deserialize;
 use serde_json::json;
 use std::{
+    cell::{Cell, RefCell},
     collections::BTreeSet,
+    ops::{Deref, DerefMut},
+    path::Path,
     path::PathBuf,
-    sync::Arc,
+    sync::{Arc, Mutex},
     thread,
     time::{Duration, Instant},
 };
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+static LAST_OBSERVATION: Mutex<String> = Mutex::new(String::new());
 
 #[derive(Parser)]
 struct Arguments {
@@ -31,8 +35,105 @@ struct Request {
     room: RoomId,
 }
 
-fn snapshot(controller: &Controller) -> Arc<Snapshot> {
+struct Probe {
+    principal: &'static str,
+    controller: Controller,
+    backoffs: Cell<u32>,
+    last_backoff: RefCell<Option<(u8, String)>>,
+    resolved_deliveries: Cell<u32>,
+    command: Cell<&'static str>,
+}
+
+impl Probe {
+    fn open(principal: &'static str, path: &Path) -> Result<Self> {
+        Ok(Self {
+            principal,
+            controller: Controller::open(path).map_err(|error| {
+                format!(
+                    "principal={principal} command=Open lastVisible={}: {error}",
+                    error.code()
+                )
+            })?,
+            backoffs: Cell::new(0),
+            last_backoff: RefCell::new(None),
+            resolved_deliveries: Cell::new(0),
+            command: Cell::new("Open"),
+        })
+    }
+    fn reopen(&mut self, path: &Path) -> Result<()> {
+        self.controller = Controller::open(path).map_err(|error| {
+            format!(
+                "principal={} command=Reopen lastVisible={}: {error}",
+                self.principal,
+                error.code()
+            )
+        })?;
+        self.command.set("Reopen");
+        *self.last_backoff.borrow_mut() = None;
+        Ok(())
+    }
+}
+impl Deref for Probe {
+    type Target = Controller;
+    fn deref(&self) -> &Self::Target {
+        &self.controller
+    }
+}
+impl DerefMut for Probe {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.controller
+    }
+}
+
+fn context(controller: &Probe, command: &str, view: &Snapshot) -> String {
+    let status = view
+        .status
+        .as_ref()
+        .map(|s| format!("{}: {}", s.code, s.detail));
+    format!(
+        "principal={} command={command} connection={:?} lastVisible={}",
+        controller.principal,
+        view.connection,
+        status.as_deref().unwrap_or("none")
+    )
+}
+
+fn command_name(command: &Command) -> &'static str {
+    match command {
+        Command::Connect => "Connect",
+        Command::SelectRoom(_) => "SelectRoom",
+        Command::SetNickname(_) => "SetNickname",
+        Command::SetRoomPreferences { .. } => "SetRoomPreferences",
+        Command::MarkRead { .. } => "MarkRead",
+        Command::Send { .. } => "Send",
+        Command::Search(_) => "Search",
+        Command::OpenEvent { .. } => "OpenEvent",
+        Command::SetFilter { .. } => "SetFilter",
+        Command::Resynchronise => "Resynchronise",
+        Command::Refresh => "Refresh",
+        Command::CloseSearch => "CloseSearch",
+        Command::SaveDraft { .. } => "SaveDraft",
+        Command::CancelSearch => "CancelSearch",
+        _ => "OtherCommand",
+    }
+}
+
+fn snapshot(controller: &Probe) -> Arc<Snapshot> {
     let view = controller.snapshot();
+    *LAST_OBSERVATION.lock().unwrap_or_else(|e| e.into_inner()) =
+        context(controller, controller.command.get(), &view);
+    let backoff = match &view.connection {
+        ConnectionState::Backoff {
+            attempt, reason, ..
+        } => Some((*attempt, reason.clone())),
+        _ => None,
+    };
+    if backoff.is_some() && *controller.last_backoff.borrow() != backoff {
+        controller
+            .backoffs
+            .set(controller.backoffs.get().saturating_add(1));
+    }
+    *controller.last_backoff.borrow_mut() = backoff;
     assert!(view.completions.len() <= 64 && view.notifications.len() <= 64);
     assert!(view.rooms.len() <= 256);
     if let Some(room) = &view.selected {
@@ -45,7 +146,7 @@ fn snapshot(controller: &Controller) -> Arc<Snapshot> {
 }
 
 fn wait(
-    controller: &Controller,
+    controller: &Probe,
     label: &str,
     end: Instant,
     test: impl Fn(&Snapshot) -> bool,
@@ -53,20 +154,22 @@ fn wait(
     let end = end.min(Instant::now() + Duration::from_secs(40));
     loop {
         let view = snapshot(controller);
-        assert!(
-            !matches!(view.connection, ConnectionState::Backoff { .. }),
-            "{label}: unexpected transport backoff"
-        );
+        *LAST_OBSERVATION.lock().unwrap_or_else(|e| e.into_inner()) =
+            context(controller, label, &view);
         if test(&view) {
             return view;
         }
-        assert!(Instant::now() < end, "{label}: observable result deadline");
+        assert!(
+            Instant::now() < end,
+            "{}: observable result deadline",
+            context(controller, label, &view)
+        );
         thread::sleep(Duration::from_millis(5));
     }
 }
 
-fn completed(controller: &Controller, id: u64, end: Instant) -> Arc<Snapshot> {
-    let view = wait(controller, "command completion", end, |v| {
+fn completion(controller: &Probe, id: u64, label: &str, end: Instant) -> Arc<Snapshot> {
+    let view = wait(controller, label, end, |v| {
         v.completions.iter().any(|c| c.request_id == id)
     });
     let matching: Vec<_> = view
@@ -74,19 +177,81 @@ fn completed(controller: &Controller, id: u64, end: Instant) -> Arc<Snapshot> {
         .iter()
         .filter(|c| c.request_id == id)
         .collect();
-    assert_eq!(matching.len(), 1, "one completion per request");
-    if let Some(error) = &matching[0].error {
+    assert_eq!(
+        matching.len(),
+        1,
+        "{}: one completion for request {id}",
+        context(controller, label, &view)
+    );
+    view
+}
+
+fn completed(controller: &Probe, id: u64, label: &str, end: Instant) -> Arc<Snapshot> {
+    let view = completion(controller, id, label, end);
+    let completion = view
+        .completions
+        .iter()
+        .find(|c| c.request_id == id)
+        .unwrap();
+    if let Some(error) = &completion.error {
         assert_eq!(error.request_id, Some(id));
-        panic!("request {id} failed: {}: {}", error.code, error.detail);
+        panic!(
+            "{}: request {id} failed: {}: {}",
+            context(controller, label, &view),
+            error.code,
+            error.detail
+        );
     }
     view
 }
 
-fn command(controller: &Controller, action: Command, end: Instant) -> (u64, Arc<Snapshot>) {
-    let id = controller
-        .dispatch(action)
-        .expect("bounded command admitted once");
-    (id, completed(controller, id, end))
+fn dispatch(controller: &Probe, action: Command) -> u64 {
+    let label = command_name(&action);
+    controller.command.set(label);
+    controller.dispatch(action).unwrap_or_else(|error| {
+        panic!(
+            "{}: dispatch failed: {error}",
+            context(controller, label, &snapshot(controller))
+        )
+    })
+}
+
+fn command(controller: &Probe, action: Command, end: Instant) -> (u64, Arc<Snapshot>) {
+    let end = end.min(Instant::now() + Duration::from_secs(40));
+    let label = command_name(&action);
+    let connect = matches!(action, Command::Connect);
+    let id = dispatch(controller, action);
+    if !connect {
+        return (id, completed(controller, id, label, end));
+    }
+    let view = completion(controller, id, label, end);
+    let completion = view
+        .completions
+        .iter()
+        .find(|c| c.request_id == id)
+        .unwrap();
+    // Only this transient pre-admission refusal may complete Connect with an error.
+    // The Controller reconnects; the helper never redispatches the command.
+    if let Some(error) = &completion.error {
+        assert_eq!(error.request_id, Some(id));
+        assert_eq!(
+            error.code,
+            "OperationTemporarilyUnavailable",
+            "{}: Connect failed permanently: {}",
+            context(controller, label, &view),
+            error.detail
+        );
+    }
+    let ready = wait(controller, label, end, |v| {
+        assert_ne!(
+            v.connection,
+            ConnectionState::Offline,
+            "{}: automatic connection stopped",
+            context(controller, label, v)
+        );
+        v.connection == ConnectionState::Online && !v.inspection.stale && v.privacy.is_some()
+    });
+    (id, ready)
 }
 
 fn body(event: &Event) -> Option<messaging::Send> {
@@ -101,11 +266,12 @@ fn matching(events: &[Event], text: &str) -> Vec<Event> {
         .collect()
 }
 
-fn received(controller: &Controller, text: &str, end: Instant) -> Event {
+fn received(controller: &Probe, text: &str, end: Instant) -> Event {
     let view = wait(controller, "live receive", end, |v| {
-        v.selected
-            .as_ref()
-            .is_some_and(|r| !r.stale && !matching(&r.events, text).is_empty())
+        v.connection == ConnectionState::Online
+            && v.selected
+                .as_ref()
+                .is_some_and(|r| !r.stale && !matching(&r.events, text).is_empty())
     });
     let events = matching(&view.selected.as_ref().unwrap().events, text);
     assert_eq!(
@@ -117,14 +283,15 @@ fn received(controller: &Controller, text: &str, end: Instant) -> Event {
 }
 
 fn send(
-    controller: &Controller,
+    controller: &Probe,
     room: RoomId,
     text: &str,
     mentions: Vec<messaging::Mention>,
     parent: Option<Id>,
     end: Instant,
 ) -> Delivery {
-    let (id, view) = command(
+    let end = end.min(Instant::now() + Duration::from_secs(40));
+    let id = dispatch(
         controller,
         Command::Send {
             room,
@@ -135,13 +302,92 @@ fn send(
             action: false,
             grant: None,
         },
-        end,
     );
+    let view = completion(controller, id, "Send", end);
+    let original = view
+        .deliveries
+        .iter()
+        .find(|d| d.request_id == Some(id))
+        .unwrap_or_else(|| {
+            panic!(
+                "{}: request {id} has no delivery identity",
+                context(controller, "Send", &view)
+            )
+        })
+        .clone();
+    let completion = view
+        .completions
+        .iter()
+        .find(|c| c.request_id == id)
+        .unwrap();
+    let view = if let Some(error) = &completion.error {
+        assert_eq!(error.request_id, Some(id));
+        let unresolved = matches!(
+            original.outcome,
+            None | Some(Outcome::Unknown)
+                | Some(Outcome::Refused {
+                    code: ErrorCode::Unavailable | ErrorCode::RateLimited | ErrorCode::Overloaded,
+                    ..
+                })
+        );
+        assert!(
+            unresolved
+                && matches!(
+                    error.code.as_str(),
+                    "OperationTemporarilyUnavailable" | "OutcomeUnknown" | "TransportUnavailable"
+                ),
+            "{}: request {id} failed without a recoverable pending delivery: {}: {}",
+            context(controller, "Send", &view),
+            error.code,
+            error.detail
+        );
+        let resolved = wait(controller, "Send resolve original identity", end, |v| {
+            for delivery in v.deliveries.iter().filter(|d| d.request_id == Some(id)) {
+                assert_eq!(
+                    delivery.operation_id,
+                    original.operation_id,
+                    "{}: replacement operation",
+                    context(controller, "Send", v)
+                );
+                assert_eq!(
+                    delivery.action_digest,
+                    original.action_digest,
+                    "{}: replacement digest",
+                    context(controller, "Send", v)
+                );
+                assert!(
+                    !delivery.abandoned,
+                    "{}: delivery abandoned",
+                    context(controller, "Send", v)
+                );
+                assert!(
+                    !matches!(delivery.outcome, Some(Outcome::Rejected { .. }))
+                        && !matches!(&delivery.outcome, Some(Outcome::Refused { code, .. })
+                            if !matches!(code, ErrorCode::Unavailable | ErrorCode::RateLimited | ErrorCode::Overloaded)),
+                    "{}: original effect refused permanently",
+                    context(controller, "Send", v)
+                );
+            }
+            v.connection == ConnectionState::Online
+                && v.deliveries.iter().any(|d| {
+                    d.request_id == Some(id)
+                        && d.operation_id == original.operation_id
+                        && d.action_digest == original.action_digest
+                        && matches!(d.outcome, Some(Outcome::Committed { .. }))
+                })
+        });
+        controller
+            .resolved_deliveries
+            .set(controller.resolved_deliveries.get().saturating_add(1));
+        resolved
+    } else {
+        view
+    };
     let delivery = view
         .deliveries
         .iter()
         .find(|d| d.request_id == Some(id))
-        .expect("correlated delivery");
+        .unwrap();
     assert!(matches!(delivery.outcome, Some(Outcome::Committed { .. })));
     assert!(!delivery.abandoned);
     assert_eq!(delivery.room, Some(room));
@@ -160,7 +406,7 @@ fn query(term: &str) -> messaging::Search {
     }
 }
 
-fn search(controller: &Controller, term: &str, end: Instant) -> Arc<Snapshot> {
+fn search(controller: &Probe, term: &str, end: Instant) -> Arc<Snapshot> {
     let (_, view) = command(controller, Command::Search(query(term)), end);
     let result = view.search.as_ref().expect("search view");
     assert!(!result.running && !result.cancelled && !result.has_more);
@@ -187,7 +433,9 @@ fn run(args: Arguments) -> Result<serde_json::Value> {
     // A blocked worker or shutdown cannot outlive the fixture's process budget.
     thread::spawn(move || {
         thread::sleep(limit);
-        eprintln!("native Controller qualification deadline");
+        if let Ok(last) = LAST_OBSERVATION.try_lock() {
+            eprintln!("native Controller qualification deadline: {last}");
+        }
         std::process::exit(124);
     });
     if std::fs::metadata(&args.request)?.len() > 16 * 1024 {
@@ -198,9 +446,9 @@ fn run(args: Arguments) -> Result<serde_json::Value> {
         return Err("request exceeds bound".into());
     }
     let request: Request = serde_json::from_slice(&bytes)?;
-    let mut alice = Controller::open(&request.alice)?;
-    let mut bob = Controller::open(&request.bob)?;
-    let mut agent = Controller::open(&request.agent)?;
+    let mut alice = Probe::open("Alice", &request.alice)?;
+    let mut bob = Probe::open("Bob", &request.bob)?;
+    let mut agent = Probe::open("Agent", &request.agent)?;
     let accounts = [
         snapshot(&alice).account,
         snapshot(&bob).account,
@@ -271,7 +519,10 @@ fn run(args: Arguments) -> Result<serde_json::Value> {
     assert_eq!(event.actor.acting().account, accounts[0]);
     assert_eq!(body(&event).unwrap().mentions, vec![bob_mention]);
     let view = wait(&bob, "typed mention and unread", end, |v| {
-        v.selected.as_ref().is_some_and(|r| r.summary.unread > 0)
+        v.connection == ConnectionState::Online
+            && v.selected
+                .as_ref()
+                .is_some_and(|r| !r.stale && r.summary.unread > 0)
             && v.notifications
                 .iter()
                 .any(|n| n.event == event.event && n.mention && !n.sound)
@@ -364,16 +615,17 @@ fn run(args: Arguments) -> Result<serde_json::Value> {
         1
     );
 
-    let id = bob.dispatch(Command::Search(query(&marker)))?;
-    let observed = wait(&bob, "search started or completed", end, |v| {
+    let cancel_end = end.min(Instant::now() + Duration::from_secs(40));
+    let id = dispatch(&bob, Command::Search(query(&marker)));
+    let observed = wait(&bob, "search started or completed", cancel_end, |v| {
         v.search.as_ref().is_some_and(|s| s.running)
             || v.completions.iter().any(|c| c.request_id == id)
     });
     let started_before_cancel = observed.search.as_ref().is_some_and(|s| s.running);
     if started_before_cancel {
-        bob.dispatch(Command::CancelSearch)?;
+        dispatch(&bob, Command::CancelSearch);
     }
-    let view = completed(&bob, id, end);
+    let view = completed(&bob, id, "Search cancellation", cancel_end);
     let cancelled = view.search.as_ref().unwrap().cancelled;
     if cancelled {
         assert!(view.search.as_ref().unwrap().events.is_empty());
@@ -435,7 +687,7 @@ fn run(args: Arguments) -> Result<serde_json::Value> {
     bob.shutdown();
     let offline_message = format!("{marker} delivered while Bob offline");
     send(&alice, request.room, &offline_message, vec![], None, end);
-    bob = Controller::open(&request.bob)?;
+    bob.reopen(&request.bob)?;
     let (_, cached) = command(&bob, Command::SelectRoom(request.room), end);
     assert_eq!(cached.connection, ConnectionState::Offline);
     let cached_room = cached.selected.as_ref().unwrap();
@@ -467,15 +719,25 @@ fn run(args: Arguments) -> Result<serde_json::Value> {
         "currentIgnoreFiltering": true, "currentSearchAndContext": true,
         "offlineDraftReopen": true, "resumeWithoutDuplicates": true,
         "cancellation": if cancelled { "observedCancelled" } else { "completedBeforeCancellation" },
-        "serverQueryInterruptionClaimed": false, "effectResubmissions": 0
+        "serverQueryInterruptionClaimed": false, "helperEffectResubmissions": 0,
+        "observedBackoffs": alice.backoffs.get().saturating_add(bob.backoffs.get()).saturating_add(agent.backoffs.get()),
+        "originalDeliveryResolutions": alice.resolved_deliveries.get().saturating_add(bob.resolved_deliveries.get()).saturating_add(agent.resolved_deliveries.get())
     }))
 }
 
 fn main() {
+    let prior_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        if let Ok(last) = LAST_OBSERVATION.try_lock() {
+            eprintln!("native qualification last observation: {last}");
+        }
+        prior_hook(info);
+    }));
     match run(Arguments::parse()) {
         Ok(result) => println!("{result}"),
         Err(error) => {
-            eprintln!("native local Controller: {error}");
+            let last = LAST_OBSERVATION.lock().unwrap_or_else(|e| e.into_inner());
+            eprintln!("native local Controller: {error}; last observation: {last}");
             std::process::exit(1);
         }
     }

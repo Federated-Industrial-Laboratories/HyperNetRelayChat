@@ -700,3 +700,55 @@ fn abandoned_unknown_operations_remain_exact_and_can_record_a_late_outcome() {
 
 #[path = "PresentationFixture.rs"]
 mod presentation_fixture;
+
+#[test]
+fn transient_nonadmission_preserves_retry_guidance_but_terminal_or_invalid_input_does_not_retry() {
+    use crate::client::{Error, network};
+    for code in [
+        ErrorCode::Unavailable,
+        ErrorCode::RateLimited,
+        ErrorCode::Overloaded,
+    ] {
+        let error = Error::from_outcome(Outcome::Refused {
+            code,
+            detail: "Temporary authority observation".into(),
+            retry_after_ms: Some(12000),
+        });
+        assert_eq!(error.retry_delay_ms(), Some(12000));
+        assert_eq!(error.code(), "OperationTemporarilyUnavailable");
+        let terminal = Error::from_outcome(Outcome::Rejected {
+            code,
+            detail: "Durable rejection".into(),
+        });
+        assert_eq!(terminal.retry_delay_ms(), None);
+    }
+    let extreme = Error::from_outcome(Outcome::Refused {
+        code: ErrorCode::Overloaded,
+        detail: "Bounded wait".into(),
+        retry_after_ms: Some(u64::MAX),
+    });
+    assert_eq!(extreme.retry_delay_ms(), Some(60000));
+    for code in [
+        ErrorCode::Denied,
+        ErrorCode::Expired,
+        ErrorCode::InvalidInput,
+        ErrorCode::UnsupportedVersion,
+    ] {
+        assert_eq!(
+            Error::from_outcome(Outcome::Refused {
+                code,
+                detail: "Permanent refusal".into(),
+                retry_after_ms: Some(1)
+            })
+            .retry_delay_ms(),
+            None
+        );
+    }
+    for failure in [
+        network::Error::Authentication,
+        network::Error::Frame,
+        network::Error::Expired,
+    ] {
+        assert_eq!(Error::Network(failure).retry_delay_ms(), None);
+    }
+}

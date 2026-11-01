@@ -24,6 +24,12 @@ pub enum Error {
     Offline,
     #[error("operation refused: {detail}")]
     Rejected { code: ErrorCode, detail: String },
+    #[error("operation was not admitted: {detail}")]
+    Refused {
+        code: ErrorCode,
+        detail: String,
+        retry_after_ms: Option<u64>,
+    },
     #[error("an operation outcome remains unknown")]
     Unknown,
 }
@@ -38,6 +44,46 @@ impl Error {
             Self::Unknown => "OutcomeUnknown",
             Self::Offline => "Offline",
             Self::Rejected { .. } => "OperationRefused",
+            Self::Refused { .. } if self.retry_delay_ms().is_some() => {
+                "OperationTemporarilyUnavailable"
+            }
+            Self::Refused { .. } => "OperationRefused",
+        }
+    }
+    pub(crate) fn from_outcome(outcome: Outcome) -> Self {
+        match outcome {
+            Outcome::Refused {
+                code,
+                detail,
+                retry_after_ms,
+            } => Self::Refused {
+                code,
+                detail,
+                retry_after_ms,
+            },
+            Outcome::Rejected { code, detail } => Self::Rejected { code, detail },
+            _ => Self::Unknown,
+        }
+    }
+    /// Reconnection may resolve exact retained effects; it never creates a replacement action.
+    pub(crate) fn retry_delay_ms(&self) -> Option<u64> {
+        use network::Error as Network;
+        match self {
+            Self::Clock
+            | Self::Unknown
+            | Self::Network(
+                Network::Companion
+                | Network::Connect
+                | Network::Handshake
+                | Network::Transport
+                | Network::Clock,
+            ) => Some(0),
+            Self::Refused {
+                code: ErrorCode::Unavailable | ErrorCode::RateLimited | ErrorCode::Overloaded,
+                retry_after_ms,
+                ..
+            } => Some(retry_after_ms.unwrap_or(1000).min(60000)),
+            _ => None,
         }
     }
 }

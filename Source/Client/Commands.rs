@@ -252,10 +252,7 @@ impl Worker {
                             delivery.outcome = Some(result.outcome);
                         }
                     }
-                    Outcome::Refused { code, detail, .. } | Outcome::Rejected { code, detail } => {
-                        return Err(Error::Rejected { code, detail });
-                    }
-                    _ => return Err(Error::Unknown),
+                    outcome => return Err(Error::from_outcome(outcome)),
                 }
                 return Ok(());
             }
@@ -451,10 +448,7 @@ impl Worker {
         }
         let page: messaging::PageResult = match response.outcome {
             Outcome::Result { body } => body.deserialized().map_err(|_| Error::Input)?,
-            Outcome::Refused { code, detail, .. } | Outcome::Rejected { code, detail } => {
-                return Err(Error::Rejected { code, detail });
-            }
-            _ => return Err(Error::Unknown),
+            outcome => return Err(Error::from_outcome(outcome)),
         };
         view.events.extend(page.events);
         if view.events.len() > 256 {

@@ -8,6 +8,14 @@ receive their normal validation. Explicit connection obtains a new verified
 session and resolves persisted operation identities before preparing new effects.
 There is no direct Internet fallback.
 
+Online status follows successful initial refresh as well as session setup.
+Temporary pre-admission authority, rate or capacity refusals preserve their retry
+guidance and enter bounded reconnect backoff. Reconnect obtains fresh authority
+and resolves exact retained operations before retrying an absent effect. A durable
+rejection, invalid identity or malformed frame does not become an automatic retry.
+Readiness failure remains visible on the original command; later recovery does
+not rewrite that completion as success. Current-query errors remain explicit.
+
 The command queue contains at most 32 bounded commands. Dispatch returns a local
 request number. Immutable snapshots carry that number on command status and
 operation delivery records. A frontend can distinguish the exact submitted text

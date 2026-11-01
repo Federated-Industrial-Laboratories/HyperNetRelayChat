@@ -70,4 +70,9 @@ fn malformed_frame_header_keeps_its_permanent_classification() {
         handshake_failure(io::Error::Deadline),
         Error::Handshake
     ));
+    assert!(matches!(transport_failure(io::Error::Frame), Error::Frame));
+    assert!(matches!(
+        transport_failure(io::Error::Deadline),
+        Error::Transport
+    ));
 }

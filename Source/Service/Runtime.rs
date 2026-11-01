@@ -476,21 +476,26 @@ fn execute(
             retry_after_ms: Some(1000),
         })
     };
-    let Ok(check) = shared.companion.check_authority(
+    let check = match shared.companion.check_authority(
         stream,
         *action.digest().as_bytes(),
         Duration::from_secs(1),
-    ) else {
-        return refused(ErrorCode::Unavailable, "TransportAuthority");
+    ) {
+        Ok(check) => check,
+        Err(error) => {
+            shared.report(action.action().operation.name(), error.code());
+            return refused(ErrorCode::Unavailable, "TransportAuthority");
+        }
     };
     if !check.permitted() {
         use crate::hypernet::Disposition;
         let (code, detail) = match check.disposition() {
             Disposition::Denied if check.certified() => (ErrorCode::Denied, "TransportDenied"),
-            Disposition::Expired => (ErrorCode::Expired, "TransportAuthorityExpired"),
+            Disposition::Expired => (ErrorCode::Unavailable, "TransportAuthorityExpired"),
             Disposition::NotActive => (ErrorCode::Unavailable, "TransportInactive"),
             _ => (ErrorCode::Unavailable, "TransportAuthority"),
         };
+        shared.report(action.action().operation.name(), detail);
         return refused(code, detail);
     }
     let Ok(now) = shared.config.clock.sample() else {
