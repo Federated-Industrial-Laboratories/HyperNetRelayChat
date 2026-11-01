@@ -47,7 +47,10 @@ does not dispatch another Connect. The same transient status from SelectRoom
 must recover the original selection to a current room view without a gap, Online
 connection, current inspection and privacy within that command's original bound.
 The helper does not dispatch another selection. Successful offline selection
-still exposes stale cached state. Other command errors fail the check. A send
+still exposes stale cached state. Other command errors fail the check. Network
+commands wait for current online state before their single dispatch, within the
+same original command deadline. Earlier readiness of another Controller does not
+imply this Controller is still online. A send
 with a visibly pending delivery may recover only if the same request, operation
 ID and Action digest become committed through the Controller's own resolution.
 Permanent refusals, abandonment and replacement identities fail. Evidence counts

@@ -192,3 +192,8 @@ with its grant inspection, exact candidates and decrypted proposal content.
 Preflight permission failures report `OperationDenied` or `OperationExpired`;
 temporary non-admission reports `OperationTemporarilyUnavailable`. These failures
 do not claim that a message was committed or delivered.
+
+A temporary room-inspection or transport failure keeps the retained cursor and
+history, marked stale until a fresh authorised read succeeds. It does not create
+a permanent history gap. Explicit membership, expiry or resynchronisation refusal
+invalidates the current cached view and requires the corresponding recovery step.
