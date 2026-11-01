@@ -260,7 +260,8 @@ class Conversation:
         maximum = min(600, int(self.deadline - time.monotonic()) - 2)
         assert maximum >= 120, 'Insufficient remaining confidential conversation budget'
         request = self.json_file(dict(alice=str(self.profiles['Alice']), bob=str(self.profiles['Bob']),
-                                     agent=str(self.profiles['Agent']), room=room))
+                                     agent=str(self.profiles['Agent']), room=room,
+                                     bobRecovery=str(self.recovery/'Bob.key')))
         result = subprocess.run([str(binary), '--request', str(request), '--maximum-seconds', str(maximum)],
                                 capture_output=True, timeout=maximum+1)
         assert len(result.stdout) <= 65536 and len(result.stderr) <= 65536, 'Confidential helper output bound'

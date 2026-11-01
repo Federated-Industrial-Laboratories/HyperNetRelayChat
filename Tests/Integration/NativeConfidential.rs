@@ -19,6 +19,8 @@ use std::{
     time::{Duration, Instant},
 };
 type Result<T> = std::result::Result<T, String>;
+#[path = "NativeDevices.rs"]
+mod devices;
 #[derive(Parser)]
 struct Arguments {
     #[arg(long)]
@@ -33,6 +35,7 @@ struct Request {
     bob: PathBuf,
     agent: PathBuf,
     room: RoomId,
+    bob_recovery: PathBuf,
 }
 #[derive(Clone)]
 struct Observation {
@@ -727,11 +730,12 @@ fn workflow(run: &mut Run, request: &Request) -> Result<serde_json::Value> {
         history(&mut bob, direct, None)
     })?;
     ensure(text(&dm_page, dm_event, &dm), "DirectDecryptionMismatch")?;
+    devices::workflow(run, request, &mut alice, &mut bob, private, first)?;
     alice.disconnect();
     bob.disconnect();
     agent.disconnect();
     Ok(
-        json!({"case":"NativeConfidentialConversations","passed":true,"privateGroup":true,"confidentialDirect":true,"explicitContactPins":true,"independentMlsKeys":3,"unicodeMentions":true,"exactCiphertextReplay":true,"restartLocalSearch":true,"currentIgnore":true,"futureOnlyAdmission":true,"delegatedAttribution":true,"revocationBarrier":true,"oldEpochRejected":true,"verifiedRemoval":true,"steps":run.steps,"sameIdentityRecoveries":run.exact_recoveries,"replacementEffectIdentities":0,"intentionalExactCiphertextReplays":1,"noDirectFallback":true}),
+        json!({"case":"NativeConfidentialConversations","passed":true,"privateGroup":true,"confidentialDirect":true,"explicitContactPins":true,"independentMlsKeys":3,"unicodeMentions":true,"exactCiphertextReplay":true,"restartLocalSearch":true,"currentIgnore":true,"futureOnlyAdmission":true,"delegatedAttribution":true,"revocationBarrier":true,"oldEpochRejected":true,"verifiedRemoval":true,"deviceEnrolment":true,"deviceDisable":true,"ownerKeyRecovery":true,"recoveryRemovalBarrier":true,"recoveredFutureOnlyReadmission":true,"steps":run.steps,"sameIdentityRecoveries":run.exact_recoveries,"replacementEffectIdentities":0,"intentionalExactCiphertextReplays":1,"noDirectFallback":true}),
     )
 }
 fn main() {

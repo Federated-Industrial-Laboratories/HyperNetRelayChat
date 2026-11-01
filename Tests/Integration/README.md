@@ -117,8 +117,9 @@ as the service and CLI. Select its exact executable with
 This selector is independent of the Controller extension. The helper runs after
 the baseline and optional Controller/bot scenarios, before final HyperNet grant
 withdrawal. No process shares its Alice, Bob or Agent profile while it runs.
-The private request has the same four fields as the Controller helper: `alice`,
-`bob`, `agent`, and the typed existing community `room` identity.
+The private request contains `alice`, `bob`, `agent`, the typed existing community
+`room` identity, and `bobRecovery`, the separately held fixture owner-key path.
+The key is used only by the production device-proof API and never enters output.
 
 The helper uses public production Client APIs and the profiles' real admitted
 HyperNet sessions and signed clock. It creates and joins an explicitly invited
@@ -139,6 +140,14 @@ Revocation must establish a send barrier and required removal; an already prepar
 old-epoch send must be durably rejected without publication. Only the verified
 removal transition restores sending. A separate invited confidential direct room
 then completes the same actual encrypted send/decrypt path.
+
+The device scenario authorizes and activates an exact new endpoint, verifies its
+independent encrypted state, then disables it. Owner-key recovery replaces Bob's
+old endpoint generation and must establish the encrypted-room removal barrier.
+After the old leaf is removed, the recovered endpoint explicitly requests and
+receives future-message admission. Earlier ciphertext remains available under
+room policy, but its plaintext is unavailable; a new message must decrypt.
+Device retries retain the same signed request and original step deadline.
 
 Each scenario operation has a 45-second watchdog. The total defaults to 600
 seconds, bounded by the driver's remaining conversation budget; the parent adds
