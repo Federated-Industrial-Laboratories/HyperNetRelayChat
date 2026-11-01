@@ -386,6 +386,14 @@ impl Stream {
             return Err(Error::Frame);
         }
         let end = ipc::deadline(timeout, 60_000, 1)?;
+        self.send_all_before(bytes, end)
+    }
+    /// Carry one original frame deadline across bounded payload chunks.
+    pub fn send_all_before(&self, bytes: &[u8], end: u64) -> Result<()> {
+        if bytes.len() > ipc::MAX_PAYLOAD {
+            return Err(Error::Frame);
+        }
+        self.check_payload_deadline(end)?;
         let _lease = self.lease(false)?;
         let result = ipc::send(&self.socket()?, bytes, end);
         if result.is_err() {
@@ -398,12 +406,30 @@ impl Stream {
             return Err(Error::Frame);
         }
         let end = ipc::deadline(timeout, 60_000, 1)?;
+        self.recv_exact_before(bytes, end)
+    }
+    /// Carry one original frame deadline across bounded payload chunks.
+    pub fn recv_exact_before(&self, bytes: &mut [u8], end: u64) -> Result<()> {
+        if bytes.len() > ipc::MAX_PAYLOAD {
+            return Err(Error::Frame);
+        }
+        self.check_payload_deadline(end)?;
         let _lease = self.lease(true)?;
         let result = ipc::exact(&self.socket()?, bytes, end);
         if result.is_err() {
             self.close();
         }
         result
+    }
+    fn check_payload_deadline(&self, end: u64) -> Result<()> {
+        let now = ipc::boot_ms()?;
+        if end <= now {
+            return Err(Error::Timeout);
+        }
+        if end - now > 60_000 {
+            return Err(Error::InvalidInput);
+        }
+        Ok(())
     }
     pub fn shutdown_write(&self) -> Result<()> {
         let _lease = self.lease(false)?;

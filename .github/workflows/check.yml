@@ -1,4 +1,4 @@
-name: Rust transport checks
+name: Rust checks
 
 on:
   pull_request:
@@ -17,7 +17,9 @@ jobs:
           persist-credentials: false
       - name: Install Rust toolchain
         run: rustup toolchain install 1.96.0 --profile minimal --component rustfmt,clippy
-      - name: Check the transport crate
+      - name: Build controlled SQLCipher
+        run: bash Tools/Native.sh
+      - name: Check the HRC crate
         env:
           RUSTUP_TOOLCHAIN: 1.96.0
         run: bash Tools/Check.sh

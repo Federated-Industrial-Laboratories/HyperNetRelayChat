@@ -1,0 +1,358 @@
+# HRC native wire profile 1
+
+This specification fixes the version-1 representation used by the Rust protocol
+boundary. It complements [operation permissions](ProtocolPermissions.md), the
+[transport profile](IntegrationProfile.md), and [state recovery](StateAndRecovery.md).
+It defines signed data and framing; a valid signature does not establish room
+membership, a current delegation or a federation agreement. Those checks belong
+to the receiving service's operation boundary.
+
+## Framing and deterministic CBOR
+
+The HyperNet application protocol label is `hrc/1`. Each frame begins with a
+four-byte unsigned big-endian length followed by a one-byte kind. The length
+includes the kind and excludes the four length bytes. The remaining bytes are
+one canonical CBOR value. Read and validate these first five bytes before
+allocating the payload. No compression, padding or trailing CBOR data is allowed.
+
+| Kind | Number | Maximum length including kind |
+| --- | --- | --- |
+| Hello | 1 | 65,536 bytes; the Hello decoder further limits its payload to 4,096 bytes |
+| Challenge | 2 | 65,536 bytes |
+| Proof | 3 | 65,536 bytes |
+| Ready | 4 | 65,536 bytes |
+| Action | 5 | 65,536 bytes |
+| Response | 6 | 65,536 bytes |
+| Event | 7 | 65,536 bytes |
+| Close | 8 | 65,536 bytes |
+| Federation | 9 | 65,536 bytes |
+| CryptoAction | 10 | 262,144 bytes |
+| CryptoEvent | 11 | 262,144 bytes |
+| CryptoFederation | 12 | 262,144 bytes |
+
+A crypto class is valid only for KeyPackage publication, proposal or commit
+operations, or an envelope carrying such an operation. Receiving services enforce
+that semantic relationship after signature verification. Declaring a larger
+class never grants additional authority. Unsupported kinds are refused before
+payload allocation. The transport maintains one original finite deadline across
+partial reads and writes of a frame; receiving another fragment cannot renew it.
+
+Use the core deterministic encoding requirements of RFC 8949: definite lengths,
+shortest integer and length forms, and map keys ordered by bytewise lexicographic
+comparison of their encoded bytes. This is not the alternative length-first
+ordering. Duplicate keys are rejected. This profile permits integers, byte and
+UTF-8 text strings, arrays, maps, booleans and null. Map keys are unsigned integers
+or text. Floats, other simple values, tags and indefinite forms are unsupported.
+[CBOR deterministic encoding](https://www.rfc-editor.org/rfc/rfc8949.html#section-4.2.1)
+
+The decoder scans lengths, UTF-8, types and structure before allocating decoded
+objects. Each collection has at most 256 entries; nesting is at most 16 levels
+and a decoded object has at most 4,096 nodes. Embedded COSE payloads allow 14
+levels, leaving two for their containing signed object. Protected headers have a
+512-byte and two-level bound. Embedded objects and their enclosing frame must
+both fit their bounds. Original text and signed bytes are preserved. Normalising
+Unicode is a separate lookup/index operation and never changes signature input.
+
+Version-1 typed objects are closed maps: every listed field is required, including
+explicit null for absent options, and unknown fields fail. Enum variants are
+closed. Operation bodies are canonical CBOR values; each owning feature must
+validate its exact body schema before effects. Unknown critical capabilities or
+operations cannot be treated as an optional no-op. Optional capabilities are
+negotiated explicitly. This version defines no ignorable typed-object fields.
+
+## Identifiers and common values
+
+`Id` is a 32-byte CBOR byte string. It represents an opaque identifier, a public
+Ed25519 key, or a SHA-256 digest according to the containing field. Random IDs
+and nonces are generated with the operating system random source. JSON diagnostic
+and configuration representations use exactly 64 lowercase hexadecimal characters.
+Variable-length `Blob` fields use even-length lowercase hexadecimal JSON strings,
+bounded to less than 256 KiB of decoded bytes. CBOR continues to encode these
+fields as byte strings; JSON conversion does not change signed bytes. Compound
+identifier parsing accepts only the exact colon-separated lowercase display form.
+The wire never substitutes that textual representation for the byte string.
+
+All field names below are case-sensitive. Unsigned fields use `u64` unless stated
+otherwise. HRC security, enrolment, grant and agreement generations start at one;
+HyperNet generation fields retain HyperNet's own numbering. Times ending in `Ms`
+are UTC milliseconds under the service's validated clock policy. A timestamp by
+itself is not evidence that time is healthy or an authority assertion remains
+current. Event order is its home-assigned sequence, not its timestamp.
+
+| Type | Exact map fields |
+| --- | --- |
+| NetworkId | `network: Id`, `incarnation: Id` |
+| ServiceId | `network: NetworkId`, `service: Id` |
+| AccountId | `origin: NetworkId`, `local: Id` |
+| RoomId | `home: ServiceId`, `local: Id` |
+| EndpointActor | `account: AccountId`, `endpoint: Id`, `securityGeneration`, `enrolmentGeneration`, `bindingDigest: Id` |
+| OperationId | `window: Id`, `operation: Id`; the enclosing Action binds the home |
+| GrantRef | `id: Id`, `generation` |
+| AgreementRef | `id: Id`, `revision`, `digest: Id` |
+| RetryWindow | `id: Id`, `expiresMs` |
+
+An account's origin includes its network incarnation. A room's identity includes
+its home service. A different network incarnation or home service cannot inherit
+an older identifier merely by reusing its local bytes. Colon-separated lowercase
+hex displays are storage/display keys, not alternative signed encodings.
+
+## COSE and key roles
+
+Signed payloads are the CBOR array `[1, role, object]`. COSE_Sign1 is untagged and
+contains exactly `[protectedBytes, {}, payloadBytes, signatureBytes]`. The attached
+payload and 64-byte Ed25519 signature are mandatory. The protected header is
+exactly `{1: -19, 3: mediaType, 4: SHA256(publicKeyBytes)}`. No unprotected fields,
+extra protected fields or detached payloads are accepted. External AAD is the five
+ASCII bytes `HRC/1`.
+
+COSE constructs the standard `Signature1` signature input. The implementation uses
+coset 0.4.2 and ed25519-dalek 2.2.0 with strict verification. The fully specified
+Ed25519 algorithm is `-19`; the polymorphic `EdDSA` value `-8` is refused.
+The key ID is a lookup hint. Verification takes a separately selected key with
+an accepted role; a key found in a payload cannot establish that trust.
+[COSE_Sign1](https://www.rfc-editor.org/rfc/rfc9052.html#section-4.2) ·
+[Ed25519 algorithm assignment](https://www.rfc-editor.org/rfc/rfc9864.html#section-2.2) ·
+[coset API](https://docs.rs/coset/0.4.2/coset/)
+
+Each media type below has prefix `application/hrc-` and suffix `+cbor;v=1`.
+The role is bound in both the protected media type and signed payload.
+
+| Role | Number | Media-type middle | Accepted signing role |
+| --- | --- | --- | --- |
+| Action | 1 | `action` | Enrolled acting endpoint |
+| AccountRegistration | 2 | `registration` | Proposed initial endpoint; possession only |
+| EndpointBinding | 3 | `endpoint-binding` | Accepted origin service/attestor |
+| SessionChallenge | 4 | `session-challenge` | Pinned receiving service |
+| SessionProof | 5 | `session-proof` | Enrolled endpoint |
+| SessionReady | 6 | `session-ready` | Pinned receiving service |
+| Response | 7 | `response` | Exact receiving home service |
+| Event | 8 | `event` | Exact room home service |
+| Approval | 9 | `approval` | Currently authorised owner endpoint |
+| FederationChallenge | 10 | `federation-challenge` | Receiving home service |
+| OriginAssertion | 11 | `origin-assertion` | Agreement's pinned origin attestor |
+| FederationAgreement | 12 | `agreement` | Each independently accepted service administration |
+| HistoryCursor | 13 | `history-cursor` | Exact receiving home service |
+
+The object's digest is SHA-256 of its exact canonical payload array, excluding
+the COSE wrapper. This lets both administrations sign identical agreement bytes.
+A verified object's `bytes()` retains that payload; `signed_bytes()` retains its
+original COSE encoding. Re-encoding during verification checks closed typed shape;
+the signature is always checked against the received bytes. Verified wrappers
+have private construction and cannot be deserialised into existence. Their
+`signer_key()` records the key actually verified, so the operation owner can
+compare it with current enrolment rather than trusting a payload key label.
+
+## Registration and session establishment
+
+`AccountRegistration` contains `home`, `account`, `endpoint`, `endpointKey`,
+`transportPrincipal`, `recoveryKey`, `classification`, and `invitation`.
+`classification` is `{"kind":"human"}` or
+`{"kind":"agent","operator":AccountId}`. All identifiers/keys are `Id` except
+the typed home and account. The registration is signed by `endpointKey`; its
+account origin must equal the home network. Recovery and endpoint keys are
+validated Ed25519 public keys.
+
+`verify_registration_request` checks possession of the proposed key. It does not
+authorise enrolment. Initial admission requires a stored invitation, exact allowed
+transport principal and account classification/operator, and explicit acceptance
+of the signed descriptor. The invitation is consumed by the authoritative owner.
+Additional endpoints require the current controller or recovery operation. A
+nickname, a self-signed descriptor or an arbitrary transport connection cannot
+substitute for this admission.
+
+`EndpointBinding` contains `origin: ServiceId`, `account`, `endpoint`,
+`endpointKey`, `transportPrincipal`, `securityGeneration`, `enrolmentGeneration`,
+`notBeforeMs` and `expiresMs`. Its account origin equals the attesting service's
+network. The binding's digest includes all these fields and its role/version.
+Validity and current enrolment must be checked again at use.
+
+Hello is unsigned CBOR `[1, object]`, with fields `home`, `account`, `endpoint`,
+`clientNonce`, `versions`, `requiredCapabilities` and `optionalCapabilities`.
+Version 1 offers exactly `[1]`. There are at most 16 combined capability names,
+no duplicates, and each name is 1-64 visible ASCII bytes. The home resolves the
+claimed endpoint through its current enrolment and the verified incoming HyperNet
+principal. Hello is an untrusted selection request.
+
+| Object | Exact fields |
+| --- | --- |
+| SessionChallenge | `home`, `account`, `endpoint`, `clientNonce`, `nonce`, `session`, `serviceBoot`, `transportPrincipal`, `transportSession`, `transportGeneration`, `expiresMs` |
+| SessionProof | `home`, `account`, `endpoint`, `clientNonce`, `challengeDigest` |
+| SessionReady | `home`, `session`, `challengeDigest`, `window: RetryWindow`, `maximumFrameBytes`, `maximumCryptoFrameBytes`, `capabilities`, `accountRevision`, `bindingDigest`, `acting: EndpointActor`, `classification` |
+
+The client verifies the pinned service signature and exact Hello correlation
+before signing the challenge digest. The home verifies the endpoint proof, the
+stored challenge, its current transport binding and its original five-second
+boot-time deadline. `serviceBoot` is a random service-incarnation nonce; challenges
+are one-use and never survive process restart. The service uses its own stored
+deadline, not a caller's interpretation of `expiresMs`.
+
+Ready binds the exact accepted challenge, current endpoint state and service-issued
+retry window. The client checks those correlations before constructing Actions.
+A reconnect starts a new handshake and fresh current authority checks. It may
+resolve old operation IDs, but does not renew old windows or authority.
+
+## Actions and operations
+
+An Action has exactly `home`, `operationId`, `actor`, `target`, `operation`, `body`,
+`expected`, `approval` and `agreement`. `approval` is null or an `Id` allocated
+before the immutable action is constructed. The separate Approval signs this
+Action's digest; there is no circular approval-signature digest in the Action.
+`agreement` is null or the exact `AgreementRef`. `expected` is a map from the
+revision names `account`, `room`, `grant`, `agreement`, `epoch` and `filter` to
+unsigned revisions; unused revisions are omitted from that map.
+
+Actor forms are closed maps:
+
+- Direct: `mode:"direct"`, `acting: EndpointActor`.
+- Independent agent: `mode:"independentAgent"`, `acting`, `operator: AccountId`.
+- Delegated: `mode:"delegated"`, `acting`, `operator`, `represented: AccountId`,
+  `representedSecurityGeneration`, `grant: GrantRef`.
+
+Direct actions cannot contain delegated fields. Acting identity always remains
+separate from the represented account. The service compares the entire actor
+binding with current enrolment and delegation; a correctly signed claim alone
+cannot select a represented account.
+
+Targets are `{"kind":"service"}`, or a map with `kind` and `id`. The other kinds
+are `account` with AccountId, `room` with RoomId, `delegation` with GrantRef and
+`endpoint` with Id. A room target's home must match the Action home. A foreign
+acting account requires an agreement reference. Destination admission and
+operation-specific target compatibility remain feature-owner checks.
+
+| Operation codes | Meaning in code order |
+| --- | --- |
+| 1, 2 | Account.SetNickname, Presence.Set |
+| 10-14 | Room.Create, Join, Leave, SetTopic, List |
+| 20-22 | Message.Send, Reply, Action |
+| 30-36 | History.Page, Search.Query, Search.Cancel, Events.Subscribe, Events.Resume, Unread.Set, Operation.Resolve |
+| 40-44 | Delegation.Create, Inspect, Pause, Resume, Revoke |
+| 50-52 | Approval.Prepare, Approve, Reject |
+| 60-64 | Moderation.Ignore, Mute, Silence, Kick, Ban |
+| 70-74 | Crypto.EnrolEndpoint, PublishKeyPackage, Propose, Commit, EpochReady |
+| 80-84 | Federation.Propose, Accept, Withdraw, Exchange, Challenge |
+| 90-93 | Account.Recover, RotateRecovery, EnrolEndpoint, DisableEndpoint |
+| 100 | Direct.Create |
+
+Operation names describe contracts from the permission specification. Defining a
+code does not enable its handler. Services refuse known but unavailable operations
+with `UnsupportedFeature`. Codes 71-73 use crypto framing; all other Actions fit
+ordinary framing. Message bodies still obey their separate text and grapheme
+limits. HRC's current operation authorization point checks the Action digest,
+fresh transport observation and current home state before effects.
+
+## Responses, events and cursors
+
+`Response` contains `home`, `operationId`, `actionDigest` and `outcome`.
+Outcome is a closed map with `status` plus the fields below:
+
+| Status | Fields and meaning |
+| --- | --- |
+| `committed` | `event: Id or null`, `position`, `body`; the nonzero position and associated state are durable |
+| `rejected` | `code`, `detail`; terminal admitted rejection retained for the operation's deduplication period |
+| `refused` | `code`, `detail`, `retryAfterMs: u64 or null`; no admitted durable outcome, hint at most 60,000 ms |
+| `result` | `body`; authenticated read/control result according to its operation |
+| `absent` | No other fields; absent in a still-open, current-authorised retry window |
+| `unknown` | No other fields; no definitive outcome can currently be established |
+
+Error codes are `invalidInput`, `denied`, `expired`, `conflict`, `unavailable`,
+`unsupportedVersion`, `unsupportedFeature`, `rateLimited`, `overloaded` and
+`resynchronisationRequired`. `detail` is 1-64 ASCII alphanumeric, underscore,
+hyphen or dot characters. Arbitrary peer prose, paths, keys or transcripts are
+not error detail. Refusal permits only a semantics-safe identical retry; it does
+not override backoff, current permissions or the original window. An expired
+window without a retained outcome must not be represented as `absent`.
+
+`Event` contains `home`, `room`, `event: Id`, `sequence`, `timestampMs`, `actor`,
+`operationId`, `actionDigest`, `kind: Operation` and `body`. The sequence is nonzero
+and the room home matches the signer role. The home signature attests committed
+attribution; original endpoint/agent attribution is retained in `actor`.
+
+`HistoryCursor` contains `home`, `room`, `account`, `sequence`,
+`membershipRevision`, `filterRevision`, `accessDigest` and `expiresMs`.
+The service computes `accessDigest` from its exact endpoint, represented-account,
+delegation, agreement and history-access context. Each use checks current access,
+expiry and those exact bindings. A cursor positions a bounded query; it never
+grants membership or suppresses an explicit retained-history gap.
+
+## Approval and federation objects
+
+`Approval` contains `id`, `home`, `owner: EndpointActor`, `grant`, `actionDigest`,
+`decision` (`approve` or `reject`) and `expiresMs`. The owner endpoint signature
+binds exact immutable Action bytes. The service independently checks current
+controller authority, grant mode, scope, expiry and one-use approval consumption.
+An encrypted approval additionally requires the owner endpoint's verified
+plaintext/ciphertext handling specified by the state contract.
+
+`FederationAgreement` contains `id`, `revision`, `home`, `origin`, `homeGateway`,
+`originGateway`, `homeServiceKey`, `originServiceKey`, `originAttestorKey`, `rooms`,
+`notBeforeMs` and `expiresMs`. Gateways are exact HyperNet application principals
+admitted on the named receiving side: homeGateway receives origin-to-home
+exchange; originGateway receives home-to-origin exchange. Both services sign
+identical canonical agreement payload bytes after explicit local administration
+acceptance. All signing keys must be independently pinned; self-listing a key in
+an agreement cannot establish trust. The two network identities differ.
+
+Each of at most 32 `rooms` entries contains `room`, `historyFromMs`, `retentionMs`,
+`storage` (`homeOnly` or `bothNetworks`), `confidentiality` (`community`,
+`confidentialDirect` or `privateGroup`), `privacy` (`supportedHyperNetRoute` or
+`attestedRelayArrival`) and at most 32 `moderatorAccounts`. Rooms are unique and
+belong to this home. Remote admission is explicit and per enrolled endpoint.
+Onward sharing and transitive third-network origin assertions are unsupported.
+Those fixed rules are not optional fields that an agreement can weaken.
+
+`FederationChallenge` contains `home`, `origin`, `agreement`, `gateway`,
+`actionDigest`, `operationId`, `nonce`, `serviceBoot`, `issuedMs` and `expiresMs`.
+The represented interval is positive and at most five seconds. The home also
+retains the original boot-time deadline and gateway binding in its bounded,
+one-use challenge table. Restart discards pending challenges. No remote clock
+can extend that original home bound.
+
+`OriginAssertion` contains `origin`, `home`, `agreement`, `challengeDigest`,
+`actionDigest`, `endpointBindingDigest`, `endpoint`, `securityGeneration`,
+`enrolmentGeneration`, `transportNetwork`, `transportPrincipal`,
+`transportSession`, `transportGeneration`, `transportGrant`,
+`transportGrantGeneration`, `sourceServiceBoot`, `controlGeneration`,
+`companionInstance`, `endpointInstance`, `permitNonce`, `authority`,
+`sourceEvaluatedMs`, `sourceNotAfterMs` and `sourceUncertaintyMs`.
+Its authority map contains `configuration`, `epoch`, `height`, `state`,
+`statementDigest`, `evaluatedAtMs` and `expiresAtMs`.
+
+Only a permitted, currently usable source check can produce this assertion.
+Source lifetime is positive, at most five seconds, and conservatively translated
+from the original observation; source uncertainty is at most 250 ms. The transport
+network matches the origin. These are signed attestor assertions, not portable
+HyperNet quorum certificates. The home applies its clock policy and the earliest
+source, challenge, credential and agreement expiry. Copying or forwarding never
+starts a new source lifetime.
+
+A Federation frame is unsigned canonical `[1, envelope]`; the envelope has
+`agreement`, `action`, `endpointBinding`, `challenge` and `originAssertion`.
+The last four fields are byte strings containing their complete signed objects.
+The entire envelope, including all evidence, must fit its selected frame class.
+CryptoFederation permits a larger original crypto Action but does not enlarge
+individual binding/challenge/assertion limits. Forwarded signed payloads have an
+11-level bound so the enclosing envelope and COSE object still fit the combined
+16-level limit.
+
+The home verifies all signatures under separately accepted roles, then compares
+home/origin, agreement ID/revision/digest, Action digest, operation ID, challenge,
+gateway, endpoint, generations, binding digest and represented/grant identities
+across these objects. Its current room and delegation policies can further refuse
+an otherwise valid remote operation. Challenge consumption and a new outcome are
+atomic. An existing identical outcome does not create a second effect. Withdrawal
+uses the acknowledged home barrier described in the transport profile.
+
+## Boundary evidence
+
+Maintained tests live under `Tests/Protocol/`. They reject malformed/duplicate and
+noncanonical CBOR, excessive lengths/depth, wrong signing keys and roles, altered
+headers, validly signed unknown or omitted fields, cross-home targets and oversized
+ordinary actions. Tests preserve exact multilingual text and distinguish
+pre-admission refusal from a retained terminal rejection.
+
+`Tests/Protocol/Vector.json` is a fixed SessionProof vector. Its regeneration
+script uses the public RFC 8032 test seed, an independent small RFC 8949 encoder
+and Python cryptography Ed25519. Rust matches its complete COSE bytes, digest,
+signature structure and signature. These are public test keys, never deployment
+credentials. Passing wire tests does not establish complete service admission,
+federation, encryption lifecycle or load qualification.

@@ -3,9 +3,11 @@
 HyperNet Relay Chat (HRC) is a Rust chat application in development for HyperNet.
 Its planned interfaces include a GUI, TUI, CLI and agent API.
 
-The first implementation provides a Linux Rust HyperNet adapter and bounded
-[transport diagnostic commands](Documentation/Transport.md). Conversation features
-remain in design; there is no installable chat release. HyperNet transport,
+The development implementation includes a Linux Rust HyperNet adapter,
+[transport diagnostic commands](Documentation/Transport.md), signed native
+operations, encrypted persistence, and a command-line conversation workflow.
+See [service and client setup](Documentation/ConversationSetup.md). Release
+qualification is still in progress; there is no supported chat release. HyperNet transport,
 explicit agent delegation and two-network federation are required capabilities.
 
 The [product plan](Documentation/ProductPlan.md) preserves the full proposal and
@@ -22,7 +24,23 @@ transactional storage, persistent MLS conversations, exact-content approval and
 owner-key account recovery. The
 [text and search profile](Documentation/TextAndSearch.md) fixes Unicode semantics,
 identity lookup and bounded multilingual search. These designs still require
-implementation evidence.
+implementation evidence. The [wire specification](Documentation/WireProtocol.md),
+[storage runtime](Documentation/StorageRuntime.md),
+[clock boundary](Documentation/ClockAndOrdering.md), and
+[MLS runtime](Documentation/CryptoRuntime.md) document the implemented boundaries.
+
+Build on Linux with Rust 1.96, a C compiler, Make, Tcl, Git and OpenSSL development
+headers. The native bootstrap builds the pinned SQLCipher engine locally:
+
+```sh
+bash Tools/Native.sh
+source Tools/Environment.sh
+cargo build --locked
+bash Tools/Check.sh
+```
+
+There is no plaintext SQLite fallback. Test bodies and conformance vectors live
+under `Tests/`; product code lives under `Source/` in cohesive feature modules.
 
 Product documentation is maintained with the source. Design changes use branches
 and pull requests. Release support and security properties will be stated only

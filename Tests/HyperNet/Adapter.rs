@@ -544,3 +544,19 @@ fn known_status_loss_and_close_do_not_present_old_privacy_as_active() {
     fresh.close();
     assert!(fresh.privacy().is_historical());
 }
+
+#[test]
+fn external_frame_deadlines_cannot_restart_a_payload_wait() {
+    let f = Fixture::new(normal);
+    let a = f.agent();
+    let s = incoming(&a);
+    assert!(matches!(s.send_all_before(b"late", 0), Err(Error::Timeout)));
+    assert!(matches!(
+        s.recv_exact_before(&mut [0; 1], 0),
+        Err(Error::Timeout)
+    ));
+    assert!(matches!(
+        s.send_all_before(b"overlong", ipc::boot_ms().unwrap() + 60_100),
+        Err(Error::InvalidInput)
+    ));
+}
