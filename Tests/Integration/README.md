@@ -31,6 +31,16 @@ acknowledgement-loss recovery and before final HyperNet grant revocation, using
 the existing Alice, Bob and Agent profiles and live service. It opens one Store
 owner per profile; no CLI process accesses those profiles concurrently.
 
+For independent local-client qualification, set `configuration.localClientOnly`
+to true or `HYPERNET_HRC_LOCAL_CLIENT_ONLY=1`. This mode creates the real service,
+three profiles and one room through shipped commands, joins Bob and Agent, then
+runs the Controller immediately. After all Controller profiles close, it creates
+and revokes an exact fixture grant, runs the same bot cases and final HyperNet
+authority refusal. Its result is `NativeLocalClientWorkflow`, with
+`conversationBaselineIncluded=false`; it does not claim to rerun the separate
+conversation baseline, acknowledgement-loss or service-restart cases. Reuse their
+identified existing evidence only when that source and behaviour remain applicable.
+
 The example checks persistent Controller send/receive, three distinct identities,
 request/completion and delivery/event correlation, Unicode typed mentions,
 unread state and mention notifications, current ignore filtering, indexed search
@@ -105,6 +115,15 @@ and `revoke_principal`. Record accepts bounded result dictionaries for the
 qualification report. Every subprocess has a deadline; service and proxy cleanup
 runs even after a failed assertion. Never point this destructive finite fixture
 at ordinary user profiles, installed services or production grants.
+
+Set `configuration.suiteBinary` or `HYPERNET_HRC_SUITE_BINARY` to the exact installed
+Suite executable for failure diagnostics. Before teardown, the driver uses the
+supported `streams status` command to retain each companion's at most eight recent
+errors and connection count. Collection is limited to six seconds in total and
+the remaining conversation deadline, with at most two seconds per companion.
+Diagnostic failure does not replace the original workflow failure. CLI result
+records include boot-time start and finish; connection-preparation stderr retains
+the static adapter failure category. No diagnostic triggers another effect or retry.
 
 This workflow qualifies community conversations. The dedicated Crypto contract
 tests qualify persistent MLS behaviour; encrypted client flows and independently

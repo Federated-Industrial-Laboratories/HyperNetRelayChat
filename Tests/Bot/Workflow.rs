@@ -310,7 +310,20 @@ fn permanent_identity_failures_do_not_enter_reconnect_backoff() {
         runtime::retry_delay(&Error::Client(Client::Network(Network::Transport))),
         Some(0)
     );
-    for error in [Network::Authentication, Network::Frame, Network::Expired] {
+    assert_eq!(
+        runtime::retry_delay(&Error::Client(Client::Network(Network::Connect(
+            crate::hypernet::Error::Timeout
+        )))),
+        Some(0)
+    );
+    for error in [
+        Network::Authentication,
+        Network::Frame,
+        Network::Expired,
+        Network::Connect(crate::hypernet::Error::Refused),
+        Network::Connect(crate::hypernet::Error::Protocol),
+        Network::Companion(crate::hypernet::Error::Ownership),
+    ] {
         assert_eq!(
             runtime::retry_delay(&Error::Client(Client::Network(error))),
             None

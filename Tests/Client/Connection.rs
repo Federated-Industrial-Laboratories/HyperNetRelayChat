@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+//! Session setup retains typed failures, original deadlines and a finite retry count.
 use super::*;
 
 #[test]
@@ -30,7 +32,7 @@ fn session_retries_are_bounded_and_do_not_repeat_invalid_identity_or_frames() {
         .is_err()
     );
     assert_eq!(calls, 3);
-    for error in [Error::Authentication, Error::Frame, Error::Connect] {
+    for error in [Error::Authentication, Error::Frame] {
         let mut error = Some(error);
         assert!(
             establish::<()>(deadline, |_| Err(error
@@ -48,6 +50,86 @@ fn session_retries_are_bounded_and_do_not_repeat_invalid_identity_or_frames() {
         .is_err()
     );
     assert_eq!(calls, 0);
+}
+
+#[test]
+fn transient_preparation_retains_its_type_and_original_setup_budget() {
+    use crate::hypernet::Error as HyperNet;
+    for source in [
+        HyperNet::Timeout,
+        HyperNet::Unavailable,
+        HyperNet::Closed,
+        HyperNet::Capacity,
+        HyperNet::Busy,
+        HyperNet::NotActive,
+    ] {
+        let error = Error::Connect(source);
+        assert!(error.retryable_session());
+        let deadline = clock::boot_ms().unwrap() + 30_000;
+        let mut calls = 0;
+        let mut error = Some(error);
+        let value = establish(deadline, |end| {
+            assert_eq!(end, deadline);
+            calls += 1;
+            error.take().map_or(Ok(7), Err)
+        })
+        .unwrap();
+        assert_eq!((value, calls), (7, 2));
+    }
+    let mut calls = 0;
+    let result = establish::<()>(clock::boot_ms().unwrap() + 30_000, |_| {
+        calls += 1;
+        Err(Error::Connect(HyperNet::Timeout))
+    });
+    assert!(matches!(result, Err(Error::Connect(HyperNet::Timeout))));
+    assert_eq!(calls, 3);
+
+    let deadline = clock::boot_ms().unwrap() + 200;
+    calls = 0;
+    let result = establish::<()>(deadline, |end| {
+        assert_eq!(end, deadline);
+        calls += 1;
+        std::thread::sleep(Duration::from_millis(210));
+        Err(Error::Connect(HyperNet::Timeout))
+    });
+    assert!(matches!(result, Err(Error::Connect(HyperNet::Timeout))));
+    assert_eq!(calls, 1, "expired original setup budget was renewed");
+}
+
+#[test]
+fn explicit_preparation_refusal_and_invalid_context_are_terminal() {
+    use crate::hypernet::Error as HyperNet;
+    for wrap in [Error::Companion, Error::Connect] {
+        for source in [
+            HyperNet::Refused,
+            HyperNet::InvalidInput,
+            HyperNet::Path,
+            HyperNet::Ownership,
+            HyperNet::Changed,
+            HyperNet::Frame,
+            HyperNet::Protocol,
+            HyperNet::UnsupportedVersion,
+            HyperNet::Clock,
+        ] {
+            let expected = source.code();
+            let error = wrap(source);
+            assert!(!error.retryable_session());
+            let mut error = Some(error);
+            let result = establish::<()>(clock::boot_ms().unwrap() + 30_000, |_| {
+                Err(error
+                    .take()
+                    .expect("permanent preparation failure was retried"))
+            });
+            let failure = result.unwrap_err();
+            match &failure {
+                Error::Companion(source) | Error::Connect(source) => {
+                    assert_eq!(source.code(), expected)
+                }
+                _ => panic!("typed preparation category was lost"),
+            }
+            assert_eq!(super::super::Error::Network(failure).retry_delay_ms(), None);
+        }
+    }
 }
 
 #[test]
