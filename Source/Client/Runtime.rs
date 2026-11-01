@@ -83,17 +83,9 @@ impl Error {
     }
     /// Reconnection may resolve exact retained effects; it never creates a replacement action.
     pub(crate) fn retry_delay_ms(&self) -> Option<u64> {
-        use network::Error as Network;
         match self {
-            Self::Clock
-            | Self::Unknown
-            | Self::Network(
-                Network::Companion
-                | Network::Connect
-                | Network::Handshake
-                | Network::Transport
-                | Network::Clock,
-            ) => Some(0),
+            Self::Clock | Self::Unknown => Some(0),
+            Self::Network(error) if error.retryable_session() => Some(0),
             Self::Refused {
                 code: ErrorCode::Unavailable | ErrorCode::RateLimited | ErrorCode::Overloaded,
                 retry_after_ms,

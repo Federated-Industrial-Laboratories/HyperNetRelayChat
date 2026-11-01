@@ -173,16 +173,9 @@ impl<F: FnOnce()> Startup<F> {
     }
 }
 pub(super) fn retry_delay(error: &Error) -> Option<u64> {
-    use client::network::Error as Network;
     match error {
-        Error::Client(client::Error::Clock)
-        | Error::Client(client::Error::Network(
-            Network::Companion
-            | Network::Connect
-            | Network::Handshake
-            | Network::Transport
-            | Network::Clock,
-        )) => Some(0),
+        Error::Client(client::Error::Clock) => Some(0),
+        Error::Client(client::Error::Network(error)) if error.retryable_session() => Some(0),
         Error::RetryLater { delay_ms } => Some((*delay_ms).min(60000)),
         _ => None,
     }
