@@ -1,11 +1,11 @@
 use crate::{client::outbox, clock::TimeBounds, home, protocol::*, storage};
 use std::{collections::BTreeMap, fs, os::unix::fs::PermissionsExt, path::PathBuf};
-struct Fixture {
-    root: PathBuf,
+pub(super) struct Fixture {
+    pub(super) root: PathBuf,
     key: storage::Key,
 }
 impl Fixture {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let root = std::env::temp_dir().join(format!("hrc-client-{}", Id::random().unwrap()));
         fs::create_dir(&root).unwrap();
         fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
@@ -16,7 +16,7 @@ impl Fixture {
         let key = storage::Key::create(root.join("Key")).unwrap();
         Self { root, key }
     }
-    fn create(&self) -> storage::Store {
+    pub(super) fn create(&self) -> storage::Store {
         let mut store = storage::Store::create(
             self.root.join("Data"),
             self.root.join("Guard"),
@@ -27,6 +27,42 @@ impl Fixture {
         .unwrap();
         outbox::initialize(&mut store).unwrap();
         store
+    }
+    pub(super) fn profile(&self) {
+        use crate::{
+            client,
+            service::{self, files},
+        };
+        let a = action();
+        fs::rename(self.root.join("Key"), self.root.join("Database.key")).unwrap();
+        let endpoint = files::create_key(&self.root.join("Endpoint.key")).unwrap();
+        let profile = client::Profile {
+            server: service::Descriptor {
+                version: 1,
+                home: a.home,
+                signing_key: Id::from_bytes(
+                    SigningKey::from_bytes(&[11; 32]).verifying_key().to_bytes(),
+                ),
+                protocol: PROTOCOL.into(),
+                text_profile: crate::text::PROFILE.into(),
+            },
+            registration: AccountRegistration {
+                home: a.home,
+                account: a.actor.represented(),
+                endpoint: id(6),
+                endpoint_key: Id::from_bytes(endpoint.verifying_key().to_bytes()),
+                transport_principal: id(12),
+                recovery_key: id(13),
+                classification: AccountClass::Human,
+                invitation: id(14),
+            },
+            companion: self.root.join("AbsentCompanion"),
+            clock: crate::clock::Config {
+                observation: self.root.join("AbsentClock"),
+                monitor_key: hex::encode([15; 32]),
+            },
+        };
+        files::create_json(&self.root.join("Profile.json"), &profile).unwrap();
     }
     fn open(&self) -> storage::Store {
         storage::Store::open(
@@ -47,7 +83,7 @@ impl Drop for Fixture {
 fn id(n: u8) -> Id {
     Id::from_bytes([n; 32])
 }
-fn action() -> Action {
+pub(super) fn action() -> Action {
     let network = NetworkId {
         network: id(1),
         incarnation: id(2),
@@ -453,10 +489,7 @@ fn old_draft_schema_migrates_without_changing_text_or_recreating_state() {
 
 #[test]
 fn controller_starts_offline_and_preserves_correlated_drafts_with_one_store_owner() {
-    use crate::{
-        client::{self, Command, ConnectionState, Controller, cache},
-        service::{self, files},
-    };
+    use crate::client::{self, Command, ConnectionState, Controller, cache};
     let f = Fixture::new();
     let mut store = f.create();
     cache::initialize(&mut store).unwrap();
@@ -480,35 +513,7 @@ fn controller_starts_offline_and_preserves_correlated_drafts_with_one_store_owne
     )
     .unwrap();
     drop(store);
-    fs::rename(f.root.join("Key"), f.root.join("Database.key")).unwrap();
-    let endpoint = files::create_key(&f.root.join("Endpoint.key")).unwrap();
-    let profile = client::Profile {
-        server: service::Descriptor {
-            version: 1,
-            home: a.home,
-            signing_key: Id::from_bytes(
-                SigningKey::from_bytes(&[11; 32]).verifying_key().to_bytes(),
-            ),
-            protocol: PROTOCOL.into(),
-            text_profile: crate::text::PROFILE.into(),
-        },
-        registration: AccountRegistration {
-            home: a.home,
-            account: a.actor.represented(),
-            endpoint: id(6),
-            endpoint_key: Id::from_bytes(endpoint.verifying_key().to_bytes()),
-            transport_principal: id(12),
-            recovery_key: id(13),
-            classification: AccountClass::Human,
-            invitation: id(14),
-        },
-        companion: f.root.join("AbsentCompanion"),
-        clock: crate::clock::Config {
-            observation: f.root.join("AbsentClock"),
-            monitor_key: hex::encode([15; 32]),
-        },
-    };
-    files::create_json(&f.root.join("Profile.json"), &profile).unwrap();
+    f.profile();
     let mut controller = Controller::open(&f.root).unwrap();
     assert_eq!(controller.snapshot().connection, ConnectionState::Offline);
     assert!(client::Client::open_offline(&f.root).is_err());
