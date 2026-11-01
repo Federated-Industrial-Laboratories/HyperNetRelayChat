@@ -85,7 +85,13 @@ fn outcome(worker: &mut Worker, action: &Action, outcome: Outcome) -> Result<Val
         &server.verifying_key(),
     )
     .unwrap();
-    super::super::outbox::record(&mut worker.client.store, &signed, &verified, now).unwrap();
+    super::super::outbox::record(
+        &mut worker.client.store,
+        &signed,
+        &verified,
+        TimeBounds::test_now(),
+    )
+    .unwrap();
     worker.operation = Some(action.operation);
     worker.delivery_room = match action.target {
         Target::Room(room) => Some(room),
