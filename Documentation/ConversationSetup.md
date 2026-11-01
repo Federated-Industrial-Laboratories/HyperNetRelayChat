@@ -77,6 +77,23 @@ enforces current access and expiry before returning content or applying effects.
 The companion accept wait allows five seconds for transport handoff, including
 its current privacy observation. HRC's subsequent handshake retains its separate
 five-second bound; acceptance never extends an authority observation's validity.
+
+The service admits authority checks through one bounded FIFO shared by session
+setup, actions and exact search cancellation. At most 32 callers can hold or wait
+for its single exchange slot; each admission wait is at most one second. A queued
+control cannot be overtaken by later ordinary reads. Queue saturation or an
+admission timeout reports `AuthorityAdmissionBusy` (an `Overloaded` pre-admission
+action refusal), separately from a failed transport authority check. Shutdown,
+stream invalidation or query cancellation removes a waiter.
+
+After admission, each check starts a fresh nonce and a separate lifetime of at
+most one second. The original five-second handshake and ten-second search ends
+also cap admission and check time; neither is restarted. The exchange slot is
+released before Home state is locked or work executes. The resulting observation
+must still be currently permitted at every existing admission and commit check.
+This scheduling does not extend a receipt, reuse authority, retry an effect, or
+conceal a Core busy or unavailable result.
+
 If transport handoff closes before session setup finishes, the client can obtain
 up to three fresh streams and challenges within one 30-second setup budget,
 with bounded jitter between attempts. Invalid identities and frames fail at once.
