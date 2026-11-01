@@ -43,11 +43,15 @@ snapshots. The helper does not resubmit uncertain effects.
 Initial connection may complete with `OperationTemporarilyUnavailable` while the
 Controller reconnects automatically. The helper waits for `Online` with current
 inspection and privacy state within the original 40-second command budget; it
-does not dispatch another Connect. Other command errors fail the check. A send
+does not dispatch another Connect. The same transient status from SelectRoom
+must recover the original selection to a current room view without a gap, Online
+connection, current inspection and privacy within that command's original bound.
+The helper does not dispatch another selection. Successful offline selection
+still exposes stale cached state. Other command errors fail the check. A send
 with a visibly pending delivery may recover only if the same request, operation
 ID and Action digest become committed through the Controller's own resolution.
 Permanent refusals, abandonment and replacement identities fail. Evidence counts
-observed backoff entries and resolved original deliveries, and claims zero
+observed backoff entries, recovered selections and resolved original deliveries, and claims zero
 helper resubmissions, not zero internal retries. Failure diagnostics name the
 principal, command and last visible status, with bounded native service logs
 providing the individual read-operation category when available.

@@ -41,6 +41,7 @@ struct Probe {
     backoffs: Cell<u32>,
     last_backoff: RefCell<Option<(u8, String)>>,
     resolved_deliveries: Cell<u32>,
+    recovered_selections: Cell<u32>,
     command: Cell<&'static str>,
 }
 
@@ -57,6 +58,7 @@ impl Probe {
             backoffs: Cell::new(0),
             last_backoff: RefCell::new(None),
             resolved_deliveries: Cell::new(0),
+            recovered_selections: Cell::new(0),
             command: Cell::new("Open"),
         })
     }
@@ -220,8 +222,12 @@ fn command(controller: &Probe, action: Command, end: Instant) -> (u64, Arc<Snaps
     let end = end.min(Instant::now() + Duration::from_secs(40));
     let label = command_name(&action);
     let connect = matches!(action, Command::Connect);
+    let selection = match &action {
+        Command::SelectRoom(room) => Some(*room),
+        _ => None,
+    };
     let id = dispatch(controller, action);
-    if !connect {
+    if !connect && selection.is_none() {
         return (id, completed(controller, id, label, end));
     }
     let view = completion(controller, id, label, end);
@@ -230,14 +236,18 @@ fn command(controller: &Probe, action: Command, end: Instant) -> (u64, Arc<Snaps
         .iter()
         .find(|c| c.request_id == id)
         .unwrap();
-    // Only this transient pre-admission refusal may complete Connect with an error.
-    // The Controller reconnects; the helper never redispatches the command.
+    // Successful offline selection exposes stale cached state by design.
+    if !connect && completion.error.is_none() {
+        return (id, view);
+    }
+    // Only these commands retain state for automatic read recovery. A transient
+    // pre-admission refusal never makes the helper redispatch the command.
     if let Some(error) = &completion.error {
         assert_eq!(error.request_id, Some(id));
         assert_eq!(
             error.code,
             "OperationTemporarilyUnavailable",
-            "{}: Connect failed permanently: {}",
+            "{}: read recovery refused for request {id}: {}",
             context(controller, label, &view),
             error.detail
         );
@@ -249,8 +259,28 @@ fn command(controller: &Probe, action: Command, end: Instant) -> (u64, Arc<Snaps
             "{}: automatic connection stopped",
             context(controller, label, v)
         );
-        v.connection == ConnectionState::Online && !v.inspection.stale && v.privacy.is_some()
+        let selected_current = selection.is_none_or(|room| {
+            let selected = v.selected.as_ref().unwrap_or_else(|| {
+                panic!("{}: selected room was lost", context(controller, label, v))
+            });
+            assert_eq!(
+                selected.summary.room,
+                room,
+                "{}: selected room changed during recovery",
+                context(controller, label, v)
+            );
+            !selected.stale && selected.gap.is_none()
+        });
+        v.connection == ConnectionState::Online
+            && !v.inspection.stale
+            && v.privacy.is_some()
+            && selected_current
     });
+    if selection.is_some() {
+        controller
+            .recovered_selections
+            .set(controller.recovered_selections.get().saturating_add(1));
+    }
     (id, ready)
 }
 
@@ -721,6 +751,7 @@ fn run(args: Arguments) -> Result<serde_json::Value> {
         "cancellation": if cancelled { "observedCancelled" } else { "completedBeforeCancellation" },
         "serverQueryInterruptionClaimed": false, "helperEffectResubmissions": 0,
         "observedBackoffs": alice.backoffs.get().saturating_add(bob.backoffs.get()).saturating_add(agent.backoffs.get()),
+        "automaticSelectionRecoveries": alice.recovered_selections.get().saturating_add(bob.recovered_selections.get()).saturating_add(agent.recovered_selections.get()),
         "originalDeliveryResolutions": alice.resolved_deliveries.get().saturating_add(bob.resolved_deliveries.get()).saturating_add(agent.resolved_deliveries.get())
     }))
 }
