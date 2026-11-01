@@ -143,6 +143,13 @@ The private request contains `alice`, `bob`, `agent`, the typed existing communi
 `room` identity, and `bobRecovery`, the separately held fixture owner-key path.
 The key is used only by the production device-proof API and never enters output.
 
+For independent confidential qualification, select `configuration.confidentialClientOnly`
+or `HRC_NATIVE_CONFIDENTIAL_ONLY=1`. This mode uses the same shipped CLI setup,
+three profiles and room joins, then runs the confidential helper and final actual
+HyperNet authority refusal. It reports `conversationBaselineIncluded=false` and
+does not rerun unrelated baseline or Controller scenarios. It cannot be combined
+with local-client-only mode. Its original overall and per-step deadlines remain.
+
 The helper uses public production Client APIs and the profiles' real admitted
 HyperNet sessions and signed clock. It creates and joins an explicitly invited
 private group; each endpoint generates its own MLS key. It explicitly accepts

@@ -48,7 +48,8 @@ impl Error {
             Self::Expired => "RetryWindowExpired",
         }
     }
-    pub(crate) fn retryable_session(&self) -> bool {
+    /// A fresh connection may be attempted; this does not authorize replaying an operation.
+    pub fn retryable_session(&self) -> bool {
         self.retryable_setup() || matches!(self, Self::Transport | Self::Clock)
     }
     fn retryable_setup(&self) -> bool {

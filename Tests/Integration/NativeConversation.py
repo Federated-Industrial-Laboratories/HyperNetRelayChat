@@ -193,11 +193,26 @@ class Conversation:
         assert isinstance(only_local, bool), 'localClientOnly must be boolean'
         setting = os.environ.get('HYPERNET_HRC_LOCAL_CLIENT_ONLY', '0')
         assert setting in ('0', '1'), 'Invalid local-client workflow selection'
-        if only_local or setting == '1':
-            assert self.local_client_binary(), 'Local-client workflow requires its executable'
+        only_local = only_local or setting == '1'
+        only_confidential = self.config.get('confidentialClientOnly', False)
+        assert isinstance(only_confidential, bool), 'confidentialClientOnly must be boolean'
+        confidential_setting = os.environ.get('HRC_NATIVE_CONFIDENTIAL_ONLY', '0')
+        assert confidential_setting in ('0', '1'), 'Invalid confidential workflow selection'
+        only_confidential = only_confidential or confidential_setting == '1'
+        assert not (only_local and only_confidential), 'Select one independent client workflow'
+        if only_local or only_confidential:
+            binary = self.confidential_client_binary() if only_confidential else self.local_client_binary()
+            assert binary, 'Independent client workflow requires its executable'
             for name in ('Bob', 'Agent'):
                 self.outcome(self.cli(name+'Joined','room','join','--profile',self.profiles[name],
                                       '--room',address(room)))
+            if only_confidential:
+                self.confidential_client(room)
+                self.authority_refusal(room)
+                self.record(dict(case='NativeConfidentialClientWorkflow',passed=True,protocol='hrc/1',
+                                 realCliProvisioning=True,conversationBaselineIncluded=False,
+                                 confidentialClientIncluded=True,noDirectFallback=True))
+                return
             self.local_client(room)
             reference, _ = self.grant(room)
             revoked = self.outcome(self.cli('LocalBotGrantRevoked','agent','revoke',
