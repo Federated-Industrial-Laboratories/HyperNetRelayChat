@@ -23,6 +23,24 @@ The command queue contains at most 32 bounded commands. Dispatch returns a local
 request number. Immutable snapshots carry that number on command status and
 operation delivery records. A frontend can distinguish the exact submitted text
 from later typing. Historical recovered operations have no local request number.
+When connection is still desired, the worker can retain one unstarted
+state-changing command ahead of that queue while the connection recovers. Its
+30-second admission deadline starts at dispatch, including queue time. The worker
+honours existing reconnect backoff and checks the original deadline again before
+starting any effect, even when synchronous reconnection finishes late. The same
+request and command are consumed once; this mechanism never reruns a started
+command or prepares a replacement effect identity. `CommandWaitingForConnection`
+shows the pending request; `CommandAdmissionExpired` reports expiry without a
+delivery identity or a changed connection retry schedule. Deliberate offline
+mode retains normal refusal and local-draft behaviour. Reserved disconnect and
+shutdown controls remain available while a command is held. Read-only commands
+retain their existing explicit current-read failures and offline cache behaviour.
+Local draft/preference writes, retry abandonment and search close use a local
+lane sharing that same 32-item queued budget. At most four local commands run
+per worker turn, so they remain responsive during reconnect backoff without
+starving an eligible effect. Shutdown atomically closes queue admission, then
+drains accepted local work only; it does not execute queued network effects.
+Local persistence errors remain visible on their original completions.
 Effect completion succeeds only after every requested effect and its required
 local persistence succeeds. A later room, grant or inspection refresh can fail
 without changing that confirmed outcome or replaying the effect. The original
