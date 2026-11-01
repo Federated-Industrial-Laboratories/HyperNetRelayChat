@@ -114,21 +114,7 @@ impl Controller {
                             if search {
                                 w.shared.search_pending.store(false, Ordering::Release);
                             }
-                            w.snapshot.completions.push(Completion {
-                                request_id: id,
-                                error: result.as_ref().err().map(|e| Status {
-                                    request_id: Some(id),
-                                    code: e.code().into(),
-                                    detail: e.to_string(),
-                                }),
-                            });
-                            if w.snapshot.completions.len() > 64 {
-                                w.snapshot.completions.remove(0);
-                            }
-                            if let Err(e) = result {
-                                w.error(e);
-                            }
-                            w.publish();
+                            w.complete(id, result);
                             w.request = None;
                             w.operation = None;
                             w.delivery_room = None;
@@ -286,7 +272,53 @@ struct Worker {
     poll_room: usize,
 }
 impl Worker {
+    fn complete(&mut self, id: u64, result: Result<()>) {
+        self.snapshot.completions.push(Completion {
+            request_id: id,
+            error: result.as_ref().err().map(|e| Status {
+                request_id: Some(id),
+                code: e.code().into(),
+                detail: e.to_string(),
+            }),
+        });
+        if self.snapshot.completions.len() > 64 {
+            self.snapshot.completions.remove(0);
+        }
+        if let Err(error) = result {
+            self.error(error);
+        }
+        self.publish();
+    }
+    /// Only trailing view work comes here, after all effects and required local writes succeeded.
+    fn finish_view(&mut self, result: Result<()>) {
+        if let Err(error) = result {
+            let request = self.request.take();
+            self.stale();
+            self.error(error);
+            if let Some(status) = &mut self.snapshot.status {
+                status.detail = format!("View refresh failed: {}: {}", status.code, status.detail);
+                status.code = "ViewRefreshFailed".into();
+            }
+            self.request = request;
+        }
+    }
     fn publish(&mut self) {
+        if self.snapshot.connection == ConnectionState::Online
+            && !self.snapshot.inspection.stale
+            && self.snapshot.privacy.is_some()
+            && self
+                .snapshot
+                .selected
+                .as_ref()
+                .is_none_or(|room| !room.stale)
+            && self
+                .snapshot
+                .status
+                .as_ref()
+                .is_some_and(|status| status.code == "ViewRefreshFailed")
+        {
+            self.snapshot.status = None;
+        }
         self.snapshot.revision = self.snapshot.revision.wrapping_add(1);
         *self
             .shared
@@ -567,3 +599,7 @@ impl Worker {
 mod commands;
 #[path = "Synchronise.rs"]
 mod synchronise;
+
+#[cfg(test)]
+#[path = "../../Tests/Client/Completion.rs"]
+mod completion_tests;
