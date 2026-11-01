@@ -221,7 +221,9 @@ impl Worker {
                     Target::Delegation(grant),
                     &decision,
                 )?;
-                return self.command(InspectGrant(grant));
+                let view = self.command(InspectGrant(grant));
+                self.finish_view(view);
+                return Ok(());
             }
             AbandonPending {
                 operation_id,
@@ -284,7 +286,9 @@ impl Worker {
                     .map_err(|_| Error::Storage)?;
             }
         }
-        self.refresh()
+        let view = self.refresh();
+        self.finish_view(view);
+        Ok(())
     }
     pub(super) fn send(
         &mut self,
@@ -403,7 +407,9 @@ impl Worker {
         let response = self.client.execute(&action)?;
         self.response(response)?;
         self.clear_matching_draft(&action)?;
-        self.refresh()
+        let view = self.refresh();
+        self.finish_view(view);
+        Ok(())
     }
     pub(super) fn search(&mut self, query: messaging::Search, append: bool) -> Result<()> {
         let room = self.selected()?;

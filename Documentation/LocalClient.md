@@ -23,6 +23,15 @@ The command queue contains at most 32 bounded commands. Dispatch returns a local
 request number. Immutable snapshots carry that number on command status and
 operation delivery records. A frontend can distinguish the exact submitted text
 from later typing. Historical recovered operations have no local request number.
+Effect completion succeeds only after every requested effect and its required
+local persistence succeeds. A later room, grant or inspection refresh can fail
+without changing that confirmed outcome or replaying the effect. The original
+completion and exact committed delivery remain successful; the affected views,
+inspection and privacy become stale. `ViewRefreshFailed` reports the separate
+view failure without attributing it to the effect request, and normal connection
+failure and reconnect rules still apply. The warning clears when a current
+online view is restored. Partial failure of a compound command remains an error,
+with each earlier confirmed delivery retained independently.
 Network and database work never run in a widget or terminal input callback.
 Disconnect closes the active stream; shutdown joins the bounded worker.
 
