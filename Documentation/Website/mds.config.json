@@ -1,0 +1,246 @@
+{
+  "schemaVersion": 1,
+  "site": {
+    "id": "hypernet-hrc-docs",
+    "title": "HyperNet Relay Chat",
+    "description": "HRC 0.1.0-dev.1 development manuals. Release qualification remains in progress.",
+    "language": "en-GB",
+    "version": "0.1.0-dev.1",
+    "channel": "preview",
+    "homeUrl": "/docs/",
+    "footer": "Federated Industrial Laboratories | Development source 011cb1a",
+    "indexable": false,
+    "origin": "https://hypernet.federatedindustrial.com"
+  },
+  "paths": {
+    "basePath": "/",
+    "docsPath": "docs/hrc/",
+    "output": "site",
+    "metadata": ".mds/build.json"
+  },
+  "source": {
+    "type": "snapshot",
+    "root": "content",
+    "manifest": "source.json",
+    "revision": "011cb1a514c358366ffb93d384a6ff1dccd6fbe2"
+  },
+  "navigation": [
+    {
+      "title": "Start here",
+      "pages": [
+        {
+          "source": "README.md",
+          "slug": "",
+          "label": "Overview and development status"
+        },
+        {
+          "source": "Documentation/Installation.md",
+          "slug": "installation",
+          "label": "Linux installation and upgrades"
+        },
+        {
+          "source": "Documentation/ConversationSetup.md",
+          "slug": "setup",
+          "label": "Service and client setup"
+        },
+        {
+          "source": "Documentation/Interfaces.md",
+          "slug": "interfaces",
+          "label": "GUI, TUI, CLI and agent API"
+        }
+      ]
+    },
+    {
+      "title": "Use and operate HRC",
+      "pages": [
+        {
+          "source": "Documentation/LocalClient.md",
+          "slug": "local-client",
+          "label": "Local client behavior"
+        },
+        {
+          "source": "Documentation/ConversationOperations.md",
+          "slug": "conversation-operations",
+          "label": "Conversation operations"
+        },
+        {
+          "source": "Documentation/ConfidentialConversations.md",
+          "slug": "confidential-conversations",
+          "label": "Confidential conversations"
+        },
+        {
+          "source": "Documentation/EndpointLifecycle.md",
+          "slug": "endpoint-lifecycle",
+          "label": "Devices and account recovery"
+        },
+        {
+          "source": "Documentation/ServiceBots.md",
+          "slug": "service-bots",
+          "label": "Service bots"
+        },
+        {
+          "source": "Documentation/FederationRuntime.md",
+          "slug": "federation",
+          "label": "Two-network federation"
+        },
+        {
+          "source": "Documentation/Operations.md",
+          "slug": "operations",
+          "label": "Service operations and backups"
+        },
+        {
+          "source": "Documentation/Transport.md",
+          "slug": "transport",
+          "label": "HyperNet transport diagnostics"
+        }
+      ]
+    },
+    {
+      "title": "Protocol and implementation",
+      "pages": [
+        {
+          "source": "Documentation/HyperNetContract.md",
+          "slug": "hypernet-contract",
+          "label": "Released HyperNet contract"
+        },
+        {
+          "source": "Documentation/IntegrationProfile.md",
+          "slug": "integration-profile",
+          "label": "Integration profile"
+        },
+        {
+          "source": "Documentation/WireProtocol.md",
+          "slug": "wire-protocol",
+          "label": "Wire protocol"
+        },
+        {
+          "source": "Documentation/StorageRuntime.md",
+          "slug": "storage-runtime",
+          "label": "Storage runtime"
+        },
+        {
+          "source": "Documentation/ClockAndOrdering.md",
+          "slug": "clock-and-ordering",
+          "label": "Clock and ordering"
+        },
+        {
+          "source": "Documentation/CryptoRuntime.md",
+          "slug": "crypto-runtime",
+          "label": "MLS runtime"
+        },
+        {
+          "source": "Documentation/TextAndSearch.md",
+          "slug": "text-and-search",
+          "label": "Unicode and search"
+        }
+      ]
+    },
+    {
+      "title": "Design and scope",
+      "pages": [
+        {
+          "source": "Documentation/ProductPlan.md",
+          "slug": "product-plan",
+          "label": "Product plan and scope"
+        },
+        {
+          "source": "Documentation/ProtocolPermissions.md",
+          "slug": "protocol-permissions",
+          "label": "Protocol and permission design"
+        },
+        {
+          "source": "Documentation/StateAndRecovery.md",
+          "slug": "state-and-recovery",
+          "label": "State and recovery design"
+        }
+      ]
+    },
+    {
+      "title": "License and notices",
+      "pages": [
+        {
+          "source": "LICENSE",
+          "slug": "license",
+          "label": "Apache License 2.0",
+          "format": "text"
+        },
+        {
+          "source": "Documentation/ThirdPartyNotices.txt",
+          "slug": "third-party-notices",
+          "label": "Third-party adaptation notices",
+          "format": "text"
+        }
+      ]
+    }
+  ],
+  "publicationEdits": [
+    {
+      "source": "Documentation/HyperNetContract.md",
+      "from": "https://github.com/Federated-Industrial-Laboratories/HyperNet/blob/b840c8b8e7d74fac71e898cf2c2eb7c660c57275/Documentation/ApplicationStreams.md",
+      "to": "/docs/core/application-streams/"
+    },
+    {
+      "source": "Documentation/HyperNetContract.md",
+      "from": "https://github.com/Federated-Industrial-Laboratories/HyperNet/blob/b840c8b8e7d74fac71e898cf2c2eb7c660c57275/Documentation/PermissionScopes.md",
+      "to": "/docs/core/permission-scopes/"
+    },
+    {
+      "source": "Documentation/HyperNetContract.md",
+      "from": "https://github.com/Federated-Industrial-Laboratories/HyperNet/blob/b840c8b8e7d74fac71e898cf2c2eb7c660c57275/Documentation/Applications.md",
+      "to": "/docs/core/applications/"
+    },
+    {
+      "source": "Documentation/HyperNetContract.md",
+      "from": "https://github.com/Federated-Industrial-Laboratories/HyperNetSuite/blob/3055f06a691fbc2f0214b4d9bb706a004d5c22ad/SDK/README.md",
+      "to": "/docs/suite/sdk/"
+    },
+    {
+      "source": "Documentation/HyperNetContract.md",
+      "from": "https://github.com/Federated-Industrial-Laboratories/HyperNet/blob/b840c8b8e7d74fac71e898cf2c2eb7c660c57275/Documentation/ApplicationChecks.md",
+      "to": "/docs/core/application-checks/"
+    },
+    {
+      "source": "Documentation/HyperNetContract.md",
+      "from": "https://github.com/Federated-Industrial-Laboratories/HyperNetSuite/blob/3055f06a691fbc2f0214b4d9bb706a004d5c22ad/Documentation/ApplicationContext.md",
+      "to": "/docs/suite/application-context/"
+    },
+    {
+      "source": "Documentation/HyperNetContract.md",
+      "from": "https://github.com/Federated-Industrial-Laboratories/HyperNet/blob/b840c8b8e7d74fac71e898cf2c2eb7c660c57275/Documentation/Federation.md",
+      "to": "/docs/core/federation/"
+    },
+    {
+      "source": "Documentation/HyperNetContract.md",
+      "from": "https://github.com/Federated-Industrial-Laboratories/HyperNetSuite/blob/3055f06a691fbc2f0214b4d9bb706a004d5c22ad/ReadMe.md",
+      "to": "/docs/suite/overview/"
+    },
+    {
+      "source": "Documentation/IntegrationProfile.md",
+      "from": "https://github.com/Federated-Industrial-Laboratories/HyperNet/blob/b840c8b8e7d74fac71e898cf2c2eb7c660c57275/Documentation/AuthorityContract.md",
+      "to": "/docs/core/authority-contract/"
+    },
+    {
+      "source": "Documentation/IntegrationProfile.md",
+      "from": "https://github.com/Federated-Industrial-Laboratories/HyperNet/blob/b840c8b8e7d74fac71e898cf2c2eb7c660c57275/Documentation/ApplicationChecks.md",
+      "to": "/docs/core/application-checks/"
+    },
+    {
+      "source": "Documentation/IntegrationProfile.md",
+      "from": "https://github.com/Federated-Industrial-Laboratories/HyperNetSuite/blob/3055f06a691fbc2f0214b4d9bb706a004d5c22ad/Documentation/ApplicationContext.md",
+      "to": "/docs/suite/application-context/"
+    },
+    {
+      "source": "Documentation/IntegrationProfile.md",
+      "from": "https://github.com/Federated-Industrial-Laboratories/HyperNet/blob/b840c8b8e7d74fac71e898cf2c2eb7c660c57275/Documentation/PrivateRoutes.md",
+      "to": "/docs/core/private-routes/"
+    }
+  ],
+  "appearance": {
+    "themes": [],
+    "palette": "neutral",
+    "mode": "light",
+    "finish": "flat",
+    "typography": "standard",
+    "contrast": "system"
+  }
+}
