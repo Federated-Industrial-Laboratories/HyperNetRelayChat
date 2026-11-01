@@ -23,6 +23,56 @@ outbox, service restart, exact resolution and absence of duplicate publication.
 The ordinary companion is restored afterwards. Baseline conversation uses no
 proxy.
 
+`NativeLocalClient.rs`, built as the `native-local-client` example, optionally
+extends this same fixture with the production Controller used by the local
+interfaces. Set `configuration.localClientBinary` or
+`HYPERNET_HRC_LOCAL_CLIENT` to its exact executable path. The hook runs after
+acknowledgement-loss recovery and before final HyperNet grant revocation, using
+the existing Alice, Bob and Agent profiles and live service. It opens one Store
+owner per profile; no CLI process accesses those profiles concurrently.
+
+The example checks persistent Controller send/receive, three distinct identities,
+request/completion and delivery/event correlation, Unicode typed mentions,
+unread state and mention notifications, current ignore filtering, indexed search
+and current-authorised event context. It saves a draft while disconnected,
+releases and reopens Bob's profile, verifies cached state is marked stale, then
+resumes current history without duplicate event IDs and sends the retained draft.
+Commands are submitted once and results are asserted through actual immutable
+snapshots. The helper does not resubmit uncertain effects.
+
+Cancellation is attempted while a real query is visibly running. Evidence says
+whether cancellation was observed or completion won the race; it does not claim
+that a small native query was interrupted inside SQL. A subsequent search checks
+that request/response correlation remains usable. This verifies the shared client
+workflow, not GUI rendering, terminal interaction or desktop notification delivery.
+
+The example accepts `--request FILE --maximum-seconds 240`. The private JSON file
+contains `alice`, `bob`, `agent` profile paths and the typed `room` ID. Input is
+limited to 16 KiB, one command queue is used per Controller, and observed snapshots
+are checked against their bounds. Command/result waits are at most 40 seconds;
+a process watchdog and the parent subprocess timeout enforce the total limit.
+The optional run consumes the existing 900-second conversation budget. Build it
+from the same frozen candidate as HRC with `cargo build --example native-local-client`.
+
+The optional extension then releases all Controllers and starts the shipped
+`hrc bot` on the Agent profile, with a one-second poll interval and a unique fixed
+help response. It waits for the exact `BotReady` result whose meaning is
+`InitialAuthorisedCatchUpComplete`. A historical human `!help` must produce no
+reply; one new Alice `!help` must produce exactly one independently attributed
+agent `MessageReply`, with parent and causation both naming that exact event.
+
+After a bounded clean stop, the ordinary CLI publishes an agent `!help` and a
+human reply containing `!help`. No process shares the Agent profile while the bot
+runs. The check crosses the documented five-second reply-rate window before
+restarting, so throttling cannot mask a trigger-rule failure. Restart readiness
+proves a current authorised catch-up; unchanged reply IDs then establish agent
+and reply suppression without replay. A final bot invocation with the existing
+revoked fixture grant must explicitly refuse before readiness and publication.
+This extension has a 180-second budget within the same conversation deadline,
+and cleanup terminates only its own child process, escalating to a bounded kill
+if needed. Readiness and history assertions establish progress; timed waits are
+used only for polling and the documented reply-rate boundary.
+
 The final refusal case revokes the agent principal's actual HyperNet stream
 grant. The shipped send command must refuse connection, preserve its local draft
 and leave no corresponding conversation event. No direct connection is provided.

@@ -55,12 +55,15 @@ pub struct Config {
     pub descriptor: Descriptor,
     pub companion: PathBuf,
     pub clock: clock::Config,
+    #[serde(default)]
+    pub motd: String,
 }
 impl Config {
     pub fn load(directory: &Path) -> files::Result<Self> {
         files::directory(directory, false)?;
         let value: Self = files::json(&directory.join("Service.json"))?;
         value.descriptor.validate()?;
+        crate::home::ServiceInformation::new(value.motd.clone()).map_err(|_| files::Invalid)?;
         let key = files::key(&directory.join("Signing.key"))?;
         if key.verifying_key().to_bytes() != *value.descriptor.signing_key.as_bytes() {
             return Err(files::Invalid);

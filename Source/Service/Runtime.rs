@@ -3,7 +3,7 @@
 use super::{Config, files, io};
 use crate::{
     clock,
-    home::{AuthenticatedSession, Home},
+    home::{AuthenticatedSession, Cancellation, Home},
     hypernet::{Companion, Peer, Stream},
     protocol::*,
 };
@@ -193,7 +193,9 @@ pub fn run_with_ready(
         config.descriptor.home,
         signer.clone(),
     )
-    .map_err(|_| Error::State)?;
+    .map_err(|_| Error::State)?
+    .with_motd(config.motd.clone())
+    .map_err(|_| Error::Configuration)?;
     config.clock.sample().map_err(|_| Error::Clock)?;
     let companion = Companion::new(&config.companion).map_err(|_| Error::Transport)?;
     let status = companion.status().map_err(|_| Error::Transport)?;
@@ -428,7 +430,24 @@ fn serve(shared: &Shared, stream: &Stream) -> Result<()> {
         {
             return Err(Error::Frame);
         }
-        let response = execute(shared, stream, &verified, &session);
+        if verified.action().operation == Operation::SearchQuery {
+            search(
+                shared,
+                stream,
+                &verified,
+                &session,
+                &endpoint.key,
+                &mut budget,
+            )?;
+            continue;
+        }
+        let response = execute(
+            shared,
+            stream,
+            &verified,
+            &session,
+            &Cancellation::default(),
+        );
         frame(
             stream,
             FrameKind::Response,
@@ -442,6 +461,7 @@ fn execute(
     stream: &Stream,
     action: &VerifiedAction,
     session: &AuthenticatedSession,
+    cancel: &Cancellation,
 ) -> Response {
     let base = |outcome| Response {
         home: shared.config.descriptor.home,
@@ -479,8 +499,111 @@ fn execute(
     let Ok(mut home) = shared.home.try_lock() else {
         return refused(ErrorCode::Overloaded, "OperationBusy");
     };
-    match home.execute(action, session, now, &|| check.permitted()) {
+    match home.execute_cancellable(action, session, now, &|| check.permitted(), cancel) {
         Ok(response) => response,
         Err(_) => base(Outcome::Unknown),
     }
+}
+
+/// Only an exact authenticated cancellation can accompany the single in-flight query.
+fn search(
+    shared: &Shared,
+    stream: &Stream,
+    query: &VerifiedAction,
+    session: &AuthenticatedSession,
+    key: &VerifyingKey,
+    budget: &mut Budget,
+) -> Result<()> {
+    let cancel = Cancellation::default();
+    let end = clock::boot_ms().map_err(|_| Error::Clock)? + 10000;
+    thread::scope(|scope| {
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        let token = cancel.clone();
+        scope.spawn(move || {
+            let response = execute(shared, stream, query, session, &token);
+            let _ = sender.send(response);
+        });
+        let mut control = None;
+        let result = (|| {
+            loop {
+                if let Ok(response) = receiver.try_recv() {
+                    frame(
+                        stream,
+                        FrameKind::Response,
+                        sign_response(&response, &shared.signer).map_err(|_| Error::Frame)?,
+                        remaining(end)?.min(Duration::from_secs(5)),
+                    )?;
+                    if let Some(control) = control {
+                        let response = execute(
+                            shared,
+                            stream,
+                            &control,
+                            session,
+                            &Cancellation::accepted_control(),
+                        );
+                        frame(
+                            stream,
+                            FrameKind::Response,
+                            sign_response(&response, &shared.signer).map_err(|_| Error::Frame)?,
+                            remaining(end)?.min(Duration::from_secs(5)),
+                        )?;
+                    }
+                    return Ok(());
+                }
+                if !stream
+                    .wait_readable(remaining(end)?.min(Duration::from_millis(25)))
+                    .map_err(|_| Error::Transport)?
+                {
+                    continue;
+                }
+                if control.is_some() {
+                    return Err(Error::RateLimited);
+                }
+                let incoming = io::receive(stream, remaining(end)?.min(Duration::from_secs(5)))
+                    .map_err(|_| Error::Transport)?;
+                let now = clock::boot_ms().map_err(|_| Error::Clock)?;
+                if incoming.kind != FrameKind::Action
+                    || !budget.admit(now)
+                    || !shared.ingress.lock().map_err(|_| Error::State)?.admit(now)
+                {
+                    return Err(Error::RateLimited);
+                }
+                let verified =
+                    verify_action(&incoming.payload, key).map_err(|_| Error::Authentication)?;
+                let body: crate::home::Resolve = verified
+                    .action()
+                    .body
+                    .deserialized()
+                    .map_err(|_| Error::Frame)?;
+                if verified.action().operation != Operation::SearchCancel
+                    || verified.action().target != Target::Service
+                    || verified.action().home != query.action().home
+                    || verified.action().actor != query.action().actor
+                    || body.operation_id != query.action().operation_id
+                    || body.action_digest != query.digest()
+                {
+                    return Err(Error::Authentication);
+                }
+                let authority = shared
+                    .companion
+                    .check_authority(
+                        stream,
+                        *verified.digest().as_bytes(),
+                        remaining(end)?.min(Duration::from_secs(1)),
+                    )
+                    .map_err(|_| Error::Authority)?;
+                if !authority.permitted() {
+                    return Err(Error::Authority);
+                }
+                // Cancellation only stops work. Its response still receives full current Home admission.
+                cancel.cancel();
+                control = Some(verified);
+            }
+        })();
+        if result.is_err() {
+            cancel.cancel();
+            stream.close();
+        }
+        result
+    })
 }

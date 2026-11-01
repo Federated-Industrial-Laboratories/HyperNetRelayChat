@@ -290,13 +290,13 @@ macro_rules! operations {
     }
 }
 operations! {
-    AccountSetNickname=1,PresenceSet=2,
-    RoomCreate=10,RoomJoin=11,RoomLeave=12,RoomSetTopic=13,RoomList=14,
+    AccountSetNickname=1,PresenceSet=2,AccountInspect=3,AgentList=4,ServiceInspect=5,
+    RoomCreate=10,RoomJoin=11,RoomLeave=12,RoomSetTopic=13,RoomList=14,RoomInspect=15,
     MessageSend=20,MessageReply=21,MessageAction=22,
-    HistoryPage=30,SearchQuery=31,SearchCancel=32,EventsSubscribe=33,EventsResume=34,UnreadSet=35,OperationResolve=36,
-    DelegationCreate=40,DelegationInspect=41,DelegationPause=42,DelegationResume=43,DelegationRevoke=44,
+    HistoryPage=30,SearchQuery=31,SearchCancel=32,EventsSubscribe=33,EventsResume=34,UnreadSet=35,OperationResolve=36,HistoryContext=37,
+    DelegationCreate=40,DelegationInspect=41,DelegationPause=42,DelegationResume=43,DelegationRevoke=44,DelegationList=45,
     ApprovalPrepare=50,ApprovalApprove=51,ApprovalReject=52,
-    ModerationIgnore=60,ModerationMute=61,ModerationSilence=62,ModerationKick=63,ModerationBan=64,
+    ModerationIgnore=60,ModerationMute=61,ModerationSilence=62,ModerationKick=63,ModerationBan=64,ModerationFilters=65,ModerationRestrictions=66,
     CryptoEnrolEndpoint=70,CryptoPublishKeyPackage=71,CryptoPropose=72,CryptoCommit=73,CryptoEpochReady=74,
     FederationPropose=80,FederationAccept=81,FederationWithdraw=82,FederationExchange=83,FederationChallenge=84,
     AccountRecover=90,AccountRotateRecovery=91,AccountEnrolEndpoint=92,AccountDisableEndpoint=93,

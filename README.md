@@ -1,12 +1,13 @@
 # HyperNet Relay Chat
 
 HyperNet Relay Chat (HRC) is a Rust chat application in development for HyperNet.
-Its planned interfaces include a GUI, TUI, CLI and agent API.
+It provides a GUI, interactive TUI, CLI and agent API for the implemented community-room workflow.
 
 The development implementation includes a Linux Rust HyperNet adapter,
 [transport diagnostic commands](Documentation/Transport.md), signed native
-operations, encrypted persistence, and a command-line conversation workflow.
-See [service and client setup](Documentation/ConversationSetup.md). Release
+operations, encrypted persistence, and a shared local conversation client.
+See [service and client setup](Documentation/ConversationSetup.md) and
+[using the interfaces](Documentation/Interfaces.md). Release
 qualification is still in progress; there is no supported chat release. HyperNet transport,
 explicit agent delegation and two-network federation are required capabilities.
 
@@ -30,7 +31,10 @@ implementation evidence. The [wire specification](Documentation/WireProtocol.md)
 [MLS runtime](Documentation/CryptoRuntime.md) document the implemented boundaries.
 
 Build on Linux with Rust 1.96, a C compiler, Make, Tcl, Git and OpenSSL development
-headers. The native bootstrap builds the pinned SQLCipher engine locally:
+headers, pkg-config, Fontconfig, XKB, Wayland and EGL development packages.
+Install fonts that cover the languages used; the GUI loads system fallback fonts,
+including colour emoji. Noto core, CJK and colour emoji fonts cover the supplied
+presentation checks. The native bootstrap builds the pinned SQLCipher engine locally:
 
 ```sh
 bash Tools/Native.sh

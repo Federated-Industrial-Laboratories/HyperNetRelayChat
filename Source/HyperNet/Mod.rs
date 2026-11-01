@@ -401,6 +401,19 @@ impl Stream {
         }
         result
     }
+    /// Wait without consuming bytes. An idle timeout does not invalidate a stream.
+    pub fn wait_readable(&self, timeout: Duration) -> Result<bool> {
+        let end = ipc::deadline(timeout, 60_000, 1)?;
+        let _lease = self.lease(true)?;
+        match ipc::wait(&self.socket()?, libc::POLLIN, end) {
+            Ok(()) => Ok(true),
+            Err(Error::Timeout) => Ok(false),
+            Err(error) => {
+                self.close();
+                Err(error)
+            }
+        }
+    }
     pub fn recv_exact(&self, bytes: &mut [u8], timeout: Duration) -> Result<()> {
         if bytes.len() > ipc::MAX_PAYLOAD {
             return Err(Error::Frame);

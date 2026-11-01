@@ -560,3 +560,18 @@ fn external_frame_deadlines_cannot_restart_a_payload_wait() {
         Err(Error::InvalidInput)
     ));
 }
+
+#[test]
+fn idle_readability_wait_preserves_the_live_stream() {
+    let fixture = Fixture::new(normal);
+    let companion = fixture.agent();
+    let stream = companion
+        .connect(&id(3), "hrc-probe/1", Duration::from_secs(1))
+        .unwrap();
+    assert!(!stream.wait_readable(Duration::from_millis(10)).unwrap());
+    assert!(!stream.privacy().is_historical());
+    stream
+        .send_all(b"still usable", Duration::from_secs(1))
+        .unwrap();
+    assert!(!stream.wait_readable(Duration::from_millis(10)).unwrap());
+}

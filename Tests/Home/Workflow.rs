@@ -217,6 +217,7 @@ fn send(p: &Party, room: RoomId, text: &str) -> Action {
         Operation::MessageSend,
         Target::Room(room),
         &messaging::Send {
+            mentions: Vec::new(),
             text: text.into(),
             parent: None,
             causation: None,
@@ -368,6 +369,7 @@ fn durable_send_retry_conflict_resolution_and_unicode_history_survive_restart() 
     assert_eq!(run(&mut home, &alice, &a), first);
     let mut altered = a.clone();
     altered.body = Value::serialized(&messaging::Send {
+        mentions: Vec::new(),
         text: "different".into(),
         parent: None,
         causation: None,
@@ -842,6 +844,7 @@ fn large_attribution_pages_fit_the_signed_node_limit_without_skipping_events() {
                     &a,
                     r,
                     Value::serialized(&messaging::Send {
+                        mentions: Vec::new(),
                         text: "bounded attribution".into(),
                         parent: None,
                         causation: None,
@@ -1123,26 +1126,324 @@ fn draft_mode_can_be_inspected_and_rejected_but_cannot_approve_or_send() {
 }
 
 #[test]
-fn unwired_cancellation_never_claims_success() {
+fn inspection_is_owner_scoped_and_mentions_keep_exact_identity() {
     let f = Fixture::new();
-    let mut home = f.create();
-    let account = enrol(&mut home, 90, AccountClass::Human);
-    let query = action(
-        &account,
+    let mut h = f.create();
+    let alice = enrol(&mut h, 20, AccountClass::Human);
+    let bob = enrol(&mut h, 30, AccountClass::Human);
+    let agent = enrol(
+        &mut h,
+        40,
+        AccountClass::Agent {
+            operator: alice.record.acting.account,
+        },
+    );
+    let r = room(&mut h, &alice, "inspection");
+    assert!(matches!(
+        run(
+            &mut h,
+            &bob,
+            &action(&bob, Operation::RoomInspect, Target::Room(r), &Empty {})
+        ),
+        Outcome::Rejected {
+            code: ErrorCode::Denied,
+            ..
+        }
+    ));
+    assert!(matches!(
+        run(
+            &mut h,
+            &bob,
+            &action(&bob, Operation::RoomJoin, Target::Room(r), &Empty {})
+        ),
+        Outcome::Committed { .. }
+    ));
+    run(
+        &mut h,
+        &bob,
+        &action(
+            &bob,
+            Operation::AccountSetNickname,
+            Target::Account(bob.record.acting.account),
+            &identity::Nickname {
+                nickname: "e\u{301}cho".into(),
+            },
+        ),
+    );
+    let own = Target::Account(alice.record.acting.account);
+    let Outcome::Result { body } = run(
+        &mut h,
+        &alice,
+        &action(
+            &alice,
+            Operation::AgentList,
+            own.clone(),
+            &InspectPage::default(),
+        ),
+    ) else {
+        panic!("agent list");
+    };
+    let endpoints: InspectionPage<identity::AgentEndpoint> = body.deserialized().unwrap();
+    assert_eq!(endpoints.items.len(), 1);
+    assert_eq!(endpoints.items[0].actor, agent.record.acting);
+    assert!(matches!(
+        run(
+            &mut h,
+            &bob,
+            &action(
+                &bob,
+                Operation::AgentList,
+                own.clone(),
+                &InspectPage::default()
+            )
+        ),
+        Outcome::Rejected {
+            code: ErrorCode::InvalidInput,
+            ..
+        } | Outcome::Rejected {
+            code: ErrorCode::Denied,
+            ..
+        }
+    ));
+    run(
+        &mut h,
+        &alice,
+        &action(
+            &alice,
+            Operation::ModerationIgnore,
+            own.clone(),
+            &moderation::Filter {
+                subject: bob.record.acting.account,
+                enabled: true,
+            },
+        ),
+    );
+    let Outcome::Result { body } = run(
+        &mut h,
+        &alice,
+        &action(
+            &alice,
+            Operation::ModerationFilters,
+            own.clone(),
+            &InspectPage::default(),
+        ),
+    ) else {
+        panic!("filters");
+    };
+    let filters: InspectionPage<moderation::FilterState> = body.deserialized().unwrap();
+    assert!(filters.items[0].ignored);
+    let text = "hello @e\u{301}cho";
+    let message = messaging::Send {
+        text: text.into(),
+        mentions: vec![messaging::Mention {
+            account: bob.record.acting.account,
+            start: 6,
+            end: text.len() as u32,
+        }],
+        parent: None,
+        causation: None,
+    };
+    assert!(matches!(
+        run(
+            &mut h,
+            &alice,
+            &action(&alice, Operation::MessageSend, Target::Room(r), &message)
+        ),
+        Outcome::Committed { .. }
+    ));
+    run(
+        &mut h,
+        &bob,
+        &action(
+            &bob,
+            Operation::AccountSetNickname,
+            Target::Account(bob.record.acting.account),
+            &identity::Nickname {
+                nickname: "renamed".into(),
+            },
+        ),
+    );
+    assert!(matches!(
+        run(
+            &mut h,
+            &alice,
+            &action(&alice, Operation::MessageSend, Target::Room(r), &message)
+        ),
+        Outcome::Rejected {
+            code: ErrorCode::Conflict,
+            ..
+        }
+    ));
+    let mut invalid = message.clone();
+    invalid.mentions[0].end = 8;
+    assert!(messaging::mention_spans(&invalid.text, &invalid.mentions).is_err());
+    let g = grant(&mut h, &alice, &agent, r, delegation::Mode::Autonomous);
+    let Outcome::Result { body } = run(
+        &mut h,
+        &agent,
+        &action(
+            &agent,
+            Operation::DelegationList,
+            Target::Account(agent.record.acting.account),
+            &InspectPage::default(),
+        ),
+    ) else {
+        panic!("assigned grants");
+    };
+    let grants: InspectionPage<delegation::Grant> = body.deserialized().unwrap();
+    assert_eq!(grants.items[0].reference, g);
+    let denied = delegated(
+        action(
+            &agent,
+            Operation::ModerationFilters,
+            own,
+            &InspectPage::default(),
+        ),
+        &alice,
+        g,
+    );
+    assert!(matches!(
+        run(&mut h, &agent, &denied),
+        Outcome::Rejected {
+            code: ErrorCode::Denied,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn unregistered_search_cancellation_does_not_report_success() {
+    let f = Fixture::new();
+    let mut h = f.create();
+    let p = enrol(&mut h, 20, AccountClass::Human);
+    let a = action(
+        &p,
         Operation::SearchCancel,
         Target::Service,
         &Resolve {
             operation_id: OperationId {
-                window: Id::random().unwrap(),
-                operation: Id::random().unwrap(),
+                window: p.window.id,
+                operation: id(99),
             },
-            action_digest: Id::random().unwrap(),
+            action_digest: id(98),
         },
     );
     assert!(matches!(
-        run(&mut home, &account, &query),
+        run(&mut h, &p, &a),
         Outcome::Rejected {
-            code: ErrorCode::UnsupportedFeature,
+            code: ErrorCode::Conflict,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn service_information_is_bounded_authenticated_plain_text() {
+    let f = Fixture::new();
+    let mut home = f
+        .create()
+        .with_motd("Welcome to the room service.".into())
+        .unwrap();
+    let p = enrol(&mut home, 20, AccountClass::Human);
+    let a = action(&p, Operation::ServiceInspect, Target::Service, &Empty {});
+    let Outcome::Result { body } = run(&mut home, &p, &a) else {
+        panic!("service information");
+    };
+    let info: ServiceInformation = body.deserialized().unwrap();
+    assert_eq!(info.motd, "Welcome to the room service.");
+    let refused = home
+        .execute(
+            &verified(&p, &a),
+            &p.session,
+            TimeBounds::test_now(),
+            &|| false,
+        )
+        .unwrap();
+    assert!(matches!(refused.outcome, Outcome::Refused { .. }));
+    assert!(ServiceInformation::new("x".repeat(1025)).is_err());
+    assert!(ServiceInformation::new("\x1b[31m".into()).is_err());
+}
+
+#[test]
+fn original_event_context_preserves_target_and_rechecks_current_filter_and_membership() {
+    let f = Fixture::new();
+    let mut h = f.create();
+    let alice = enrol(&mut h, 20, AccountClass::Human);
+    let bob = enrol(&mut h, 30, AccountClass::Human);
+    let outsider = enrol(&mut h, 40, AccountClass::Human);
+    let r = room(&mut h, &alice, "context");
+    run(
+        &mut h,
+        &bob,
+        &action(&bob, Operation::RoomJoin, Target::Room(r), &Empty {}),
+    );
+    let Outcome::Committed {
+        event: Some(event), ..
+    } = run(&mut h, &bob, &send(&bob, r, "original context"))
+    else {
+        panic!("send");
+    };
+    run(&mut h, &alice, &send(&alice, r, "following event"));
+    let context = action(
+        &alice,
+        Operation::HistoryContext,
+        Target::Room(r),
+        &messaging::Context { event },
+    );
+    let Outcome::Result { body } = run(&mut h, &alice, &context) else {
+        panic!("context");
+    };
+    let context: messaging::ContextResult = body.deserialized().unwrap();
+    assert!(context.events.iter().any(|e| e.event == event));
+    assert!(context.events.len() <= 5);
+    assert!(
+        context
+            .events
+            .windows(2)
+            .all(|p| p[0].sequence < p[1].sequence)
+    );
+    assert!(matches!(
+        run(
+            &mut h,
+            &outsider,
+            &action(
+                &outsider,
+                Operation::HistoryContext,
+                Target::Room(r),
+                &messaging::Context { event }
+            )
+        ),
+        Outcome::Rejected {
+            code: ErrorCode::Denied,
+            ..
+        }
+    ));
+    run(
+        &mut h,
+        &alice,
+        &action(
+            &alice,
+            Operation::ModerationIgnore,
+            Target::Account(alice.record.acting.account),
+            &moderation::Filter {
+                subject: bob.record.acting.account,
+                enabled: true,
+            },
+        ),
+    );
+    assert!(matches!(
+        run(
+            &mut h,
+            &alice,
+            &action(
+                &alice,
+                Operation::HistoryContext,
+                Target::Room(r),
+                &messaging::Context { event }
+            )
+        ),
+        Outcome::Rejected {
+            code: ErrorCode::Denied,
             ..
         }
     ));

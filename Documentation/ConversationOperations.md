@@ -47,17 +47,34 @@ fields fail. Stable IDs, not names, select accounts and rooms.
 | --- | --- | --- |
 | `AccountSetNickname` | Own `Account`; `identity::Nickname { nickname }` | Account revision and home position advance; attribution retains the account ID |
 | `PresenceSet` | Own `Account`; `identity::Presence { status, duration_ms }` | Endpoint presence expires after 1–300 seconds; human and agent accounts remain separate |
+| `AccountInspect` (3) | Own `Account`; `{}` | `identity::AccountView { nickname, revision, filter_revision }` |
+| `AgentList` (4) | Own `Account`; `home::InspectPage { after, limit }` | Current eligible owned `identity::AgentEndpoint { actor, nickname }` entries |
+| `ServiceInspect` (5) | `Service`; `{}` | `home::ServiceInformation { motd }`; plain text, at most 1,024 bytes, empty by default |
 | `RoomCreate` | `Service`; `conversations::Create { name, confidentiality }` | A new room, owner membership and ordered creation event |
 | `RoomList` | `Service`; `conversations::List { after, limit }` | At most 50 eligible room summaries in stable ID order |
 | `RoomJoin`, `RoomLeave` | `Room`; `{}` | Membership and room revisions advance with an ordered event |
 | `RoomSetTopic` | `Room`; `conversations::Topic { topic }` | Current moderator changes the topic with an ordered event |
-| `MessageSend`, `MessageReply`, `MessageAction` | `Room`; `messaging::Send { text, parent, causation }` | One attributed event, or a durable rejection |
+| `RoomInspect` (15) | `Room`; `{}` | `conversations::Inspection { members, read_sequence, room_revision, filter_revision, moderator }` under current membership |
+| `MessageSend`, `MessageReply`, `MessageAction` | `Room`; `messaging::Send { text, mentions, parent, causation }` | One attributed event, or a durable rejection |
 | `HistoryPage`, `EventsSubscribe`, `EventsResume` | `Room`; `messaging::Page { cursor, limit }` | Current-authorized bounded page and signed continuation cursor |
+| `HistoryContext` (37) | `Room`; `messaging::Context { event }` | `messaging::ContextResult { events, members, room_revision }`; accessible original event and bounded surrounding context |
 | `SearchQuery` | `Room`; `messaging::Search { terms, sender, represented, from_ms, until_ms, cursor, limit }` | Indexed or bounded short-query results with original event identities |
+| `SearchCancel` (32) | `Service`; `home::Resolve { operation_id, action_digest }` | Exact current-session query cancellation, with the ordinary signed control response |
 | `UnreadSet` | `Room`; `messaging::Unread { sequence }` | Account-owned monotonic read position; cannot advance past the room sequence |
 | `OperationResolve` | `Service`; `home::Resolve { operation_id, action_digest }` | A correlated `ResolveResult`, described below |
 | `ModerationIgnore`, `ModerationMute` | Own represented `Account`; `moderation::Filter { subject, enabled }` | Recipient filter changes; ignore advances the filter revision |
 | `ModerationSilence`, `ModerationKick`, `ModerationBan` | `Room`; `moderation::Restriction { subject, enabled, duration_ms, reason }` | Attributable moderator decision and room revision |
+| `ModerationFilters` (65) | Own `Account`; `home::InspectPage` | `moderation::FilterState { subject, ignored, muted }` entries |
+| `ModerationRestrictions` (66) | `Room`; `home::InspectPage` | Active `moderation::RestrictionState { subject, kind, expires_ms, moderator }` entries; silence kind 1, ban kind 2 |
+| `DelegationList` (45) | Own `Account`; `home::InspectPage` | Current grants owned by the account or assigned to its exact current agent endpoint |
+
+Inspection lists return `home::InspectionPage { items, next }`. A request limit is
+1-16; `after` and `next` are optional ASCII positions of at most 512 bytes. Encoding
+bounds can shorten a page. These positions do not grant access. Private account,
+agent and recipient-filter inspection requires the acting account, with no
+delegated impersonation. Room inspections require current room access. Member
+lists contain at most 32 entries. Service information discloses no client version,
+local address or device clock.
 
 Rooms have at most 32 active accounts. A community join starts a new history interval
 at admission; rejoining does not restore a previous interval. The owner remains a
@@ -69,6 +86,15 @@ administrator a room moderator. A room can have at most 256 active restrictions.
 require a null parent. Text uses the shared [Unicode profile](TextAndSearch.md),
 with an 8 KiB and 2,000-grapheme maximum. Original content is retained; normalized
 lookup text is separate. Text never contains executable terminal control sequences.
+
+`mentions` contains at most 16 `messaging::Mention { account, start, end }` values.
+Start and end are UTF-8 byte offsets on whole grapheme boundaries, with ordered,
+non-overlapping spans. Each span must equal `@` followed by that stable account's
+current nickname, and the account must be a current room member. A rename can
+reject a stale mention; it cannot retarget it to another account. Unselected
+`@text` remains ordinary text. Omitting `mentions` in an older text-only body
+means an empty list. Client drafts retain these bindings with the text, and
+mention-only notifications use account IDs rather than substring matching.
 
 Home positions order all committed effects. Room sequences order that room's
 events, including membership and moderation. A server event timestamp is the
@@ -159,6 +185,8 @@ approvals. Revocation is terminal. A fresh action using a paused or revoked gran
 receives a distinct grant-state denial; queued work cannot continue using the old
 generation. `DelegationInspect` is available to the owner or exact enrolled agent
 and returns the current grant and pending exact candidates.
+`DelegationList` returns only grants owned by the acting account or bound to its
+exact current agent endpoint; listing does not enable a paused or revoked grant.
 
 An agent or owner prepares `delegation::Prepare { candidate, expires_ms }`. The
 candidate is the complete signed agent action, including its preallocated approval
@@ -194,16 +222,28 @@ cursors additionally bind all normalized terms and query filters. A changed acce
 context or a gap before retained history returns `ResynchronisationRequired`.
 Neither a cursor nor previously returned search data grants future access.
 
+`HistoryContext` opens the original event from a search result under these same
+current rules. It returns at most two sequence positions before and after the
+target, at most five events total. Filtering, retention or frame size can remove
+neighbors; the target must remain accessible and present. An inaccessible target
+returns `EventUnavailable`, rather than a substitute cached tail. Context does not
+advance or rewind the live conversation cursor.
+
 Search uses a SQLCipher FTS5 trigram index over the shared Unicode-normalized text.
 The service constructs literal quoted phrases; callers cannot submit FTS syntax.
 At most 16 terms and 1 KiB of input enter a query. Queries without a trigram term
 scan at most 256 candidates and 1 MiB before returning `QueryTooBroad`. Indexed
 queries can continue through bounded candidate batches. Each operation has a
-two-second storage deadline. The domain query accepts a cancellation token and checks it during iteration.
-This CLI slice does not yet wire a concurrent authenticated `SearchCancel` request
-to that token; it explicitly refuses cancellation as unsupported. Cancellation
-controls follow with the persistent local clients.
-Queueing a cancel action behind a running query is not by itself cancellation.
+two-second storage deadline. A session runs at most one query at a time and
+registers its operation ID, action digest and actor before execution. The service
+can read one correctly correlated, signed `SearchCancel` concurrently on that
+same stream; it verifies current transport and endpoint authority before signalling
+the query token. Query iteration checks the token, and there remains one response
+writer and one client reader. Wrong identifiers or actors cannot cancel another
+operation. A late cancellation can report the query already ended; it does not
+rewrite a completed result. The query and control response keep distinct operation
+identities. Cancellation does not renew query deadlines or permit stale result
+disclosure.
 
 Recipient ignore matches the acting account, represented account or operator and
 removes matching live pull delivery, history and search before presentation.

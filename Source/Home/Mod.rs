@@ -17,7 +17,10 @@ use crate::{
 };
 pub use execution::read_operation as is_read_operation;
 pub use execution::{Resolve, ResolveResult};
+#[path = "Inspection.rs"]
+pub(crate) mod inspection;
 pub(crate) use execution::{check_revision, committed, next_position, read_operation};
+pub use inspection::{InspectPage, InspectionPage, ServiceInformation};
 use rusqlite::{OptionalExtension, params};
 use std::time::Duration;
 use types::*;
@@ -29,6 +32,7 @@ pub struct Home {
     pub(crate) store: Store,
     pub(crate) home: ServiceId,
     pub(crate) signer: SigningKey,
+    pub(crate) information: ServiceInformation,
 }
 impl Home {
     pub fn create(mut store: Store, home: ServiceId, signer: SigningKey) -> Result<Self> {
@@ -49,6 +53,7 @@ impl Home {
             store,
             home,
             signer,
+            information: ServiceInformation::default(),
         })
     }
     pub fn open(mut store: Store, home: ServiceId, signer: SigningKey) -> Result<Self> {
@@ -72,7 +77,12 @@ impl Home {
             store,
             home,
             signer,
+            information: ServiceInformation::default(),
         })
+    }
+    pub fn with_motd(mut self, motd: String) -> Result<Self> {
+        self.information = ServiceInformation::new(motd)?;
+        Ok(self)
     }
     pub fn service_id(&self) -> ServiceId {
         self.home

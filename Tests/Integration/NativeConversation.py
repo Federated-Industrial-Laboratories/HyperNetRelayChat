@@ -229,9 +229,163 @@ class Conversation:
         self.stop(); self.start()
         assert any(e['body'].get('text')==text for e in self.events('Alice',room,'café') if isinstance(e['body'],dict))
         self.acknowledgement_loss(room)
+        self.local_client(room)
+        if self.local_client_binary():
+            self.bot(room, reference)
         self.authority_refusal(room)
         self.record(dict(case='NativeHrcConversation',passed=True,protocol='hrc/1',
-                         allHrcOperationsThroughCli=True,noDirectFallback=True))
+                         allHrcOperationsThroughCli=not self.local_client_binary(),
+                         localControllerIncluded=bool(self.local_client_binary()),noDirectFallback=True))
+
+    def local_client_binary(self):
+        return self.config.get('localClientBinary') or os.environ.get('HYPERNET_HRC_LOCAL_CLIENT')
+
+    def local_client(self, room):
+        binary = self.local_client_binary()
+        if not binary:
+            return
+        binary = Path(binary).resolve(strict=True)
+        assert binary.is_file() and os.access(binary, os.X_OK), 'Native Controller executable unavailable'
+        maximum = min(240, int(self.deadline - time.monotonic()) - 2)
+        assert maximum >= 30, 'Insufficient remaining native Controller budget'
+        request = self.json_file(dict(alice=str(self.profiles['Alice']), bob=str(self.profiles['Bob']),
+                                      agent=str(self.profiles['Agent']), room=room))
+        result = subprocess.run([str(binary), '--request', str(request), '--maximum-seconds', str(maximum)],
+                                capture_output=True, timeout=maximum+1)
+        assert len(result.stdout) <= 65536 and len(result.stderr) <= 65536, 'Native Controller output bound'
+        self.record(dict(case='NativeLocalControllerProcess',exitCode=result.returncode,
+                         stdout=result.stdout.decode(errors='replace'),stderr=result.stderr.decode(errors='replace')))
+        assert result.returncode == 0, 'Native Controller workflow failed'
+        evidence = json.loads(result.stdout)
+        assert evidence['case'] == 'NativeLocalController' and evidence['passed'] is True
+        self.record(evidence)
+
+    def bot(self, room, revoked_grant):
+        previous_deadline = self.deadline
+        self.deadline = min(previous_deadline, time.monotonic()+180)
+        process = None
+        help_text = 'Native deterministic help ' + os.urandom(12).hex()
+        arguments = ['bot','--profile',self.profiles['Agent'],'--room',address(room),
+                     '--help-text',help_text,'--poll-interval-ms','1000']
+
+        def replies():
+            return [event for event in self.events('Alice',room,help_text)
+                    if isinstance(event['body'],dict) and event['body'].get('text') == help_text]
+
+        def start(label):
+            nonlocal process
+            assert process is None, 'A bot already owns the Agent profile'
+            process = subprocess.Popen([self.binary,*map(str,arguments)],stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+            until = min(self.deadline,time.monotonic()+55)
+            line = bytearray()
+            while b'\n' not in line:
+                remaining = until-time.monotonic()
+                assert remaining > 0, label+': BotReady deadline'
+                readable = select.select([process.stdout],[],[],min(remaining,0.2))[0]
+                if readable:
+                    part = os.read(process.stdout.fileno(),4096)
+                    assert part, label+': bot exited before readiness'
+                    line.extend(part)
+                    assert len(line) <= 4096, label+': readiness output bound'
+                else:
+                    assert process.poll() is None, label+': bot exited before readiness'
+            message,extra = bytes(line).split(b'\n',1)
+            assert not extra.strip(), label+': unexpected startup output'
+            ready = json.loads(message)
+            assert ready == dict(status='BotReady',meaning='InitialAuthorisedCatchUpComplete'), ready
+            assert process.poll() is None, label+': bot stopped at readiness'
+            self.record(dict(case=label,passed=True,readiness=ready))
+
+        def stop(label, require_clean=False):
+            nonlocal process
+            if process is None:
+                return
+            active = process
+            process = None
+            if active.poll() is None:
+                active.terminate()
+            forced = False
+            try:
+                stdout,stderr = active.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                forced = True
+                active.kill()
+                stdout,stderr = active.communicate(timeout=5)
+            assert len(stdout) <= 65536 and len(stderr) <= 65536, 'Bot process output bound'
+            self.record(dict(case=label,exitCode=active.returncode,forcedKill=forced,
+                             stdout=stdout.decode(errors='replace'),stderr=stderr.decode(errors='replace')))
+            if require_clean:
+                assert active.returncode == 0 and not forced, label+': bot did not stop cleanly'
+                assert json.loads(stdout) == dict(status='BotStopped'), label+': missing stopped result'
+
+        try:
+            historical = self.send('Alice',room,'!help')
+            self.outcome(historical)
+            historical_id = historical['outcome']['event']
+            start('NativeBotInitialReady')
+            assert not replies(), 'Initial catch-up replayed a historical trigger'
+            trigger = self.send('Alice',room,'!help')
+            self.outcome(trigger)
+            trigger_id = trigger['outcome']['event']
+            assert trigger_id != historical_id
+            human = [event for event in self.events('Alice',room,'!help') if event['event'] == trigger_id]
+            assert len(human) == 1 and human[0]['actor']['mode'] == 'direct'
+            assert human[0]['operationId'] == trigger['operationId']
+            until = min(self.deadline,time.monotonic()+30)
+            observed = []
+            while not observed:
+                assert process.poll() is None, 'Bot stopped before its reply'
+                observed = replies()
+                if not observed:
+                    assert time.monotonic() < until, 'Bot reply deadline'
+                    time.sleep(min(0.2,max(0,until-time.monotonic())))
+            assert len(observed) == 1, 'A single human trigger created duplicate bot replies'
+            response = observed[0]
+            assert response['kind'] == 21
+            assert response['actor']['mode'] == 'independentAgent'
+            assert response['actor']['acting']['account'] == self.sessions['Agent']['acting']['account']
+            assert response['actor']['operator'] == self.sessions['Alice']['acting']['account']
+            assert response['body']['parent'] == trigger_id and response['body']['causation'] == trigger_id
+            assert response['sequence'] > human[0]['sequence']
+            response_observed = time.monotonic()
+            stop('NativeBotFirstStop',require_clean=True)
+
+            # The Agent profile is released before another shipped CLI accesses it.
+            agent_trigger = self.send('Agent',room,'!help')
+            self.outcome(agent_trigger)
+            human_reply = self.cli('NativeHumanReplyDoesNotTriggerBot','send','--profile',self.profiles['Alice'],
+                                   '--room',address(room),'--text','!help','--reply',trigger_id)
+            self.outcome(human_reply)
+            # Cross the documented five-second reply rate window before evaluating
+            # actor/reply suppression, so the rate limit cannot mask a bad rule.
+            until = min(self.deadline,response_observed+7)
+            while time.monotonic() < until:
+                time.sleep(min(0.2,max(0,until-time.monotonic())))
+            assert self.deadline-time.monotonic() > 0, 'Bot restart budget expired'
+            start('NativeBotRestartReady')
+            after = replies()
+            assert len(after) == 1 and after[0]['event'] == response['event'], 'Bot replay or trigger loop'
+            assert process.poll() is None, 'Bot stopped after restart catch-up'
+            stop('NativeBotRestartStop',require_clean=True)
+
+            denied = self.cli('NativeBotRevokedGrant','bot','--profile',self.profiles['Agent'],
+                              '--room',address(room),'--help-text',help_text,'--poll-interval-ms','1000',
+                              '--grant',revoked_grant['id'],failure=True)
+            assert any(code in denied.stderr.decode(errors='replace')
+                       for code in ('BotPermissionDenied','BotGrantUnavailable')), 'Expected explicit grant refusal'
+            assert b'BotReady' not in denied.stdout, 'Revoked grant reached bot readiness'
+            final = replies()
+            assert len(final) == 1 and final[0]['event'] == response['event']
+            self.record(dict(case='NativeDeterministicBot',passed=True,initialCatchUpNoReplay=True,
+                             humanTrigger=trigger_id,reply=response['event'],parentAndCausation=True,
+                             independentAgentAttribution=True,agentTrigger=agent_trigger['outcome']['event'],
+                             humanReplyTrigger=human_reply['outcome']['event'],agentAndReplySuppressed=True,
+                             restartNoReplay=True,cleanStops=True,revokedGrantRefused=True))
+        finally:
+            try:
+                stop('NativeBotCleanup')
+            finally:
+                self.deadline = previous_deadline
 
     def filters(self, room):
         alice = self.sessions['Alice']['acting']['account']

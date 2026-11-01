@@ -35,7 +35,15 @@ pub fn read_operation(op: Operation) -> bool {
     matches!(
         op,
         Operation::RoomList
+            | Operation::ServiceInspect
+            | Operation::RoomInspect
+            | Operation::AccountInspect
+            | Operation::AgentList
+            | Operation::DelegationList
+            | Operation::ModerationFilters
+            | Operation::ModerationRestrictions
             | Operation::HistoryPage
+            | Operation::HistoryContext
             | Operation::SearchQuery
             | Operation::SearchCancel
             | Operation::EventsSubscribe
@@ -192,34 +200,51 @@ fn dispatch(
     permit: crate::delegation::Permit,
     signer: &SigningKey,
     cancel: &Cancellation,
+    information: &super::ServiceInformation,
 ) -> Domain<Outcome> {
     use Operation::*;
     match action.operation {
-        AccountSetNickname | PresenceSet => crate::identity::operate(db, action, now),
-        RoomCreate | RoomJoin | RoomLeave | RoomSetTopic | RoomList => {
+        ServiceInspect => {
+            if action.target != Target::Service {
+                return invalid("ServiceTarget");
+            }
+            empty(&action.body)?;
+            Ok(Outcome::Result {
+                body: value(information)?,
+            })
+        }
+        AccountSetNickname | PresenceSet | AccountInspect | AgentList => {
+            crate::identity::operate(db, action, now)
+        }
+        RoomCreate | RoomJoin | RoomLeave | RoomSetTopic | RoomList | RoomInspect => {
             crate::conversations::operate(db, action, now)
         }
-        MessageSend | MessageReply | MessageAction | HistoryPage | SearchQuery
+        MessageSend | MessageReply | MessageAction | HistoryPage | HistoryContext | SearchQuery
         | EventsSubscribe | EventsResume | UnreadSet => {
             crate::messaging::operate(db, action, now, permit, signer, cancel)
         }
-        DelegationCreate | DelegationInspect | DelegationPause | DelegationResume
-        | DelegationRevoke | ApprovalPrepare | ApprovalApprove | ApprovalReject => {
-            crate::delegation::operate(db, action, now)
-        }
-        ModerationIgnore | ModerationMute | ModerationSilence | ModerationKick | ModerationBan => {
-            crate::moderation::operate(db, action, now)
-        }
+        DelegationCreate | DelegationInspect | DelegationList | DelegationPause
+        | DelegationResume | DelegationRevoke | ApprovalPrepare | ApprovalApprove
+        | ApprovalReject => crate::delegation::operate(db, action, now),
+        ModerationIgnore
+        | ModerationMute
+        | ModerationSilence
+        | ModerationKick
+        | ModerationBan
+        | ModerationFilters
+        | ModerationRestrictions => crate::moderation::operate(db, action, now),
         OperationResolve => resolve(db, action, now),
         SearchCancel => {
             if action.target != Target::Service {
                 return invalid("ServiceTarget");
             }
             let _: Resolve = unpack(&action.body)?;
-            Err(Fault::Reject(
-                ErrorCode::UnsupportedFeature,
-                "ConcurrentSearchCancellation",
-            ))
+            if !cancel.control_registered() {
+                return conflict("NoActiveSearch");
+            }
+            Ok(Outcome::Result {
+                body: value(&true)?,
+            })
         }
         _ => Err(Fault::Reject(
             ErrorCode::UnsupportedFeature,
@@ -248,6 +273,7 @@ impl Home {
         let action = verified.action();
         let home = self.home;
         let signer = &self.signer;
+        let information = &self.information;
         let response = |outcome| Response {
             home,
             operation_id: action.operation_id,
@@ -293,7 +319,7 @@ impl Home {
                 Ok(grant_permit)=>{
                     admitted_permit=Some(grant_permit);
                     match budgets::admit(db,action,now.lower_ms){Ok(true)=>{},Ok(false)=>return commit(refusal(ErrorCode::RateLimited,"OperationBudget")),Err(e)=>return Err(sql_fault(e))}
-                    match dispatch(db,action,now,grant_permit,signer,cancel) {
+                    match dispatch(db,action,now,grant_permit,signer,cancel,information) {
                         Ok(outcome)=>{crate::delegation::consume(db,grant_permit)?;outcome},
                         Err(Fault::Sql(e))=>return Err(e),
                         Err(Fault::Reject(code,detail))=>Outcome::Rejected{code,detail:detail.into()},

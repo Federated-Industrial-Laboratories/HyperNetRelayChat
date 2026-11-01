@@ -176,7 +176,7 @@ pub(super) fn connect(directory: &Path, end: u64) -> Result<UnixStream> {
     Ok(socket)
 }
 
-fn wait(socket: &UnixStream, events: i16, end: u64) -> Result<()> {
+pub(super) fn wait(socket: &UnixStream, events: i16, end: u64) -> Result<()> {
     loop {
         let now = boot_ms()?;
         if now >= end {

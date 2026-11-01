@@ -1,11 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Recipient filters and attributable room restrictions remain distinct.
+#[path = "Inspection.rs"]
+mod inspection;
 use crate::{
     clock::TimeBounds,
     conversations,
     home::{self, types::*},
     protocol::*,
 };
+pub use inspection::{FilterState, RestrictionState};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -36,6 +39,9 @@ pub(crate) fn ignored(db: &Connection, owner: AccountId, actor: &Actor) -> Domai
 }
 pub(crate) fn operate(db: &Transaction<'_>, action: &Action, now: TimeBounds) -> Domain<Outcome> {
     match action.operation {
+        Operation::ModerationFilters | Operation::ModerationRestrictions => {
+            inspection::read(db, action, now)
+        }
         Operation::ModerationIgnore | Operation::ModerationMute => {
             if action.target != Target::Account(action.actor.represented()) {
                 return invalid("FilterOwner");

@@ -13,6 +13,8 @@ pub use runtime::{Client, Error, Result};
 pub mod json;
 #[path = "Local.rs"]
 pub mod local;
+#[path = "View.rs"]
+pub mod view;
 use crate::{
     clock,
     protocol::{AccountRegistration, Id},
@@ -21,6 +23,7 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+pub use view::*;
 
 pub(crate) fn storage_limits() -> storage::Limits {
     storage::Limits {
@@ -53,16 +56,25 @@ impl Profile {
     }
     pub fn store(&self, directory: &Path) -> storage::Result<storage::Store> {
         let key = storage::Key::load(directory.join("Database.key"))?;
-        storage::Store::open(
+        let mut store = storage::Store::open(
             directory.join("Data"),
             directory.join("Guard"),
             &key,
             *self.registration.endpoint.as_bytes(),
             storage_limits(),
-        )
+        )?;
+        outbox::migrate(&mut store)?;
+        Ok(store)
     }
 }
 
 #[cfg(test)]
 #[path = "../../Tests/Client/Workflow.rs"]
 mod tests;
+
+#[path = "Cache.rs"]
+mod cache;
+
+#[path = "Controller.rs"]
+pub mod controller;
+pub use controller::{Controller, DispatchError};

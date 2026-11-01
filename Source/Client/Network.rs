@@ -7,7 +7,14 @@ use crate::{
     protocol::*,
     service::io,
 };
-use std::{collections::BTreeMap, time::Duration};
+use std::{
+    collections::BTreeMap,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -45,7 +52,7 @@ impl Error {
 pub type Result<T> = std::result::Result<T, Error>;
 pub struct Session {
     companion: Companion,
-    stream: Stream,
+    stream: Arc<Stream>,
     server_key: VerifyingKey,
     pub ready: SessionReady,
 }
@@ -162,7 +169,7 @@ impl Session {
         }
         Ok(Self {
             companion,
-            stream,
+            stream: Arc::new(stream),
             server_key,
             ready,
         })
@@ -230,6 +237,94 @@ impl Session {
         }
         Ok(verified)
     }
+    pub fn stream_handle(&self) -> Arc<Stream> {
+        Arc::clone(&self.stream)
+    }
+    /// The sole reader demultiplexes one query and, at most, its exact cancellation response.
+    pub fn submit_cancellable(
+        &self,
+        bytes: &[u8],
+        cancel_bytes: &[u8],
+        key: &VerifyingKey,
+        cancel: &AtomicBool,
+    ) -> Result<Verified<Response>> {
+        let query = verify_action(bytes, key).map_err(|_| Error::Authentication)?;
+        let control = verify_action(cancel_bytes, key).map_err(|_| Error::Authentication)?;
+        let reference: crate::home::Resolve = control
+            .action()
+            .body
+            .deserialized()
+            .map_err(|_| Error::Frame)?;
+        if query.action().operation != Operation::SearchQuery
+            || control.action().operation != Operation::SearchCancel
+            || control.action().actor != query.action().actor
+            || query.action().actor.acting() != &self.ready.acting
+            || query.action().home != self.ready.home
+            || control.action().home != self.ready.home
+            || reference.operation_id != query.action().operation_id
+            || reference.action_digest != query.digest()
+        {
+            return Err(Error::Authentication);
+        }
+        let end = clock::boot_ms().map_err(|_| Error::Clock)? + 10000;
+        io::send(
+            &self.stream,
+            &Frame::new(FrameKind::Action, bytes.to_vec()).map_err(|_| Error::Frame)?,
+            remaining(end)?,
+        )
+        .map_err(|_| Error::Transport)?;
+        let mut sent = false;
+        let mut query_response = None;
+        let mut control_response = false;
+        loop {
+            if cancel.load(Ordering::Acquire) && !sent && query_response.is_none() {
+                io::send(
+                    &self.stream,
+                    &Frame::new(FrameKind::Action, cancel_bytes.to_vec())
+                        .map_err(|_| Error::Frame)?,
+                    remaining(end)?.min(Duration::from_secs(5)),
+                )
+                .map_err(|_| Error::Transport)?;
+                sent = true;
+            }
+            if (!sent || control_response)
+                && let Some(response) = query_response.take()
+            {
+                return Ok(response);
+            }
+            if !self
+                .stream
+                .wait_readable(remaining(end)?.min(Duration::from_millis(25)))
+                .map_err(|_| Error::Transport)?
+            {
+                continue;
+            }
+            let incoming =
+                io::receive(&self.stream, remaining(end)?).map_err(|_| Error::Transport)?;
+            if incoming.kind != FrameKind::Response {
+                return Err(Error::Frame);
+            }
+            let response = verify_response(&incoming.payload, &self.server_key)
+                .map_err(|_| Error::Authentication)?;
+            if response.value().home != self.ready.home {
+                return Err(Error::Authentication);
+            }
+            if response.value().operation_id == query.action().operation_id
+                && response.value().action_digest == query.digest()
+                && query_response.is_none()
+            {
+                query_response = Some(response);
+            } else if sent
+                && response.value().operation_id == control.action().operation_id
+                && response.value().action_digest == control.digest()
+                && !control_response
+            {
+                control_response = true;
+            } else {
+                return Err(Error::Authentication);
+            }
+        }
+    }
     pub fn close(&self) {
         self.stream.close();
     }
@@ -261,10 +356,6 @@ fn remaining(end: u64) -> Result<Duration> {
         Ok(Duration::from_millis(end - now))
     }
 }
-
-#[cfg(test)]
-#[path = "../../Tests/Client/Connection.rs"]
-mod tests;
 fn send(stream: &Stream, kind: FrameKind, payload: Vec<u8>, end: u64) -> Result<()> {
     io::send(
         stream,
@@ -280,3 +371,7 @@ fn handshake_failure(error: io::Error) -> Error {
         io::Error::Transport | io::Error::Deadline => Error::Handshake,
     }
 }
+
+#[cfg(test)]
+#[path = "../../Tests/Client/Connection.rs"]
+mod tests;
