@@ -92,11 +92,22 @@ fn context(controller: &Probe, command: &str, view: &Snapshot) -> String {
         .status
         .as_ref()
         .map(|s| format!("{}: {}", s.code, s.detail));
+    let selected = view.selected.as_ref().map_or_else(
+        || "selected=none".into(),
+        |room| {
+            format!(
+                "selected={{room={:?},stale={},gap={:?},has_more={}}}",
+                room.summary.room, room.stale, room.gap, room.has_more
+            )
+        },
+    );
     format!(
-        "principal={} command={command} connection={:?} lastVisible={}",
+        "principal={} command={command} connection={:?} lastVisible={} {selected} inspectionStale={} privacyPresent={}",
         controller.principal,
         view.connection,
-        status.as_deref().unwrap_or("none")
+        status.as_deref().unwrap_or("none"),
+        view.inspection.stale,
+        view.privacy.is_some()
     )
 }
 

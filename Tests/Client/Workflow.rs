@@ -387,6 +387,31 @@ fn cached_pages_and_bound_drafts_survive_restart_without_clock_or_transport() {
     assert_eq!(prefs.text_scale, 1.25);
     assert!(prefs.quiet);
     let before = store.usage().unwrap().commit_counter;
+    for error in [
+        crate::client::Error::Refused {
+            code: ErrorCode::Unavailable,
+            detail: "TransportAuthorityExpired".into(),
+            retry_after_ms: None,
+        },
+        crate::client::Error::Refused {
+            code: ErrorCode::Overloaded,
+            detail: "StorageCapacity".into(),
+            retry_after_ms: Some(1000),
+        },
+        crate::client::Error::Refused {
+            code: ErrorCode::RateLimited,
+            detail: "OperationBudget".into(),
+            retry_after_ms: Some(1000),
+        },
+        crate::client::Error::Network(crate::client::network::Error::Transport),
+    ] {
+        assert!(!cache::inspection_failed(&mut store, room, &error).unwrap());
+        let saved = cache::room(&mut store, room).unwrap();
+        assert_eq!(saved.cursor.as_ref(), Some(&page.cursor));
+        assert_eq!(saved.events.len(), 1);
+        assert!(saved.gap.is_none());
+        assert_eq!(store.usage().unwrap().commit_counter, before);
+    }
     let mut altered = page.clone();
     altered.events[0].body = Value::Text("substitution".into());
     assert!(
@@ -416,7 +441,17 @@ fn cached_pages_and_bound_drafts_survive_restart_without_clock_or_transport() {
         )
         .is_err()
     );
-    cache::invalidate(&mut store, room).unwrap();
+    assert!(
+        cache::inspection_failed(
+            &mut store,
+            room,
+            &crate::client::Error::Rejected {
+                code: ErrorCode::Denied,
+                detail: "Membership".into()
+            }
+        )
+        .unwrap()
+    );
     let saved = cache::room(&mut store, room).unwrap();
     assert!(saved.events.is_empty());
     assert!(saved.cursor.is_none());

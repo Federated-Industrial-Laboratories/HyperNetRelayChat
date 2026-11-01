@@ -118,3 +118,8 @@ The [deterministic service bot](ServiceBots.md) uses the same current session,
 signed operations and exact outbox. Its separate durable trigger cursor and
 planned reply commit atomically, so transient interface notifications are never
 used as persistent automation progress.
+
+A temporary room-inspection or transport failure keeps the retained cursor and
+history, marked stale until a fresh authorised read succeeds. It does not create
+a permanent history gap. Explicit membership, expiry or resynchronisation refusal
+invalidates the current cached view and requires the corresponding recovery step.

@@ -173,13 +173,17 @@ impl Worker {
             match self.read(Operation::RoomInspect, Target::Room(room), &home::Empty {}) {
                 Ok(view) => view,
                 Err(error) => {
-                    cache::invalidate(&mut self.client.store, room).map_err(|_| Error::Storage)?;
-                    if let Some(view) = &mut self.snapshot.selected
-                        && view.summary.room == room
+                    if cache::inspection_failed(&mut self.client.store, room, &error)
+                        .map_err(|_| Error::Storage)?
                     {
-                        view.events.clear();
-                        view.members.clear();
-                        view.gap = Some("CurrentRoomAccessUnavailable".into());
+                        self.caught_up.remove(&room);
+                        if let Some(view) = &mut self.snapshot.selected
+                            && view.summary.room == room
+                        {
+                            view.events.clear();
+                            view.members.clear();
+                            view.gap = Some("CurrentRoomAccessUnavailable".into());
+                        }
                     }
                     return Err(error);
                 }
