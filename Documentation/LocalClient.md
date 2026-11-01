@@ -82,6 +82,10 @@ The query worker observes a cancellation token. A request without a matching
 active query does not report success. The single client reader consumes both
 signed responses under the original bounded query deadline, and ignores a result
 that the user cancelled. No extra persistent companion connection is required.
+Cancellation shares the service's bounded FIFO authority admission with ordinary
+actions. Later requests cannot overtake it; it receives no permission bypass.
+Both its initial transport check and its subsequent Home admission retain the
+original query deadline, and no authority slot is held while Home work executes.
 
 The cache schema accepts version 1 only. The draft migration adds an empty mention
 list to the known earlier three-column table, preserving text. Unknown schema or
