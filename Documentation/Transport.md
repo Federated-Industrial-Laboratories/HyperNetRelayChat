@@ -21,8 +21,8 @@ hrc --help
 ```
 
 `cargo install` installs the diagnostic executable into the selected Cargo binary
-directory. It does not install or configure a system service. The crate is marked
-`publish = false`; no software licence has been selected. Generated binaries and
+directory. It does not install or configure a system service. The crate is licensed under Apache-2.0 and marked `publish = false` during
+development. Generated binaries and
 Cargo's build cache are excluded from the repository. All maintained test bodies
 are under `Tests/`; production source is under `Source/`. Pull requests run the
 same format, Clippy and test checks on Ubuntu 24.04 with Rust 1.96.0. Hosted CI
