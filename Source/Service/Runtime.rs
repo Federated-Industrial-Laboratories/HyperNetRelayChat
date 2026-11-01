@@ -78,6 +78,14 @@ struct Shared {
 }
 impl Shared {
     fn report(&self, event: &'static str, code: &'static str) {
+        self.report_check(event, code, None);
+    }
+    fn report_check(
+        &self,
+        event: &'static str,
+        code: &'static str,
+        check: Option<&crate::hypernet::AuthorityCheck>,
+    ) {
         let Some(budget) = &self.diagnostics else {
             return;
         };
@@ -94,8 +102,35 @@ impl Shared {
             return;
         }
         drop(budget);
-        // Only fixed categories enter diagnostics; no peer-controlled text or identifiers.
-        eprintln!("{{\"event\":\"{event}\",\"code\":\"{code}\"}}");
+        // Only fixed categories and freshness timing enter diagnostics, never peer identifiers or content.
+        let authority = check.and_then(|check| {
+            let value = serde_json::to_value(check).ok()?;
+            let mut fields = serde_json::Map::new();
+            for name in [
+                "disposition",
+                "receiptDisposition",
+                "companionStartedBootMs",
+                "companionDeadlineBootMs",
+                "receiptNotAfterBootMs",
+                "usableUntilBootMs",
+                "usableNow",
+            ] {
+                fields.insert(name.into(), value.get(name)?.clone());
+            }
+            fields.insert(
+                "certified".into(),
+                serde_json::Value::Bool(check.certified()),
+            );
+            Some(serde_json::Value::Object(fields))
+        });
+        eprintln!(
+            "{}",
+            serde_json::json!({"event":event,"code":code,"bootMs":now,"authority":authority})
+        );
+    }
+    fn authentication(&self, stage: &'static str) -> Error {
+        self.report("SessionAuthenticationFailed", stage);
+        Error::Authentication
     }
 }
 /// Own at most one periodic storage task without performing disk work on accept.
@@ -289,7 +324,7 @@ fn frame(stream: &Stream, kind: FrameKind, payload: Vec<u8>, timeout: Duration) 
 fn serve(shared: &Shared, stream: &Stream) -> Result<()> {
     let handshake = Handshake(&shared.handshakes);
     let Peer::Incoming(peer) = stream.peer() else {
-        return Err(Error::Authentication);
+        return Err(shared.authentication("IncomingPeerRequired"));
     };
     let home = shared.config.descriptor.home;
     if stream.peer().protocol() != PROTOCOL
@@ -298,9 +333,10 @@ fn serve(shared: &Shared, stream: &Stream) -> Result<()> {
         || stream.peer().service() != home.service.as_hex()
         || !stream.check_authority_supported()
     {
-        return Err(Error::Authentication);
+        return Err(shared.authentication("TransportContextBinding"));
     }
-    let principal = Id::from_hex(peer.principal()).map_err(|_| Error::Authentication)?;
+    let principal =
+        Id::from_hex(peer.principal()).map_err(|_| shared.authentication("PrincipalEncoding"))?;
     let end = clock::boot_ms().map_err(|_| Error::Clock)? + 5000;
     let incoming = io::receive(stream, remaining(end)?).map_err(|_| Error::Transport)?;
     if incoming.kind != FrameKind::Hello {
@@ -314,7 +350,7 @@ fn serve(shared: &Shared, stream: &Stream) -> Result<()> {
             .iter()
             .any(|v| !CAPABILITIES.contains(&v.as_str()))
     {
-        return Err(Error::Authentication);
+        return Err(shared.authentication("HelloBinding"));
     }
     let endpoint = shared
         .home
@@ -322,9 +358,9 @@ fn serve(shared: &Shared, stream: &Stream) -> Result<()> {
         .map_err(|_| Error::State)?
         .endpoint(hello.account, hello.endpoint)
         .map_err(|_| Error::State)?
-        .ok_or(Error::Authentication)?;
+        .ok_or_else(|| shared.authentication("EndpointUnavailable"))?;
     if endpoint.principal != principal {
-        return Err(Error::Authentication);
+        return Err(shared.authentication("EndpointPrincipalBinding"));
     }
     let now = shared.config.clock.sample().map_err(|_| Error::Clock)?;
     let challenge = SessionChallenge {
@@ -337,7 +373,7 @@ fn serve(shared: &Shared, stream: &Stream) -> Result<()> {
         service_boot: shared.boot,
         transport_principal: principal,
         transport_session: Id::from_hex(stream.peer().session())
-            .map_err(|_| Error::Authentication)?,
+            .map_err(|_| shared.authentication("TransportSessionEncoding"))?,
         transport_generation: stream.peer().generation(),
         expires_ms: now.lower_ms + 5000,
     };
@@ -348,10 +384,10 @@ fn serve(shared: &Shared, stream: &Stream) -> Result<()> {
     frame(stream, FrameKind::Challenge, signed, remaining(end)?)?;
     let incoming = io::receive(stream, remaining(end)?).map_err(|_| Error::Transport)?;
     if incoming.kind != FrameKind::Proof {
-        return Err(Error::Authentication);
+        return Err(shared.authentication("ProofFrameKind"));
     }
-    let proof =
-        verify_proof(&incoming.payload, &endpoint.key).map_err(|_| Error::Authentication)?;
+    let proof = verify_proof(&incoming.payload, &endpoint.key)
+        .map_err(|_| shared.authentication("ProofSignature"))?;
     let p = proof.value();
     if p.home != home
         || p.account != hello.account
@@ -359,7 +395,7 @@ fn serve(shared: &Shared, stream: &Stream) -> Result<()> {
         || p.client_nonce != hello.client_nonce
         || p.challenge_digest != challenge_digest
     {
-        return Err(Error::Authentication);
+        return Err(shared.authentication("ProofBinding"));
     }
     let check = shared
         .companion
@@ -495,7 +531,7 @@ fn execute(
             Disposition::NotActive => (ErrorCode::Unavailable, "TransportInactive"),
             _ => (ErrorCode::Unavailable, "TransportAuthority"),
         };
-        shared.report(action.action().operation.name(), detail);
+        shared.report_check(action.action().operation.name(), detail, Some(&check));
         return refused(code, detail);
     }
     let Ok(now) = shared.config.clock.sample() else {

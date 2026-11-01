@@ -71,6 +71,8 @@ impl Worker {
             self.pull(room)?;
         }
         self.snapshot.privacy = Some(self.client.session()?.refresh_privacy()?);
+        // A slow or explicit refresh must not immediately schedule another full poll.
+        self.poll = std::time::Instant::now();
         Ok(())
     }
     pub(super) fn pages<T: serde::de::DeserializeOwned>(

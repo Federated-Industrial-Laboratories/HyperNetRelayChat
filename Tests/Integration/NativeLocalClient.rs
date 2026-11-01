@@ -237,6 +237,19 @@ fn command(controller: &Probe, action: Command, end: Instant) -> (u64, Arc<Snaps
         Command::SelectRoom(room) => Some(*room),
         _ => None,
     };
+    if !matches!(
+        action,
+        Command::Connect
+            | Command::SelectRoom(_)
+            | Command::Disconnect
+            | Command::SaveDraft { .. }
+            | Command::SetPreferences(_)
+            | Command::SetRoomPreferences { .. }
+            | Command::CancelSearch
+            | Command::CloseSearch
+    ) {
+        online(controller, label, end);
+    }
     let id = dispatch(controller, action);
     if !connect && selection.is_none() {
         return (id, completed(controller, id, label, end));
@@ -295,6 +308,20 @@ fn command(controller: &Probe, action: Command, end: Instant) -> (u64, Arc<Snaps
     (id, ready)
 }
 
+fn online(controller: &Probe, label: &str, end: Instant) {
+    wait(controller, label, end, |view| {
+        assert_ne!(
+            view.connection,
+            ConnectionState::Offline,
+            "{}: automatic connection stopped before dispatch",
+            context(controller, label, view)
+        );
+        view.connection == ConnectionState::Online
+            && !view.inspection.stale
+            && view.privacy.is_some()
+    });
+}
+
 fn body(event: &Event) -> Option<messaging::Send> {
     event.body.deserialized().ok()
 }
@@ -332,6 +359,7 @@ fn send(
     end: Instant,
 ) -> Delivery {
     let end = end.min(Instant::now() + Duration::from_secs(40));
+    online(controller, "Send readiness", end);
     let id = dispatch(
         controller,
         Command::Send {
