@@ -75,6 +75,10 @@ enforces current access and expiry before returning content or applying effects.
 The companion accept wait allows five seconds for transport handoff, including
 its current privacy observation. HRC's subsequent handshake retains its separate
 five-second bound; acceptance never extends an authority observation's validity.
+If transport handoff closes before session setup finishes, the client can obtain
+up to three fresh streams and challenges within one 30-second setup budget,
+with bounded jitter between attempts. Invalid identities and frames fail at once.
+This setup retry never submits a conversation operation or reuses old authority.
 
 ## Conversation operations
 

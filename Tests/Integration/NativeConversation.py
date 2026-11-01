@@ -50,8 +50,9 @@ class Conversation:
     def cli(self, name, *arguments, failure=False):
         remaining = self.deadline - time.monotonic()
         assert remaining > 0, 'native HRC workflow deadline expired'
+        # Session setup has one 30 s budget; operation and durable I/O have their own bounds.
         result = subprocess.run([self.binary, *map(str, arguments)], capture_output=True,
-                                timeout=min(35, remaining))
+                                timeout=min(55, remaining))
         assert len(result.stdout) <= 1024*1024 and len(result.stderr) <= 65536
         item = dict(case=name, exitCode=result.returncode,
                     stdout=result.stdout.decode(errors='replace'), stderr=result.stderr.decode(errors='replace'))

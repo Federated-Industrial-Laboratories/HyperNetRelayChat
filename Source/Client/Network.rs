@@ -51,6 +51,10 @@ pub struct Session {
 }
 impl Session {
     pub fn open(profile: &Profile, key: &SigningKey) -> Result<Self> {
+        let end = clock::boot_ms().map_err(|_| Error::Clock)? + 30_000;
+        establish(end, |end| Self::open_once(profile, key, end))
+    }
+    fn open_once(profile: &Profile, key: &SigningKey, overall_end: u64) -> Result<Self> {
         if Id::from_bytes(key.verifying_key().to_bytes()) != profile.registration.endpoint_key {
             return Err(Error::Authentication);
         }
@@ -59,7 +63,7 @@ impl Session {
             .connect(
                 &profile.server.home.service.as_hex(),
                 PROTOCOL,
-                Duration::from_secs(10),
+                remaining(overall_end)?.min(Duration::from_secs(10)),
             )
             .map_err(|_| Error::Connect)?;
         let Peer::Outgoing(_) = stream.peer() else {
@@ -78,7 +82,7 @@ impl Session {
         if server_key.is_weak() {
             return Err(Error::Authentication);
         }
-        let end = clock::boot_ms().map_err(|_| Error::Clock)? + 5000;
+        let end = overall_end.min(clock::boot_ms().map_err(|_| Error::Clock)? + 5000);
         let hello = SessionHello {
             home,
             account: profile.registration.account,
@@ -230,6 +234,25 @@ impl Session {
         self.stream.close();
     }
 }
+/// A discarded transport handoff can precede any HRC operation. Obtain a fresh
+/// stream and challenge; never reuse authority or retry an operation here.
+fn establish<T>(end: u64, mut attempt: impl FnMut(u64) -> Result<T>) -> Result<T> {
+    for number in 0..3 {
+        if remaining(end)?.as_millis() < 100 {
+            return Err(Error::Handshake);
+        }
+        match attempt(end) {
+            Err(Error::Handshake) if number < 2 => {
+                let mut jitter = [0u8; 1];
+                getrandom::fill(&mut jitter).map_err(|_| Error::Authentication)?;
+                let delay = Duration::from_millis(200 + number * 200 + u64::from(jitter[0]));
+                std::thread::sleep(delay.min(remaining(end)?));
+            }
+            result => return result,
+        }
+    }
+    Err(Error::Handshake)
+}
 fn remaining(end: u64) -> Result<Duration> {
     let now = clock::boot_ms().map_err(|_| Error::Clock)?;
     if now >= end {
@@ -238,6 +261,10 @@ fn remaining(end: u64) -> Result<Duration> {
         Ok(Duration::from_millis(end - now))
     }
 }
+
+#[cfg(test)]
+#[path = "../../Tests/Client/Connection.rs"]
+mod tests;
 fn send(stream: &Stream, kind: FrameKind, payload: Vec<u8>, end: u64) -> Result<()> {
     io::send(
         stream,
