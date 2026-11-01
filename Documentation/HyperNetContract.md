@@ -46,7 +46,7 @@ Each HRC agent that requires independent transport attribution needs its own adm
 
 ## Private companion interface
 
-Suite is currently a binary application with a packaged Python SDK, not a published external Rust library for this interface. Proposed HRC integration is a narrow owned Rust adapter to the pinned local companion contract, with interoperability tests against the shipped SDK and real companion. Reuse Suite's cryptographic/authority ownership rather than copying it into HRC. Library publication is an alternative only after a supported upstream interface exists. [SDK](https://github.com/Federated-Industrial-Laboratories/HyperNetSuite/blob/3055f06a691fbc2f0214b4d9bb706a004d5c22ad/SDK/README.md) · [Cargo targets](https://github.com/Federated-Industrial-Laboratories/HyperNetSuite/blob/3055f06a691fbc2f0214b4d9bb706a004d5c22ad/Cargo.toml)
+Suite is currently a binary application with a packaged Python SDK, not a published external Rust library for this interface. HRC integration uses a narrow owned Rust adapter to the pinned local companion contract, with interoperability tests against the shipped SDK and real companion. Reuse Suite's cryptographic/authority ownership rather than copying it into HRC. Library publication is an alternative only after a supported upstream interface exists. [SDK](https://github.com/Federated-Industrial-Laboratories/HyperNetSuite/blob/3055f06a691fbc2f0214b4d9bb706a004d5c22ad/SDK/README.md) · [Cargo targets](https://github.com/Federated-Industrial-Laboratories/HyperNetSuite/blob/3055f06a691fbc2f0214b4d9bb706a004d5c22ad/Cargo.toml)
 
 | IPC element | Observed representation and adapter obligation |
 | --- | --- |
@@ -91,7 +91,7 @@ The [transport authority and federation profile](IntegrationProfile.md) applies 
 
 | Remaining gate | Required outcome |
 | --- | --- |
-| Rust adapter and effect ordering | Implement the version-2 local boundary, original call deadline, capability checks and known-state invalidation; qualify the fresh observation at HRC's serial authorisation point |
+| Rust adapter and effect ordering | The [transport adapter](Transport.md) implements the local version-2 boundary and diagnostic checks. Qualification at the future HRC serial authorisation point remains open |
 | Privacy presentation and deployment policy | Map supported directional facts to honest indicators; display unknown evidence and refuse unmet selected requirements; operator independence remains unverified |
 | Error and outcome mapping | Distinguish certified fresh denial from unavailable/expired/inactive checks and generic I/O failure; never turn closure into an HRC revocation or absence-of-commit claim |
 | Original-actor proof for federation | Implement accepted HRC origin attestation and original action authentication; a local endpoint receipt and an admitted gateway do not prove a foreign author |
