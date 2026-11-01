@@ -17,6 +17,7 @@ use crate::{
     protocol::{Id, RoomId},
     storage::{Commit, Store},
 };
+pub use binding::ApplicationMessage;
 pub use binding::*;
 pub use groups::*;
 pub use messages::*;
@@ -41,11 +42,23 @@ mod bytes {
         bytes: &[u8],
         serializer: S,
     ) -> std::result::Result<S::Ok, S::Error> {
-        serializer.serialize_bytes(bytes)
+        if serializer.is_human_readable() {
+            serializer.serialize_str(&hex::encode(bytes))
+        } else {
+            serializer.serialize_bytes(bytes)
+        }
     }
     pub fn deserialize<'de, D: Deserializer<'de>>(
         deserializer: D,
     ) -> std::result::Result<Vec<u8>, D::Error> {
+        if deserializer.is_human_readable() {
+            let text = <String as serde::Deserialize>::deserialize(deserializer)?;
+            if text.len() > crate::protocol::CRYPTO_FRAME_BYTES * 2 {
+                return Err(de::Error::custom("binary field exceeds its bound"));
+            }
+            return hex::decode(text)
+                .map_err(|_| de::Error::custom("invalid hexadecimal binary field"));
+        }
         struct Bytes;
         impl Visitor<'_> for Bytes {
             type Value = Vec<u8>;

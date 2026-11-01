@@ -7,8 +7,8 @@ retry outcomes and durable commit. Frontends call these operations; they cannot
 replace service authorization with a display check.
 
 This profile provides service-readable community rooms. Confidential direct
-conversations, private groups, account recovery and federation require their
-respective feature contracts. Until a feature is connected, its operations return
+conversations, private groups and federation require their respective feature
+contracts. Until a feature is connected, its operations return
 `UnsupportedFeature`. In particular, `DirectCreate` and an encrypted room request
 cannot produce a plaintext conversation.
 
@@ -22,6 +22,12 @@ the proposed endpoint key and includes a distinct owner-held recovery public key
 The administrator accepts that exact signed registration. A wrong principal,
 classification, operator or invitation does not consume the invitation. An existing
 account cannot be overwritten by another registration.
+
+Subsequent devices use the [endpoint lifecycle](EndpointLifecycle.md): exact
+controller admission followed by new-key/HyperNet proof, or the separately held
+owner recovery key. Recovery uses the finite device exchange rather than an
+ordinary authenticated `AccountRecover` Action. Registration never acts as an
+administrative recovery override.
 
 Agent accounts require an already enrolled human operator. A human classification
 does not prove that a person typed an event. Each accepted endpoint has an exact
@@ -67,6 +73,12 @@ fields fail. Stable IDs, not names, select accounts and rooms.
 | `ModerationFilters` (65) | Own `Account`; `home::InspectPage` | `moderation::FilterState { subject, ignored, muted }` entries |
 | `ModerationRestrictions` (66) | `Room`; `home::InspectPage` | Active `moderation::RestrictionState { subject, kind, expires_ms, moderator }` entries; silence kind 1, ban kind 2 |
 | `DelegationList` (45) | Own `Account`; `home::InspectPage` | Current grants owned by the account or assigned to its exact current agent endpoint |
+| `AccountEnrolEndpoint` (92) | Controlled `Account`; `identity::ApproveEndpoint { request, revision, head }` | An exact, finite admission ticket; new-key activation is still required |
+| `AccountDisableEndpoint` (93) | Controlled `Account`; `identity::DisableEndpoint { endpoint, revision, head }` | Endpoint withdrawal, affected permission invalidation and continuity record |
+| `AccountRotateRecovery` (91) | Controlled `Account`; `identity::RotateRecovery { replacement, revision, head }` | Replacement-key possession and current-controller-authorized rotation |
+| `AccountDevices` (94) | Controlled `Account`; `{}` | Current `IdentitySnapshot`, including active endpoints, public keys, revisions, head and explicit `legacyAnchor` flag |
+| `AccountContinuity` (95) | Known local `Account`; `identity::ContinuityPage { after, limit }` | Bounded public `ContinuityRecord` entries and optional next record number |
+| `AccountLifecycleOutcome` (96) | Controlled `Account`; `home::Resolve` | Original account-control outcome without re-authorizing or resubmitting it |
 
 Inspection lists return `home::InspectionPage { items, next }`. A request limit is
 1-16; `after` and `next` are optional ASCII positions of at most 512 bytes. Encoding

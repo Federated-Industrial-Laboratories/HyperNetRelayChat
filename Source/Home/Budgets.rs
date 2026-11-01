@@ -44,6 +44,16 @@ pub(super) fn admit(db: &Transaction<'_>, action: &Action, now: u64) -> Domain<b
                 rate: 1000,
                 cost: 10000,
             }),
+            Operation::CryptoEnrolEndpoint
+            | Operation::CryptoPublishKeyPackage
+            | Operation::CryptoPropose
+            | Operation::CryptoCommit
+            | Operation::CryptoRecover => budgets.push(Budget {
+                key: format!("crypto:{id}"),
+                capacity: 8000,
+                rate: 1000,
+                cost: 1000,
+            }),
             Operation::RoomJoin | Operation::RoomLeave => budgets.push(Budget {
                 key: format!("membership:{id}"),
                 capacity: 60000,
@@ -86,6 +96,22 @@ pub(super) fn admit(db: &Transaction<'_>, action: &Action, now: u64) -> Domain<b
                 cost: 1000,
             });
         }
+    }
+    if action.operation.is_crypto_transition() {
+        budgets.push(Budget {
+            key: "service:crypto".into(),
+            capacity: 16000,
+            rate: 4000,
+            cost: 1000,
+        });
+        budgets.push(Budget {
+            key: "service:crypto-bytes".into(),
+            capacity: 2 * 1024 * 1024,
+            rate: 512 * 1024,
+            cost: action_bytes(action)
+                .map(|b| b.len() as u64)
+                .unwrap_or(CRYPTO_FRAME_BYTES as u64),
+        });
     }
     if let Actor::Delegated { grant, .. } = action.actor {
         let current = crate::delegation::load(db, grant.id)?;

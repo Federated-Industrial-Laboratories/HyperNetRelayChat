@@ -114,7 +114,12 @@ impl PageContext<'_> {
                 outcome: outcome.clone(),
             };
             // Enforce the actual role, frame, logical depth and node limits together.
-            if sign_response(&response, self.signer).is_ok() {
+            let representation = if self.action.operation == Operation::CryptoHistory {
+                sign_crypto_response(&response, self.signer)
+            } else {
+                sign_response(&response, self.signer)
+            };
+            if representation.is_ok() {
                 return Ok(outcome);
             }
             if events.pop().is_none() {
@@ -142,6 +147,14 @@ pub(super) fn page(
     let body: Page = unpack(&action.body)?;
     let limit = page_limit(body.limit)?;
     let access = conversations::access(db, action, now)?;
+    let encrypted = access.confidentiality != RoomConfidentiality::Community;
+    if encrypted != (action.operation == Operation::CryptoHistory) {
+        return invalid("HistoryPrivacyMode");
+    }
+    if encrypted {
+        crate::confidential::check_reader(db, action, now)?;
+    }
+
     let context = digest(&encode(&(
         "history",
         access.access_digest,
@@ -149,8 +162,13 @@ pub(super) fn page(
         permit.history_until,
     ))?);
     let start = after(&body.cursor, &access, action, now, signer, context)?;
+    let filter = if encrypted {
+        " AND (e.kind NOT IN(20,21,22) OR NOT EXISTS(SELECT 1 FROM hrc_filters f WHERE f.owner=?5 AND f.ignored=1 AND f.subject IN(e.actor,e.represented,e.operator)))"
+    } else {
+        FILTER
+    };
     let sql = format!(
-        "SELECT e.sequence,e.event FROM hrc_events e WHERE e.room=?1 AND e.sequence>?2 AND e.created>=?3 AND e.created<=?4{FILTER} ORDER BY e.sequence LIMIT 257"
+        "SELECT e.sequence,e.event FROM hrc_events e WHERE e.room=?1 AND e.sequence>?2 AND e.created>=?3 AND e.created<=?4{filter} ORDER BY e.sequence LIMIT 257"
     );
     let mut stmt = db.prepare(&sql)?;
     let mut rows = stmt.query(params![
@@ -172,7 +190,9 @@ pub(super) fn page(
             return Err(Fault::Reject(ErrorCode::Unavailable, "Cancelled"));
         }
         let data: Vec<u8> = row.get(1)?;
-        if result.len() >= limit || bytes + data.len() > 48 * 1024 {
+        if result.len() >= limit
+            || bytes + data.len() > if encrypted { 240 * 1024 } else { 48 * 1024 }
+        {
             more = true;
             break;
         }
@@ -205,6 +225,13 @@ pub(super) fn search(
     let body: Search = unpack(&action.body)?;
     let limit = page_limit(body.limit)?;
     let access = conversations::access(db, action, now)?;
+    if access.confidentiality != RoomConfidentiality::Community {
+        return Err(Fault::Reject(
+            ErrorCode::UnsupportedFeature,
+            "UseAuthorisedLocalDecryption",
+        ));
+    }
+
     let terms = crate::text::query(&body.terms)
         .map_err(|_| Fault::Reject(ErrorCode::InvalidInput, "SearchTerms"))?;
     let start_ms = body
@@ -338,6 +365,13 @@ pub(super) fn context(
 ) -> Domain<Outcome> {
     let body: Context = unpack(&action.body)?;
     let access = conversations::access(db, action, now)?;
+    if access.confidentiality != RoomConfidentiality::Community {
+        return Err(Fault::Reject(
+            ErrorCode::UnsupportedFeature,
+            "UseAuthorisedLocalDecryption",
+        ));
+    }
+
     let from = access
         .history_from
         .max(permit.history_from)

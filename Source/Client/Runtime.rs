@@ -24,6 +24,12 @@ pub enum Error {
     Offline,
     #[error("operation refused: {detail}")]
     Rejected { code: ErrorCode, detail: String },
+    #[error("operation was not admitted: {detail}")]
+    Refused {
+        code: ErrorCode,
+        detail: String,
+        retry_after_ms: Option<u64>,
+    },
     #[error("an operation outcome remains unknown")]
     Unknown,
 }
@@ -37,7 +43,63 @@ impl Error {
             Self::Network(error) => error.code(),
             Self::Unknown => "OutcomeUnknown",
             Self::Offline => "Offline",
+            Self::Rejected {
+                code: ErrorCode::Denied,
+                ..
+            }
+            | Self::Refused {
+                code: ErrorCode::Denied,
+                ..
+            } => "OperationDenied",
+            Self::Rejected {
+                code: ErrorCode::Expired,
+                ..
+            }
+            | Self::Refused {
+                code: ErrorCode::Expired,
+                ..
+            } => "OperationExpired",
             Self::Rejected { .. } => "OperationRefused",
+            Self::Refused { .. } if self.retry_delay_ms().is_some() => {
+                "OperationTemporarilyUnavailable"
+            }
+            Self::Refused { .. } => "OperationRefused",
+        }
+    }
+    pub(crate) fn from_outcome(outcome: Outcome) -> Self {
+        match outcome {
+            Outcome::Refused {
+                code,
+                detail,
+                retry_after_ms,
+            } => Self::Refused {
+                code,
+                detail,
+                retry_after_ms,
+            },
+            Outcome::Rejected { code, detail } => Self::Rejected { code, detail },
+            _ => Self::Unknown,
+        }
+    }
+    /// Reconnection may resolve exact retained effects; it never creates a replacement action.
+    pub(crate) fn retry_delay_ms(&self) -> Option<u64> {
+        use network::Error as Network;
+        match self {
+            Self::Clock
+            | Self::Unknown
+            | Self::Network(
+                Network::Companion
+                | Network::Connect
+                | Network::Handshake
+                | Network::Transport
+                | Network::Clock,
+            ) => Some(0),
+            Self::Refused {
+                code: ErrorCode::Unavailable | ErrorCode::RateLimited | ErrorCode::Overloaded,
+                retry_after_ms,
+                ..
+            } => Some(retry_after_ms.unwrap_or(1000).min(60000)),
+            _ => None,
         }
     }
 }
@@ -45,7 +107,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub struct Client {
     pub profile: Profile,
     pub store: Store,
-    key: SigningKey,
+    pub(super) key: SigningKey,
     session: Option<Session>,
 }
 impl Client {
@@ -60,6 +122,8 @@ impl Client {
             session: None,
         };
         super::cache::initialize(&mut client.store).map_err(|_| Error::Storage)?;
+        crate::crypto::initialize(&mut client.store).map_err(|_| Error::Storage)?;
+        super::archive::initialize(&mut client.store).map_err(|_| Error::Storage)?;
         super::cache::maintain(&mut client.store).map_err(|_| Error::Storage)?;
         Ok(client)
     }
@@ -111,6 +175,7 @@ impl Client {
                 .value()
                 .clone());
         }
+        self.validate_message_mode(verified.action())?;
         let now = self.profile.clock.sample().map_err(|_| Error::Clock)?;
         let window = self.session()?.ready.window.clone();
         outbox::prepare(&mut self.store, &verified, &window, now).map_err(|_| Error::Storage)?;
@@ -136,7 +201,7 @@ impl Client {
     pub fn resolve_pending(&mut self) -> Result<Vec<Response>> {
         self.pending()?
             .into_iter()
-            .filter(|p| !p.abandoned)
+            .filter(|p| !p.abandoned && !p.held)
             .map(|p| self.resolve_record(p, true))
             .collect()
     }
@@ -146,7 +211,10 @@ impl Client {
             .pending()?
             .into_iter()
             .find(|p| {
-                p.action.action().operation_id == id && p.action.digest() == digest && !p.abandoned
+                p.action.action().operation_id == id
+                    && p.action.digest() == digest
+                    && !p.abandoned
+                    && !p.held
             })
             .ok_or(Error::Input)?;
         self.resolve_record(p, true)
@@ -181,7 +249,8 @@ impl Client {
             }
             _ => false,
         };
-        if absent && retry && !p.abandoned {
+        if absent && retry && !p.abandoned && !p.held {
+            self.validate_message_mode(p.action.action())?;
             let retried = self
                 .session()?
                 .submit(p.action.signed_bytes(), &self.key.verifying_key())?;

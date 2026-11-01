@@ -6,6 +6,8 @@ mod agents;
 mod conversation;
 #[path = "Editor.rs"]
 mod editor;
+#[path = "Encryption.rs"]
+mod encryption;
 #[path = "Panels.rs"]
 mod panels;
 #[path = "Sound.rs"]
@@ -47,6 +49,10 @@ pub fn run(profile: &Path, offline: bool) -> Result<(), &'static str> {
                 model,
                 query: String::new(),
                 room_name: String::new(),
+                private_group: false,
+                recipient: String::new(),
+                invite_account: String::new(),
+                confirm_recovery: false,
                 find_sender: String::new(),
                 find_represented: String::new(),
                 find_from: String::new(),
@@ -66,6 +72,10 @@ struct App {
     model: Model,
     query: String,
     room_name: String,
+    private_group: bool,
+    recipient: String,
+    invite_account: String,
+    confirm_recovery: bool,
     find_sender: String,
     find_represented: String,
     find_from: String,
@@ -261,10 +271,27 @@ impl App {
                         .hint_text("New room name")
                         .char_limit(64),
                 );
+                ui.checkbox(&mut self.private_group, "Private encrypted group");
                 if ui.button("Create room").clicked() && !self.room_name.is_empty() {
-                    self.model.dispatch(Command::CreateRoom {
-                        name: self.room_name.clone(),
+                    self.model.dispatch(if self.private_group {
+                        Command::CreatePrivateGroup {
+                            name: self.room_name.clone(),
+                        }
+                    } else {
+                        Command::CreateRoom {
+                            name: self.room_name.clone(),
+                        }
                     });
+                }
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.recipient)
+                        .hint_text("Account ID for confidential chat")
+                        .char_limit(200),
+                );
+                if ui.button("Invite to confidential chat").clicked()
+                    && let Ok(recipient) = self.recipient.parse()
+                {
+                    self.model.dispatch(Command::CreateDirect { recipient });
                 }
                 if ui.button("Refresh").clicked() {
                     self.model.dispatch(Command::Refresh);

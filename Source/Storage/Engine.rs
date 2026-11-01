@@ -134,6 +134,8 @@ fn authorise(context: AuthContext<'_>, read_only: bool) -> Authorization {
     use AuthAction::*;
     let permitted = match context.action {
         Select | Read { .. } | Recursive => true,
+        // This nested feature boundary can undo tentative effects, but cannot commit the outer writer.
+        Savepoint { savepoint_name, .. } => !read_only && savepoint_name == "hrc_domain_effects",
         Function { function_name } => ![
             "load_extension",
             "writefile",

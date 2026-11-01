@@ -76,6 +76,16 @@ impl Device {
         roster: &ApprovedRoster,
         cursor: u64,
     ) -> Result<Vec<u8>> {
+        self.create_group_with(store, group, roster, cursor, |_, _| Ok(()))
+    }
+    pub fn create_group_with(
+        &self,
+        store: &mut Store,
+        group: Id,
+        roster: &ApprovedRoster,
+        cursor: u64,
+        persist: impl FnOnce(&Transaction<'_>, &[u8]) -> Result<()>,
+    ) -> Result<Vec<u8>> {
         self.check(roster)?;
         if roster.members().len() != 1 || cursor > i64::MAX as u64 {
             return Err(Error::Binding);
@@ -117,6 +127,7 @@ impl Device {
                 "INSERT INTO crypto_creation(group_id,request,info) VALUES(?1,?2,?3)",
                 rusqlite::params![group.as_bytes().as_slice(), request, info],
             )?;
+            persist(tx, &info)?;
             Ok((info.clone(), info))
         })
     }
@@ -289,6 +300,16 @@ impl Device {
         commit: &[u8],
         next: &ApprovedRoster,
     ) -> Result<EpochReceipt> {
+        self.accept_transition_with(store, order, commit, next, |_, _| Ok(()))
+    }
+    pub fn accept_transition_with(
+        &self,
+        store: &mut Store,
+        order: TransitionOrder,
+        commit: &[u8],
+        next: &ApprovedRoster,
+        persist: impl FnOnce(&Transaction<'_>, &EpochReceipt) -> Result<()>,
+    ) -> Result<EpochReceipt> {
         let TransitionOrder {
             group,
             epoch,
@@ -366,6 +387,7 @@ impl Device {
                 welcome,
             };
             tx.execute("INSERT INTO crypto_transitions(group_id,sequence,input_digest,result) VALUES(?1,?2,?3,?4)",rusqlite::params![group.as_bytes().as_slice(),sequence,digest(&input).as_bytes().as_slice(),encode(&value)?])?;
+            persist(tx, &value)?;
             Ok((value.clone(), encode(&value)?))
         });
         if matches!(result, Err(Error::Verification | Error::Binding)) {
@@ -410,6 +432,31 @@ impl Device {
         welcome: &[u8],
         roster: &ApprovedRoster,
     ) -> Result<GroupState> {
+        self.join_with(
+            store,
+            WelcomeJoin {
+                group,
+                epoch,
+                cursor,
+                welcome,
+                roster,
+            },
+            |_, _| Ok(()),
+        )
+    }
+    pub fn join_with(
+        &self,
+        store: &mut Store,
+        join: WelcomeJoin<'_>,
+        persist: impl FnOnce(&Transaction<'_>, &GroupState) -> Result<()>,
+    ) -> Result<GroupState> {
+        let WelcomeJoin {
+            group,
+            epoch,
+            cursor,
+            welcome,
+            roster,
+        } = join;
         self.check(roster)?;
         let input = encode(&(group, epoch, cursor, digest(welcome), roster))?;
         atomic(store, "welcome", &input, |tx| {
@@ -467,9 +514,17 @@ impl Device {
                     encode(&value)?
                 ],
             )?;
+            persist(tx, &value)?;
             Ok((value.clone(), encode(&value)?))
         })
     }
+}
+pub struct WelcomeJoin<'a> {
+    pub group: Id,
+    pub epoch: u64,
+    pub cursor: u64,
+    pub welcome: &'a [u8],
+    pub roster: &'a ApprovedRoster,
 }
 fn credential_value(value: &EndpointCredential) -> Result<Credential> {
     Ok(BasicCredential::new(value.bytes()?).into())

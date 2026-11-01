@@ -299,6 +299,8 @@ fn cached_pages_and_bound_drafts_survive_restart_without_clock_or_transport() {
         unreachable!()
     };
     let summary = conversations::Summary {
+        confidentiality: RoomConfidentiality::Community,
+        invited: false,
         room,
         name: "local".into(),
         topic: String::new(),
@@ -465,6 +467,8 @@ fn controller_starts_offline_and_preserves_correlated_drafts_with_one_store_owne
     cache::save_rooms(
         &mut store,
         &[crate::conversations::Summary {
+            confidentiality: RoomConfidentiality::Community,
+            invited: false,
             room,
             name: "offline".into(),
             topic: String::new(),
@@ -700,3 +704,100 @@ fn abandoned_unknown_operations_remain_exact_and_can_record_a_late_outcome() {
 
 #[path = "PresentationFixture.rs"]
 mod presentation_fixture;
+
+#[test]
+fn transient_nonadmission_preserves_retry_guidance_but_terminal_or_invalid_input_does_not_retry() {
+    use crate::client::{Error, network};
+    for code in [
+        ErrorCode::Unavailable,
+        ErrorCode::RateLimited,
+        ErrorCode::Overloaded,
+    ] {
+        let error = Error::from_outcome(Outcome::Refused {
+            code,
+            detail: "Temporary authority observation".into(),
+            retry_after_ms: Some(12000),
+        });
+        assert_eq!(error.retry_delay_ms(), Some(12000));
+        assert_eq!(error.code(), "OperationTemporarilyUnavailable");
+        let terminal = Error::from_outcome(Outcome::Rejected {
+            code,
+            detail: "Durable rejection".into(),
+        });
+        assert_eq!(terminal.retry_delay_ms(), None);
+    }
+    let extreme = Error::from_outcome(Outcome::Refused {
+        code: ErrorCode::Overloaded,
+        detail: "Bounded wait".into(),
+        retry_after_ms: Some(u64::MAX),
+    });
+    assert_eq!(extreme.retry_delay_ms(), Some(60000));
+    for (code, expected) in [
+        (ErrorCode::Denied, "OperationDenied"),
+        (ErrorCode::Expired, "OperationExpired"),
+    ] {
+        for outcome in [
+            Outcome::Rejected {
+                code,
+                detail: "Permanent policy result".into(),
+            },
+            Outcome::Refused {
+                code,
+                detail: "Permanent admission result".into(),
+                retry_after_ms: None,
+            },
+        ] {
+            let error = Error::from_outcome(outcome);
+            assert_eq!(error.code(), expected);
+            assert_eq!(error.retry_delay_ms(), None);
+        }
+    }
+    for code in [
+        ErrorCode::Denied,
+        ErrorCode::Expired,
+        ErrorCode::InvalidInput,
+        ErrorCode::UnsupportedVersion,
+    ] {
+        assert_eq!(
+            Error::from_outcome(Outcome::Refused {
+                code,
+                detail: "Permanent refusal".into(),
+                retry_after_ms: Some(1)
+            })
+            .retry_delay_ms(),
+            None
+        );
+    }
+    for failure in [
+        network::Error::Authentication,
+        network::Error::Frame,
+        network::Error::Expired,
+    ] {
+        assert_eq!(Error::Network(failure).retry_delay_ms(), None);
+    }
+}
+
+#[test]
+fn identity_api_keeps_proof_bytes_and_exact_current_state() {
+    let mut a = action();
+    a.operation = Operation::AccountEnrolEndpoint;
+    a.target = Target::Account(a.actor.acting().account);
+    a.body = Value::serialized(&crate::identity::ApproveEndpoint {
+        request: Blob(vec![0, 0xff, 0x80]),
+        revision: 7,
+        head: id(25),
+    })
+    .unwrap();
+    let json = crate::client::json::value(&a).unwrap();
+    assert_eq!(json["body"]["request"], "00ff80");
+    let converted = crate::client::json::action(&serde_json::to_vec(&json).unwrap()).unwrap();
+    assert_eq!(action_bytes(&a).unwrap(), action_bytes(&converted).unwrap());
+    let mut invalid = json;
+    invalid["body"]["head"] = serde_json::json!([25, 25]);
+    assert!(crate::client::json::action(&serde_json::to_vec(&invalid).unwrap()).is_err());
+}
+
+#[path = "EncryptedArchive.rs"]
+mod encrypted_archive;
+#[path = "Trust.rs"]
+mod trust_checks;

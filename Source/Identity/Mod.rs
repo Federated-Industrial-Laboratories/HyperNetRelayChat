@@ -1,14 +1,22 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Current account, endpoint and authenticated actor bindings.
+#[path = "Continuity.rs"]
+pub(crate) mod continuity;
 #[path = "Inspection.rs"]
 mod inspection;
+#[path = "Lifecycle.rs"]
+pub(crate) mod lifecycle;
 use crate::{
     clock::TimeBounds,
     home::{self, types::*},
     protocol::*,
     storage::Commit,
 };
+#[path = "Public.rs"]
+pub(crate) mod public;
 pub use inspection::{AccountView, AgentEndpoint};
+pub use lifecycle::{ApproveEndpoint, ContinuityPage, DisableEndpoint, RotateRecovery};
+pub use public::{PublicIdentity, PublicIdentityRequest};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 
@@ -190,6 +198,7 @@ pub(crate) fn register(
         "UPDATE hrc_meta SET clock_floor=?1 WHERE singleton=1",
         [now.lower_ms],
     )?;
+    continuity::anchor(db, home, r.account, Some(verified.signed_bytes()))?;
     Ok(Commit::new(
         Ok(EndpointRecord {
             acting,

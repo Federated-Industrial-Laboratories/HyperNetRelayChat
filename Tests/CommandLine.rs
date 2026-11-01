@@ -1,6 +1,71 @@
 use super::*;
 
 #[test]
+fn endpoint_lifecycle_requires_explicit_purpose_and_secret_files() {
+    assert!(
+        Cli::try_parse_from([
+            "hrc",
+            "profile",
+            "identity",
+            "activate",
+            "--directory",
+            "/private/new",
+            "--recovery-key-file",
+            "/private/owner/Recovery.key"
+        ])
+        .is_ok()
+    );
+    assert!(
+        Cli::try_parse_from([
+            "hrc",
+            "profile",
+            "identity",
+            "activate",
+            "--directory",
+            "/private/new",
+            "--recovery-key",
+            "secret"
+        ])
+        .is_err()
+    );
+    assert!(
+        Cli::try_parse_from([
+            "hrc",
+            "profile",
+            "identity",
+            "prepare",
+            "--directory",
+            "/private/new"
+        ])
+        .is_err()
+    );
+    assert!(
+        Cli::try_parse_from([
+            "hrc",
+            "profile",
+            "identity",
+            "continuity",
+            "--profile",
+            "/private/device",
+            "--limit",
+            "17"
+        ])
+        .is_err()
+    );
+    assert!(
+        Cli::try_parse_from([
+            "hrc",
+            "profile",
+            "identity",
+            "key-create",
+            "--output",
+            "/private/owner/New.key"
+        ])
+        .is_ok()
+    );
+}
+
+#[test]
 fn diagnostic_admission_requires_exact_principal_and_bounded_waits() {
     let base = [
         "hrc",

@@ -8,6 +8,10 @@ use std::{
     sync::{Arc, atomic::AtomicBool},
 };
 type Result<T, E> = std::result::Result<T, E>;
+#[path = "CliEncryption.rs"]
+pub mod encryption_cli;
+#[path = "CliIdentity.rs"]
+mod identity_cli;
 
 #[derive(Subcommand)]
 pub enum Draft {
@@ -110,6 +114,11 @@ impl Connection {
 }
 #[derive(Subcommand)]
 pub enum Profile {
+    /// Enrol, inspect and recover account endpoints without an administrator override.
+    Identity {
+        #[command(subcommand)]
+        command: identity_cli::Command,
+    },
     /// Create a device; keep its owner recovery key outside the device directory.
     Create {
         #[arg(long)]
@@ -140,6 +149,23 @@ pub enum Room {
         profile: PathBuf,
         #[arg(long)]
         name: String,
+        /// Create an end-to-end encrypted private group with explicit invitations.
+        #[arg(long)]
+        private: bool,
+    },
+    Direct {
+        #[arg(long)]
+        profile: PathBuf,
+        #[arg(long)]
+        recipient: AccountId,
+    },
+    Invite {
+        #[arg(long)]
+        profile: PathBuf,
+        #[arg(long)]
+        room: RoomId,
+        #[arg(long)]
+        account: AccountId,
     },
     Join {
         #[arg(long)]
@@ -398,6 +424,7 @@ pub fn service(command: Service) -> Result<Json, &'static str> {
 }
 pub fn profile(command: Profile) -> Result<Json, &'static str> {
     match command {
+        Profile::Identity { command } => identity_cli::run(command),
         Profile::Create {
             directory,
             invitation,
@@ -438,14 +465,38 @@ pub fn room(command: Room) -> Result<Json, &'static str> {
                 limit: 32,
             },
         ),
-        Room::Create { profile, name } => call(
+        Room::Create {
+            profile,
+            name,
+            private,
+        } => call(
             &mut open(&profile)?,
             Operation::RoomCreate,
             Target::Service,
             &conversations::Create {
                 name,
-                confidentiality: RoomConfidentiality::Community,
+                confidentiality: if private {
+                    RoomConfidentiality::PrivateGroup
+                } else {
+                    RoomConfidentiality::Community
+                },
             },
+        ),
+        Room::Direct { profile, recipient } => call(
+            &mut open(&profile)?,
+            Operation::DirectCreate,
+            Target::Service,
+            &hrc::confidential::Direct { recipient },
+        ),
+        Room::Invite {
+            profile,
+            room,
+            account,
+        } => call(
+            &mut open(&profile)?,
+            Operation::RoomInvite,
+            Target::Room(room),
+            &hrc::confidential::Invite { account },
         ),
         Room::Join { profile, room } => call(
             &mut open(&profile)?,
@@ -475,46 +526,41 @@ pub fn send(request: Send) -> Result<Json, &'static str> {
     client::local::save_draft(&request.profile, request.room, &request.text)
         .map_err(|_| "DraftStorage")?;
     let mut c = open(&request.profile)?;
-    let operation = if request.action {
-        Operation::MessageAction
-    } else if request.reply.is_some() {
-        Operation::MessageReply
-    } else {
-        Operation::MessageSend
-    };
-    let body = Value::serialized(&messaging::Send {
-        mentions: Vec::new(),
-        text: request.text,
-        parent: request.reply,
-        causation: None,
-    })
-    .map_err(|_| "InvalidInput")?;
-    let mut action = c
-        .prepare(operation, Target::Room(request.room), body)
-        .map_err(|_| "InvalidInput")?;
-    if let Some(path) = request.grant {
-        let grant: delegation::Grant = service::files::json(&path).map_err(|_| "GrantFile")?;
-        action.actor = Actor::Delegated {
-            acting: c
-                .session()
-                .map_err(|_| "SessionUnavailable")?
-                .ready
-                .acting
-                .clone(),
-            operator: grant.operator,
-            represented: grant.owner,
-            represented_security_generation: grant.owner_security_generation,
-            grant: grant.reference,
-        };
-    }
-    action.approval = match (request.approval, request.prepare.is_some()) {
+    let grant: Option<delegation::Grant> = request
+        .grant
+        .as_ref()
+        .map(|path| service::files::json(path).map_err(|_| "GrantFile"))
+        .transpose()?;
+    let approval = match (request.approval, request.prepare.is_some()) {
         (None, true) => Some(Id::random().map_err(|_| "RandomUnavailable")?),
         (value, _) => value,
     };
+    let prepared = c
+        .prepare_send(
+            request.room,
+            &messaging::Send {
+                text: request.text,
+                mentions: vec![],
+                parent: request.reply,
+                causation: None,
+            },
+            grant.as_ref(),
+            request.action,
+            approval,
+        )
+        .map_err(|error| error.code())?;
     if let Some(path) = request.prepare {
-        return save_candidate(&c, &action, &path);
+        service::files::create(&path, &prepared.signed).map_err(|_| "CandidateExport")?;
+        return Ok(
+            json!({"status":"Prepared","operationId":prepared.action.operation_id,"actionDigest":action_digest(&prepared.action).map_err(|_|"InvalidAction")?,"approval":prepared.action.approval,"encrypted":prepared.encrypted}),
+        );
     }
-    let response = c.execute(&action).map_err(|_| "OutcomeUnknown")?;
+    let response = if prepared.action.approval.is_some() {
+        c.submit_candidate(&prepared.signed)
+    } else {
+        c.execute_signed(&prepared.signed)
+    }
+    .map_err(|error| error.code())?;
     if matches!(response.outcome, Outcome::Committed { .. }) {
         c.save_draft(request.room, "").map_err(|_| "DraftStorage")?;
     }
@@ -526,32 +572,41 @@ fn cursor(value: Option<String>) -> Result<Option<Blob>, &'static str> {
         .transpose()
 }
 pub fn history(h: History) -> Result<Json, &'static str> {
-    call(
-        &mut open(&h.profile)?,
-        Operation::HistoryPage,
-        Target::Room(h.room),
-        &messaging::Page {
-            cursor: cursor(h.cursor)?,
-            limit: h.limit,
-        },
+    json_value(
+        open(&h.profile)?
+            .history_messages(
+                h.room,
+                &messaging::Page {
+                    cursor: cursor(h.cursor)?,
+                    limit: h.limit,
+                },
+                None,
+            )
+            .map_err(|e| e.code())?,
     )
 }
+
 pub fn search(s: Search) -> Result<Json, &'static str> {
-    call(
-        &mut open(&s.history.profile)?,
-        Operation::SearchQuery,
-        Target::Room(s.history.room),
-        &messaging::Search {
-            terms: s.term,
-            sender: s.sender,
-            represented: s.represented,
-            from_ms: s.from_ms,
-            until_ms: s.until_ms,
-            cursor: cursor(s.history.cursor)?,
-            limit: s.history.limit,
-        },
+    json_value(
+        open(&s.history.profile)?
+            .search_messages(
+                s.history.room,
+                &messaging::Search {
+                    terms: s.term,
+                    sender: s.sender,
+                    represented: s.represented,
+                    from_ms: s.from_ms,
+                    until_ms: s.until_ms,
+                    cursor: cursor(s.history.cursor)?,
+                    limit: s.history.limit,
+                },
+                None,
+                &AtomicBool::new(false),
+            )
+            .map_err(|e| e.code())?,
     )
 }
+
 pub fn agent(command: Agent) -> Result<Json, &'static str> {
     match command {
         Agent::Grant {
@@ -580,39 +635,17 @@ pub fn agent(command: Agent) -> Result<Json, &'static str> {
             generation,
             export,
         } => {
-            let response = open(&profile)?
-                .call(
-                    Operation::DelegationInspect,
-                    Target::Delegation(GrantRef {
-                        id: grant,
-                        generation,
-                    }),
-                    &home::Empty {},
-                )
-                .map_err(|_| "OutcomeUnknown")?;
-            let mut output = json_value(&response)?;
-            if let Outcome::Result { body } = &response.outcome {
-                let inspection: delegation::Inspection =
-                    body.deserialized().map_err(|_| "InvalidResponse")?;
-                if let Some(path) = export {
-                    service::files::create_json(&path, &inspection.grant)
-                        .map_err(|_| "ExportFailed")?;
-                }
-                let pending = output["outcome"]["body"]["pending"]
-                    .as_array_mut()
-                    .ok_or("InvalidResponse")?;
-                if pending.len() != inspection.pending.len() {
-                    return Err("InvalidResponse");
-                }
-                for (shown, record) in pending.iter_mut().zip(&inspection.pending) {
-                    let action =
-                        client::json::pending_action(record).map_err(|_| "InvalidResponse")?;
-                    shown["proposedAction"] = json_value(&action)?;
-                }
-            } else if export.is_some() {
-                return Err("GrantUnavailable");
+            let preview = open(&profile)?
+                .inspect_grant(GrantRef {
+                    id: grant,
+                    generation,
+                })
+                .map_err(|e| e.code())?;
+            if let Some(path) = export {
+                service::files::create_json(&path, &preview.inspection.grant)
+                    .map_err(|_| "ExportFailed")?;
             }
-            Ok(output)
+            json_value(preview)
         }
         Agent::Pause {
             profile,
@@ -683,17 +716,20 @@ pub fn agent(command: Agent) -> Result<Json, &'static str> {
             generation,
             approval,
             action_digest,
-        } => call(
-            &mut open(&profile)?,
-            Operation::ApprovalApprove,
-            Target::Delegation(GrantRef {
-                id: grant,
-                generation,
-            }),
-            &delegation::Decision {
-                approval,
-                action_digest,
-            },
+        } => json_value(
+            open(&profile)?
+                .decide_approval(
+                    GrantRef {
+                        id: grant,
+                        generation,
+                    },
+                    &delegation::Decision {
+                        approval,
+                        action_digest,
+                    },
+                    true,
+                )
+                .map_err(|e| e.code())?,
         ),
         Agent::Reject {
             profile,
@@ -701,22 +737,25 @@ pub fn agent(command: Agent) -> Result<Json, &'static str> {
             generation,
             approval,
             action_digest,
-        } => call(
-            &mut open(&profile)?,
-            Operation::ApprovalReject,
-            Target::Delegation(GrantRef {
-                id: grant,
-                generation,
-            }),
-            &delegation::Decision {
-                approval,
-                action_digest,
-            },
+        } => json_value(
+            open(&profile)?
+                .decide_approval(
+                    GrantRef {
+                        id: grant,
+                        generation,
+                    },
+                    &delegation::Decision {
+                        approval,
+                        action_digest,
+                    },
+                    false,
+                )
+                .map_err(|e| e.code())?,
         ),
     }
 }
 pub fn api(request: Api) -> Result<Json, &'static str> {
-    let bytes = service::files::read(&request.request, ORDINARY_FRAME_BYTES)
+    let bytes = service::files::read(&request.request, client::json::MAX_ACTION_BYTES)
         .map_err(|_| "InvalidAction")?;
     let action = client::json::action(&bytes).map_err(|_| "InvalidAction")?;
     let mut c = open(&request.profile)?;
@@ -740,8 +779,8 @@ pub fn submit(profile: &Path, candidate: &Path) -> Result<Json, &'static str> {
     let bytes = service::files::read(candidate, CRYPTO_FRAME_BYTES).map_err(|_| "CandidateFile")?;
     json_value(
         open(profile)?
-            .execute_signed(&bytes)
-            .map_err(|_| "OutcomeUnknown")?,
+            .submit_candidate(&bytes)
+            .map_err(|e| e.code())?,
     )
 }
 pub fn resolve(profile: &Path) -> Result<Json, &'static str> {

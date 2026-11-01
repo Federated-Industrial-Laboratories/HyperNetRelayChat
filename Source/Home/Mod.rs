@@ -2,12 +2,15 @@
 //! Serialized admission, deduplication and durable feature dispatch.
 #[path = "Budgets.rs"]
 mod budgets;
+#[path = "Devices.rs"]
+mod devices;
 #[path = "Execution.rs"]
 mod execution;
 #[path = "Retention.rs"]
 mod retention;
 #[path = "Schema.rs"]
 mod schema;
+pub(crate) use devices::DeviceTransport;
 #[path = "Types.rs"]
 pub(crate) mod types;
 use crate::{
@@ -49,6 +52,8 @@ impl Home {
             )?;
             Ok(Commit::new((), encode(&("HRC.Schema", 1u64, home, key))?))
         })?;
+        crate::identity::continuity::initialize(&mut store, home)?;
+        crate::confidential::initialize(&mut store)?;
         Ok(Self {
             store,
             home,
@@ -73,6 +78,8 @@ impl Home {
         if !valid {
             return Err(Error::Invalid);
         }
+        crate::identity::continuity::initialize(&mut store, home)?;
+        crate::confidential::initialize(&mut store)?;
         Ok(Self {
             store,
             home,

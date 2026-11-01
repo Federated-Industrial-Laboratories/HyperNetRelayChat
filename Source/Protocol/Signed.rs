@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Standard COSE_Sign1 with pinned role headers and strict Ed25519 verification.
-use super::{CRYPTO_FRAME_BYTES, Error, ORDINARY_FRAME_BYTES, Result, VERSION, cbor, types::*};
+use super::{
+    CRYPTO_FRAME_BYTES, Error, ORDINARY_FRAME_BYTES, Result, VERSION, cbor, lifecycle::*, types::*,
+};
 use ciborium::Value;
 use coset::{CborSerializable, CoseSign1, CoseSign1Builder, Header, HeaderBuilder, iana};
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
@@ -23,6 +25,11 @@ enum Role {
     OriginAssertion = 11,
     Agreement = 12,
     HistoryCursor = 13,
+    DeviceRequest = 14,
+    DeviceChallenge = 15,
+    DeviceProof = 16,
+    DeviceReceipt = 17,
+    ReplacementKey = 18,
 }
 impl Role {
     fn content_type(self) -> &'static str {
@@ -40,6 +47,11 @@ impl Role {
             Self::OriginAssertion => "application/hrc-origin-assertion+cbor;v=1",
             Self::Agreement => "application/hrc-agreement+cbor;v=1",
             Self::HistoryCursor => "application/hrc-history-cursor+cbor;v=1",
+            Self::DeviceRequest => "application/hrc-device-request+cbor;v=1",
+            Self::DeviceChallenge => "application/hrc-device-challenge+cbor;v=1",
+            Self::DeviceProof => "application/hrc-device-proof+cbor;v=1",
+            Self::DeviceReceipt => "application/hrc-device-receipt+cbor;v=1",
+            Self::ReplacementKey => "application/hrc-replacement-key+cbor;v=1",
         }
     }
 }
@@ -204,6 +216,14 @@ fn check_binding(b: &EndpointBinding) -> Result<()> {
     }
     check_key(b.endpoint_key)
 }
+pub fn binding_digest(binding: &EndpointBinding) -> Result<Id> {
+    check_binding(binding)?;
+    Ok(digest(&payload(
+        Role::EndpointBinding,
+        binding,
+        ORDINARY_FRAME_BYTES - 1,
+    )?))
+}
 fn check_response(r: &Response) -> Result<()> {
     match &r.outcome {
         Outcome::Committed { position, .. } if *position == 0 => Err(Error::Invalid),
@@ -336,6 +356,16 @@ object_api!(
     Response,
     check_response
 );
+/// The caller must correlate this larger response with an admitted crypto operation.
+pub fn sign_crypto_response(value: &Response, key: &SigningKey) -> Result<Vec<u8>> {
+    check_response(value)?;
+    sign(Role::Response, value, key, CRYPTO_FRAME_BYTES - 1)
+}
+pub fn verify_crypto_response(bytes: &[u8], key: &VerifyingKey) -> Result<Verified<Response>> {
+    let value: Verified<Response> = verify(Role::Response, bytes, key, CRYPTO_FRAME_BYTES - 1)?;
+    check_response(value.value())?;
+    Ok(value)
+}
 pub fn sign_registration(value: &AccountRegistration, key: &SigningKey) -> Result<Vec<u8>> {
     check_registration(value)?;
     if value.endpoint_key.as_bytes() != key.verifying_key().as_bytes() {
@@ -596,4 +626,124 @@ pub fn verify_registration_request(bytes: &[u8]) -> Result<Verified<AccountRegis
     let key = VerifyingKey::from_bytes(registration.endpoint_key.as_bytes())
         .map_err(|_| Error::Invalid)?;
     verify_registration(bytes, &key)
+}
+
+object_api!(
+    sign_device_request,
+    verify_device_request,
+    DeviceRequest,
+    DeviceRequest,
+    |v: &DeviceRequest| {
+        if v.account.origin != v.home.network
+            || v.expires_ms <= v.created_ms
+            || v.expires_ms - v.created_ms > 86_400_000
+            || (v.purpose == DevicePurpose::RotateRecovery) != v.replacement.is_some()
+        {
+            return Err(Error::Invalid);
+        }
+        if let Some(proof) = &v.replacement {
+            let replacement = verify_new_recovery_key(&proof.0)?;
+            let p = replacement.value();
+            if p.home != v.home || p.account != v.account || p.request != v.request {
+                return Err(Error::Invalid);
+            }
+        }
+        check_key(v.endpoint_key)
+    }
+);
+object_api!(
+    sign_device_challenge,
+    verify_device_challenge,
+    DeviceChallenge,
+    DeviceChallenge,
+    |v: &DeviceChallenge| {
+        if v.account.origin != v.home.network
+            || v.security_generation == 0
+            || v.recovery_generation == 0
+            || v.transport_generation == 0
+            || v.expires_ms <= v.issued_ms
+            || v.expires_ms - v.issued_ms > 5000
+        {
+            return Err(Error::Invalid);
+        }
+        check_key(v.recovery_key)
+    }
+);
+object_api!(
+    sign_device_proof,
+    verify_device_proof,
+    DeviceProof,
+    DeviceProof,
+    |v: &DeviceProof| {
+        if v.account.origin != v.home.network {
+            Err(Error::Binding)
+        } else {
+            Ok(())
+        }
+    }
+);
+object_api!(
+    sign_device_receipt,
+    verify_device_receipt,
+    DeviceReceipt,
+    DeviceReceipt,
+    |v: &DeviceReceipt| {
+        if v.account.origin != v.home.network {
+            return Err(Error::Binding);
+        }
+        check_response(&Response {
+            home: v.home,
+            operation_id: OperationId {
+                window: v.request,
+                operation: v.request,
+            },
+            action_digest: v.request_digest,
+            outcome: v.outcome.clone(),
+        })
+    }
+);
+object_api!(
+    sign_replacement_key,
+    verify_replacement_key,
+    ReplacementKeyProof,
+    ReplacementKey,
+    |v: &ReplacementKeyProof| {
+        if v.account.origin != v.home.network {
+            return Err(Error::Binding);
+        }
+        check_key(v.key)
+    }
+);
+fn self_selected<T: DeserializeOwned>(bytes: &[u8]) -> Result<T> {
+    let value = cbor::decode_at_depth(bytes, ORDINARY_FRAME_BYTES, super::MAX_DEPTH)?;
+    let Value::Array(parts) = value else {
+        return Err(Error::Encoding);
+    };
+    let [_, _, Value::Bytes(payload), _] = parts.as_slice() else {
+        return Err(Error::Encoding);
+    };
+    let value = cbor::decode_at_depth(payload, ORDINARY_FRAME_BYTES, super::MAX_DEPTH - 2)?;
+    let Value::Array(parts) = value else {
+        return Err(Error::Encoding);
+    };
+    let [_, _, body] = parts.as_slice() else {
+        return Err(Error::Encoding);
+    };
+    body.deserialized().map_err(|_| Error::Encoding)
+}
+/// This proves only the proposed endpoint's key possession; admission is a separate boundary.
+pub fn verify_new_device(bytes: &[u8]) -> Result<Verified<DeviceRequest>> {
+    let value: DeviceRequest = self_selected(bytes)?;
+    let key =
+        VerifyingKey::from_bytes(value.endpoint_key.as_bytes()).map_err(|_| Error::Invalid)?;
+    verify_device_request(bytes, &key)
+}
+pub fn verify_new_recovery_key(bytes: &[u8]) -> Result<Verified<ReplacementKeyProof>> {
+    let value: ReplacementKeyProof = self_selected(bytes)?;
+    let key = VerifyingKey::from_bytes(value.key.as_bytes()).map_err(|_| Error::Invalid)?;
+    let verified = verify_replacement_key(bytes, &key)?;
+    if verified.signer_key() != value.key {
+        return Err(Error::Binding);
+    };
+    Ok(verified)
 }

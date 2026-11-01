@@ -29,9 +29,15 @@ allocating the payload. No compression, padding or trailing CBOR data is allowed
 | CryptoAction | 10 | 262,144 bytes |
 | CryptoEvent | 11 | 262,144 bytes |
 | CryptoFederation | 12 | 262,144 bytes |
+| DeviceHello | 13 | 65,536 bytes |
+| DeviceChallenge | 14 | 65,536 bytes |
+| DeviceProof | 15 | 65,536 bytes |
+| DeviceReceipt | 16 | 65,536 bytes |
+| CryptoResponse | 17 | 262,144 bytes |
 
-A crypto class is valid only for KeyPackage publication, proposal or commit
-operations, or an envelope carrying such an operation. Receiving services enforce
+A crypto class is valid only for KeyPackage publication, proposal, commit, epoch
+readiness, crypto inspection, Welcome or crypto recovery operations, or an envelope
+carrying such an operation. Receiving services enforce
 that semantic relationship after signature verification. Declaring a larger
 class never grants additional authority. Unsupported kinds are refused before
 payload allocation. The transport maintains one original finite deadline across
@@ -132,6 +138,11 @@ The role is bound in both the protected media type and signed payload.
 | OriginAssertion | 11 | `origin-assertion` | Agreement's pinned origin attestor |
 | FederationAgreement | 12 | `agreement` | Each independently accepted service administration |
 | HistoryCursor | 13 | `history-cursor` | Exact receiving home service |
+| DeviceRequest | 14 | `device-request` | Proposed endpoint key; possession alone grants no admission |
+| DeviceChallenge | 15 | `device-challenge` | Exact receiving home service |
+| DeviceProof | 16 | `device-proof` | Proposed endpoint key and, when required, current owner recovery key |
+| DeviceReceipt | 17 | `device-receipt` | Exact receiving home service |
+| ReplacementKey | 18 | `replacement-key` | Proposed replacement recovery key |
 
 The object's digest is SHA-256 of its exact canonical payload array, excluding
 the COSE wrapper. This lets both administrations sign identical agreement bytes.
@@ -222,20 +233,20 @@ operation-specific target compatibility remain feature-owner checks.
 | Operation codes | Meaning in code order |
 | --- | --- |
 | 1-5 | Account.SetNickname, Presence.Set, Account.Inspect, Agent.List, Service.Inspect |
-| 10-15 | Room.Create, Join, Leave, SetTopic, List, Inspect |
+| 10-16 | Room.Create, Join, Leave, SetTopic, List, Inspect, Invite |
 | 20-22 | Message.Send, Reply, Action |
 | 30-37 | History.Page, Search.Query, Search.Cancel, Events.Subscribe, Events.Resume, Unread.Set, Operation.Resolve, History.Context |
 | 40-45 | Delegation.Create, Inspect, Pause, Resume, Revoke, List |
 | 50-52 | Approval.Prepare, Approve, Reject |
 | 60-66 | Moderation.Ignore, Mute, Silence, Kick, Ban, Filters, Restrictions |
-| 70-74 | Crypto.EnrolEndpoint, PublishKeyPackage, Propose, Commit, EpochReady |
+| 70-79 | Crypto.EnrolEndpoint, PublishKeyPackage, Propose, Commit, EpochReady, Inspect, Welcome, Recover, Report, History |
 | 80-84 | Federation.Propose, Accept, Withdraw, Exchange, Challenge |
-| 90-93 | Account.Recover, RotateRecovery, EnrolEndpoint, DisableEndpoint |
+| 90-96 | Account.Recover, RotateRecovery, EnrolEndpoint, DisableEndpoint, Devices, Continuity, LifecycleOutcome |
 | 100 | Direct.Create |
 
 Operation names describe contracts from the permission specification. Defining a
 code does not enable its handler. Services refuse known but unavailable operations
-with `UnsupportedFeature`. Codes 71-73 use crypto framing; all other Actions fit
+with `UnsupportedFeature`. Codes 71-77 use crypto framing; all other Actions fit
 ordinary framing. Message bodies still obey their separate text and grapheme
 limits. HRC's current operation authorization point checks the Action digest,
 fresh transport observation and current home state before effects.
@@ -262,6 +273,27 @@ delegated actor. History context uses the same current membership, retention,
 delegation and recipient-filter rules as ordinary history. Context does not issue
 or rewind a resume cursor. See [conversation operations](ConversationOperations.md)
 for operation-specific access and the correlated Search.Cancel contract.
+
+The [endpoint lifecycle](EndpointLifecycle.md) defines device frames and recovery
+authorization. `DeviceHello` carries the exact signed `DeviceRequest`.
+`DeviceProof` carries `{endpoint: Blob, recovery: Blob or null}`, containing
+separately signed statements of the same challenge digest. Challenge and receipt
+frames carry their exact signed objects. All times use the existing bounded clock
+contract; reconnect never refreshes the original request expiry.
+
+| Object | Exact fields |
+| --- | --- |
+| DeviceRequest | `home`, `account`, `request`, `endpoint`, `endpointKey`, `principal`, `purpose`, `createdMs`, `expiresMs`, `replacement: Blob or null` |
+| DeviceChallenge | `home`, `account`, `request`, `requestDigest`, `nonce`, `serviceBoot`, `principal`, `session`, `transportGeneration`, `securityGeneration`, `accountRevision`, `recoveryGeneration`, `recoveryKey`, `continuityHead`, `recorded: bool`, `issuedMs`, `expiresMs` |
+| DeviceProof | `home`, `account`, `request`, `requestDigest`, `challengeDigest` |
+| DeviceReceipt | `home`, `account`, `request`, `requestDigest`, `outcome` |
+| ReplacementKeyProof | `home`, `account`, `request`, `key` |
+
+Device purposes are `enrol`, `recover` and `rotateRecovery`. Only the last carries
+replacement-key proof bytes. A request lasts at most 24 hours; a challenge lasts
+at most five seconds and is further clipped by the request and admission ticket.
+Account.Recover uses this proof exchange rather than an ordinary authenticated
+Action: a lost endpoint cannot authenticate itself back into authority.
 
 ## Responses, events and cursors
 
@@ -379,3 +411,9 @@ and Python cryptography Ed25519. Rust matches its complete COSE bytes, digest,
 signature structure and signature. These are public test keys, never deployment
 credentials. Passing wire tests does not establish complete service admission,
 federation, encryption lifecycle or load qualification.
+
+Encrypted-room operations, shared-room public identity97 and DirectCreate100 use
+[ConfidentialConversations](ConfidentialConversations.md). CryptoResponse17 uses
+the existing Response signature role; it does not create another signing role.
+The receiver must bind its larger allowance to the exact outstanding crypto
+operation. Ordinary responses and application-message actions retain64KiB bounds.

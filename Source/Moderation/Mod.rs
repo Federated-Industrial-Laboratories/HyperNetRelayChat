@@ -150,6 +150,14 @@ pub(crate) fn operate(db: &Transaction<'_>, action: &Action, now: TimeBounds) ->
             {
                 db.execute("UPDATE hrc_members SET active=0,revision=revision+1 WHERE room=?1 AND account=?2",params![access.room.to_string(),body.subject.to_string()])?;
             }
+            if body.enabled
+                && matches!(
+                    action.operation,
+                    Operation::ModerationKick | Operation::ModerationBan
+                )
+            {
+                crate::confidential::invalidate_accounts(db, &[body.subject])?;
+            }
             db.execute(
                 "UPDATE hrc_rooms SET revision=revision+1 WHERE id=?1",
                 [access.room.to_string()],

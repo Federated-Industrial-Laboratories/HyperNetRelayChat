@@ -22,7 +22,7 @@ pub enum Rejection {
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DeliveryOutcome {
-    Message(String),
+    Message(ApplicationMessage),
     Rejected(Rejection),
 }
 #[derive(Clone, Debug)]
@@ -59,23 +59,24 @@ pub struct HomeDelivery {
 }
 
 impl Device {
-    /// The finalizer signs the supplied exact Action; it must perform no I/O or effects.
+    /// The finalizer signs the exact Action and may join local SQL writes. It must not perform network I/O.
     pub fn prepare_message(
         &self,
         store: &mut Store,
         context: &EncryptionContext,
         roster: &ApprovedRoster,
-        text: &str,
-        finalize: impl FnOnce(crate::protocol::Action) -> Result<Vec<u8>>,
+        plaintext: impl Into<ApplicationMessage>,
+        finalize: impl FnOnce(&Transaction<'_>, crate::protocol::Action) -> Result<Vec<u8>>,
     ) -> Result<PreparedMessage> {
         self.check(roster)?;
         if context.actor.acting() != &self.actor || context.room != roster.room() {
             return Err(Error::Binding);
         }
-        crate::text::message(text).map_err(|_| Error::Invalid)?;
+        let plaintext = plaintext.into();
+        let message = plaintext.bytes()?;
         let aad = context.aad()?;
         let operation = encode(&context.operation_id)?;
-        let input = digest(&encode(&(context, text))?);
+        let input = digest(&encode(&(context, &message))?);
         atomic(store, "encrypt", input.as_bytes(), |tx| {
             retention::window_open(tx, context.operation_id.window)?;
             let old: Option<(Vec<u8>, Vec<u8>, Vec<u8>)> = tx
@@ -129,15 +130,15 @@ impl Device {
             let keys = signer(&provider, self.mls_key)?;
             mls.set_aad(aad.clone());
             let ciphertext = tls(&mls
-                .create_message(&provider, &keys, text.as_bytes())
+                .create_message(&provider, &keys, &message)
                 .map_err(|_| Error::Verification)?)?;
-            let signed_action = finalize(context.action(ciphertext.clone())?)?;
+            let signed_action = finalize(tx, context.action(ciphertext.clone())?)?;
             if signed_action.is_empty()
                 || signed_action.len() > crate::protocol::ORDINARY_FRAME_BYTES
             {
                 return Err(Error::Limit);
             }
-            tx.execute("INSERT INTO crypto_outbox(operation,group_id,epoch,input_digest,context,ciphertext,action,plaintext,state,window_id) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,'pending',?9)",rusqlite::params![operation,context.group.as_bytes().as_slice(),context.epoch,input.as_bytes().as_slice(),encode(context)?,ciphertext,signed_action,text,context.operation_id.window.as_bytes().as_slice()])?;
+            tx.execute("INSERT INTO crypto_outbox(operation,group_id,epoch,input_digest,context,ciphertext,action,plaintext,state,window_id) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,'pending',?9)",rusqlite::params![operation,context.group.as_bytes().as_slice(),context.epoch,input.as_bytes().as_slice(),encode(context)?,ciphertext,signed_action,message,context.operation_id.window.as_bytes().as_slice()])?;
             tx.execute(
                 "UPDATE crypto_groups SET sends=sends+1 WHERE id=?1",
                 [context.group.as_bytes().as_slice()],
@@ -159,25 +160,7 @@ impl Device {
     ) -> Result<()> {
         let input = encode(&(operation, accepted))?;
         atomic(store, "resolve outbox", &input, |tx| {
-            let op = encode(&operation)?;
-            let (group, state): (Vec<u8>, String) = tx.query_row(
-                "SELECT group_id,state FROM crypto_outbox WHERE operation=?1",
-                [&op],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )?;
-            let desired = if accepted { "committed" } else { "rejected" };
-            if state != desired {
-                if state != "pending" {
-                    return Err(Error::Conflict);
-                }
-                tx.execute(
-                    "UPDATE crypto_outbox SET state=?2 WHERE operation=?1",
-                    rusqlite::params![op, desired],
-                )?;
-                if !accepted {
-                    tx.execute("UPDATE crypto_groups SET gaps=gaps+1 WHERE id=?1", [group])?;
-                }
-            }
+            resolve_outbox_in(tx, operation, accepted)?;
             Ok(((), input.clone()))
         })
     }
@@ -253,6 +236,7 @@ impl Device {
                     delivery.previous_sequence,
                     delivery.sequence,
                 )?;
+                persist.take().ok_or(Error::Database)?(tx, &outcome)?;
                 save_delivery(tx, incoming.context.group, delivery, &outcome)?;
                 tx.execute("UPDATE crypto_groups SET gaps=gaps+1,frozen=CASE WHEN gaps+1>=?2 OR ?3 THEN 1 ELSE frozen END WHERE id=?1",rusqlite::params![incoming.context.group.as_bytes().as_slice(),MAX_FORWARD_DISTANCE,resynchronise])?;
                 Ok((outcome.clone(), encode(&outcome)?))
@@ -389,8 +373,8 @@ impl Device {
             return Err(Error::Binding);
         };
         let bytes = application.into_bytes();
-        Ok(match String::from_utf8(bytes) {
-            Ok(text) if crate::text::message(&text).is_ok() => DeliveryOutcome::Message(text),
+        Ok(match ApplicationMessage::from_bytes(&bytes) {
+            Ok(message) => DeliveryOutcome::Message(message),
             _ => DeliveryOutcome::Rejected(Rejection::InvalidContent),
         })
     }
@@ -482,7 +466,7 @@ fn resolved_candidate(
     incoming: &IncomingMessage<'_>,
 ) -> Result<Option<DeliveryOutcome>> {
     let operation = encode(&incoming.context.operation_id)?;
-    let own:Option<(Vec<u8>,Vec<u8>,String)>=tx.query_row("SELECT ciphertext,context,plaintext FROM crypto_outbox WHERE operation=?1 AND group_id=?2",rusqlite::params![operation,incoming.context.group.as_bytes().as_slice()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
+    let own:Option<(Vec<u8>,Vec<u8>,Vec<u8>)>=tx.query_row("SELECT ciphertext,context,plaintext FROM crypto_outbox WHERE operation=?1 AND group_id=?2",rusqlite::params![operation,incoming.context.group.as_bytes().as_slice()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
     if let Some((ciphertext, context, plaintext)) = own {
         let context: EncryptionContext = decode(&context)?;
         let expected = crate::protocol::action_digest(&context.action(ciphertext.clone())?)
@@ -497,7 +481,9 @@ fn resolved_candidate(
             "UPDATE crypto_outbox SET state='committed' WHERE operation=?1",
             [operation],
         )?;
-        return Ok(Some(DeliveryOutcome::Message(plaintext)));
+        return Ok(Some(DeliveryOutcome::Message(
+            ApplicationMessage::from_bytes(&plaintext)?,
+        )));
     }
     let preview: Option<(Vec<u8>, Vec<u8>, String)> = tx
         .query_row(
@@ -521,4 +507,63 @@ fn resolved_candidate(
         };
     }
     Ok(None)
+}
+
+/// The caller has verified an exact, terminal home outcome. Couple this with ordinary outbox settlement.
+pub fn resolve_outbox_in(
+    tx: &Transaction<'_>,
+    operation: OperationId,
+    accepted: bool,
+) -> Result<()> {
+    let op = encode(&operation)?;
+    let (group, state): (Vec<u8>, String) = tx.query_row(
+        "SELECT group_id,state FROM crypto_outbox WHERE operation=?1",
+        [&op],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    let desired = if accepted { "committed" } else { "rejected" };
+    if state != desired {
+        if state != "pending" && state != "abandoned" {
+            return Err(Error::Conflict);
+        }
+        tx.execute(
+            "UPDATE crypto_outbox SET state=?2 WHERE operation=?1",
+            rusqlite::params![op, desired],
+        )?;
+        if !accepted && state == "pending" {
+            tx.execute("UPDATE crypto_groups SET gaps=gaps+1 WHERE id=?1", [group])?;
+        }
+    }
+    Ok(())
+}
+/// Abandonment never asserts rejection and never restores a sender generation.
+pub fn abandon_outbox_in(tx: &Transaction<'_>, operation: OperationId) -> Result<()> {
+    let exists: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='crypto_outbox')",
+        [],
+        |r| r.get(0),
+    )?;
+    if !exists {
+        return Ok(());
+    }
+    let op = encode(&operation)?;
+    let row: Option<(Vec<u8>, String)> = tx
+        .query_row(
+            "SELECT group_id,state FROM crypto_outbox WHERE operation=?1",
+            [&op],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    if let Some((group, state)) = row {
+        if state == "pending" {
+            tx.execute(
+                "UPDATE crypto_outbox SET state='abandoned' WHERE operation=?1",
+                [&op],
+            )?;
+            tx.execute("UPDATE crypto_groups SET gaps=gaps+1 WHERE id=?1", [group])?;
+        } else if state != "abandoned" {
+            return Err(Error::Conflict);
+        }
+    }
+    Ok(())
 }

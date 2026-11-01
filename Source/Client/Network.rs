@@ -220,14 +220,21 @@ impl Session {
             FrameKind::Action
         };
         let frame = Frame::new(kind, bytes.to_vec()).map_err(|_| Error::Frame)?;
-        io::send(&self.stream, &frame, Duration::from_secs(5)).map_err(|_| Error::Transport)?;
+        io::send(&self.stream, &frame, Duration::from_secs(5)).map_err(transport_failure)?;
         let incoming =
-            io::receive(&self.stream, Duration::from_secs(10)).map_err(|_| Error::Transport)?;
-        if incoming.kind != FrameKind::Response {
-            return Err(Error::Frame);
+            io::receive(&self.stream, Duration::from_secs(10)).map_err(transport_failure)?;
+        let verified = if action.action().operation.is_crypto_transition() {
+            if incoming.kind != FrameKind::CryptoResponse {
+                return Err(Error::Frame);
+            }
+            verify_crypto_response(&incoming.payload, &self.server_key)
+        } else {
+            if incoming.kind != FrameKind::Response {
+                return Err(Error::Frame);
+            }
+            verify_response(&incoming.payload, &self.server_key)
         }
-        let verified = verify_response(&incoming.payload, &self.server_key)
-            .map_err(|_| Error::Authentication)?;
+        .map_err(|_| Error::Authentication)?;
         let response = verified.value();
         if response.home != action.action().home
             || response.operation_id != action.action().operation_id
@@ -272,7 +279,7 @@ impl Session {
             &Frame::new(FrameKind::Action, bytes.to_vec()).map_err(|_| Error::Frame)?,
             remaining(end)?,
         )
-        .map_err(|_| Error::Transport)?;
+        .map_err(transport_failure)?;
         let mut sent = false;
         let mut query_response = None;
         let mut control_response = false;
@@ -284,7 +291,7 @@ impl Session {
                         .map_err(|_| Error::Frame)?,
                     remaining(end)?.min(Duration::from_secs(5)),
                 )
-                .map_err(|_| Error::Transport)?;
+                .map_err(transport_failure)?;
                 sent = true;
             }
             if (!sent || control_response)
@@ -299,8 +306,7 @@ impl Session {
             {
                 continue;
             }
-            let incoming =
-                io::receive(&self.stream, remaining(end)?).map_err(|_| Error::Transport)?;
+            let incoming = io::receive(&self.stream, remaining(end)?).map_err(transport_failure)?;
             if incoming.kind != FrameKind::Response {
                 return Err(Error::Frame);
             }
@@ -369,6 +375,13 @@ fn handshake_failure(error: io::Error) -> Error {
     match error {
         io::Error::Frame => Error::Frame,
         io::Error::Transport | io::Error::Deadline => Error::Handshake,
+    }
+}
+
+fn transport_failure(error: io::Error) -> Error {
+    match error {
+        io::Error::Frame => Error::Frame,
+        io::Error::Transport | io::Error::Deadline => Error::Transport,
     }
 }
 

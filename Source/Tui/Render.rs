@@ -198,9 +198,10 @@ fn content(model: &Model, columns: usize, wide: bool) -> Vec<String> {
         Panel::Conversation => {
             if let Some(room) = &snapshot.selected {
                 raw.push(format!(
-                    "# {} · {} · service-readable{}",
+                    "# {} · {} · {}{}",
                     room.summary.name,
                     room.summary.topic,
+                    display::confidentiality(room.summary.confidentiality),
                     if room.stale { " · retained copy" } else { "" }
                 ));
                 if let Some(gap) = &room.gap {
@@ -221,7 +222,14 @@ fn content(model: &Model, columns: usize, wide: bool) -> Vec<String> {
                         "{} {}: {}",
                         display::time(event.timestamp_ms),
                         display::actor(&event.actor, &room.members),
-                        display::event_text(event)
+                        display::event_text_with_content(
+                            event,
+                            snapshot
+                                .search
+                                .as_ref()
+                                .and_then(|s| s.content.get(&event.event))
+                                .or_else(|| room.content.get(&event.event))
+                        )
                     ));
                     if snapshot.preferences.density == hrc::client::Density::Comfortable {
                         raw.push(String::new());
@@ -272,6 +280,53 @@ fn content(model: &Model, columns: usize, wide: bool) -> Vec<String> {
                     .map(|(label, value)| format!("{label}: {value}")),
             );
             if let Some(room) = &snapshot.selected {
+                raw.push(display::confidentiality(room.summary.confidentiality).into());
+                if let Some(crypto) = &room.crypto {
+                    raw.push(format!(
+                        "Encrypted epoch {} · send barrier={} · frozen={} · future-only admission",
+                        crypto.remote.epoch, crypto.remote.send_barrier, crypto.remote.frozen
+                    ));
+                    raw.push("/crypto enrol|inspect|publish|start|sync; /crypto add PACKAGE; /crypto remove ENDPOINT".into());
+                    for contact in &crypto.contacts {
+                        raw.push(format!(
+                            "Contact {} {:?}; fingerprint {}; /trust {} {}{}",
+                            contact.account,
+                            contact.state,
+                            contact.anchor,
+                            contact.account,
+                            contact.anchor,
+                            if contact.state == hrc::client::trust::TrustState::LegacyAnchor {
+                                " legacy"
+                            } else {
+                                ""
+                            }
+                        ));
+                    }
+                    for package in &crypto.remote.packages {
+                        raw.push(format!(
+                            "Requested endpoint {} · package {} · {}",
+                            package.member.actor.acting().endpoint,
+                            package.digest,
+                            display::actor(&package.member.actor, &room.members)
+                        ));
+                    }
+                    for member in &crypto.remote.members {
+                        raw.push(format!(
+                            "Encrypted endpoint {} · {}{}",
+                            member.actor.acting().endpoint,
+                            display::actor(&member.actor, &room.members),
+                            if crypto
+                                .remote
+                                .required_removals
+                                .contains(&member.actor.acting().endpoint)
+                            {
+                                " · removal required"
+                            } else {
+                                ""
+                            }
+                        ));
+                    }
+                }
                 raw.push("Members (presence does not prove who typed a message):".into());
                 raw.extend(room.members.iter().map(|m| {
                     format!(
@@ -336,11 +391,26 @@ fn content(model: &Model, columns: usize, wide: bool) -> Vec<String> {
                             "Exact {:?} {:?} · {}",
                             action.operation,
                             action.target,
-                            action
+                            if let Some(hrc::client::MessageContent::Decrypted(body)) = snapshot
+                                .inspection
+                                .proposed_content
+                                .get(&pending.action_digest)
+                            {
+                                body.text.clone()
+                            } else if action
                                 .body
-                                .deserialized::<hrc::messaging::Send>()
-                                .map(|s| s.text)
-                                .unwrap_or_else(|_| format!("{:?}", action.body))
+                                .deserialized::<hrc::crypto::EncryptedBody>()
+                                .is_ok()
+                            {
+                                "Encrypted proposal plaintext is unavailable; approval blocked"
+                                    .into()
+                            } else {
+                                action
+                                    .body
+                                    .deserialized::<hrc::messaging::Send>()
+                                    .map(|s| s.text)
+                                    .unwrap_or_else(|_| format!("{:?}", action.body))
+                            }
                         ));
                     }
                 }

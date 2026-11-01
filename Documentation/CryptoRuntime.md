@@ -27,15 +27,25 @@ an exact match between every approved credential/key and the actual MLS leaves.
 An account operator and represented identity remain in the signed Action rather
 than becoming transferable device keys.
 
-An encrypted Action body is `{group, epoch, ciphertext, parent}`. Ciphertext is
+An encrypted Action body is `{group, epoch, ciphertext, parent, causation}`. Ciphertext is
 a CBOR byte string. `EncryptionContext::from_action` and `action` provide the
 shared conversion. MLS authenticated data is the canonical encoding of
 `["HRC MLS application", 1, EncryptionContext]`. The context includes home,
 room, operation ID, complete actor, operation, expected revisions, approval ID,
-agreement, group, epoch and parent. It excludes ciphertext to avoid a circular
+agreement, group, epoch, parent and causation. It excludes ciphertext to avoid a circular
 hash. The complete signed Action subsequently binds that exact ciphertext.
 The context is bounded to 8 KiB, application frames to 64 KiB, and membership
-objects to 256 KiB. There is no alternate UI encoding.
+objects to 256 KiB. There is no alternate UI encoding. Ordered encrypted events
+retain the complete `EncryptionContext` and ciphertext; the client recomputes the
+original Action digest before use. Display plaintext never replaces an authenticated
+event body.
+
+The encrypted plaintext is canonical `["HRC MLS plaintext", 1, ApplicationMessage]`,
+where `ApplicationMessage` contains text and stable account mention spans. Text
+limits apply to the decoded text, not a JSON representation. Malformed canonical
+encoding, invalid UTF-8, invalid grapheme boundaries and excess mention counts
+produce a bounded rejection. Causation and parent remain authenticated metadata;
+ordinary unselected `@text` never gains mention authority.
 
 ## Durable endpoint lifecycle
 
@@ -43,19 +53,22 @@ objects to 256 KiB. There is no alternate UI encoding.
 pinned upstream provider runs its migrations on an empty in-memory connection;
 the resulting schema is then created in one guarded HRC transaction. This
 temporary connection contains no endpoint keys, messages or live MLS state.
-HRC crypto schema version 1 is accepted; unknown versions refuse startup. This
+HRC crypto schema version 2 is accepted; unknown versions refuse startup. This
 is new-profile schema installation, not a general provider upgrade facility.
 An upgrade must supply and qualify an explicit guarded migration before changing
 these pins. All live provider calls borrow the HRC transaction's connection.
 
 `Device::provision` generates and persists an independent MLS signing key.
 `open` checks the persisted actor binding. `publish_key_package` creates one-use
-packages, with at most 64 unpublished/unused records per profile. New group
+packages, with at most 64 unused records per profile. New group
 creation persists the exact initial GroupInfo for retries. Joining through a
 Welcome atomically consumes its package, checks the complete approved roster,
 and records group identity, epoch and initial home cursor. Any failed check rolls
 back package consumption. Repeating an exact successful join returns its durable
-receipt. New endpoints receive future messages only; no history keys are imported.
+receipt. Creation, successful transition acceptance and Welcome admission offer
+transaction-local callbacks: the client stores the corresponding signed roster
+in the same transaction as the MLS epoch. New endpoints receive future messages
+only; no history keys are imported.
 
 Each operation constructs its provider and loads the group inside the database
 transaction. No mutable group survives the transaction. A cryptographic failure
@@ -63,7 +76,10 @@ therefore rolls back all tentative writes and discards the in-memory state.
 
 `prepare_message` validates text and current roster, advances sender secrets,
 constructs ciphertext, and invokes a local finalizer to sign the exact Action.
-The finalizer must perform no network I/O or external effects. State, plaintext
+The transaction-local finalizer must perform no network I/O or external effects.
+The shared client uses it for the ordinary exact-byte outbox; a service bot also
+joins its trigger cursor and durable reply plan. A callback failure rolls back all
+three state changes. State, plaintext
 local copy, ciphertext, Action and operation identity commit before the method
 returns. A retry returns those exact bytes. A changed input under the same
 operation conflicts. `resolve_outbox` requires an authenticated durable home
@@ -79,7 +95,8 @@ events return the saved outcome. An archive callback failure rolls everything
 back. Invalid authenticated UTF-8 or text consumes the generation and records
 `InvalidContent` without retaining the invalid plaintext. Invalid cryptography
 first rolls back MLS changes, then separately records the authenticated home
-position and rejection. Diagnostics contain no message transcript.
+position and rejection together with the archive callback. Failure of this second
+callback rolls back the rejected cursor too. Diagnostics contain no message transcript.
 
 An owner's `preview` decrypts an exact approval candidate once and saves its
 verified result privately. `decide_preview` changes only that immutable record;
@@ -149,3 +166,39 @@ credential substitution, new-member history exclusion, removal, public-home
 validation without member secrets, frozen transitions and retention. Real
 HyperNet admission, endpoint registration, home removal barriers and interface
 flows are separate integration gates; these crypto tests do not replace them.
+
+
+## Client contact verification and protected archives
+
+The client replays the public account continuity chain against the signed original
+registration, authorized surviving controller actions, owner recovery proofs,
+replacement-key proofs and the home-signed challenges. Before first use, the user
+explicitly accepts the displayed anchor digest. A legacy service-only anchor is
+labelled as such and also requires deliberate acceptance. Pinned anchors cannot be
+silently replaced; extensions must contain the previously retained head. An
+endpoint-signed MLS key enrolment must match the pinned endpoint and generation.
+Delegated leaves additionally carry the owner's exact signed grant-creation
+scope. The home can restrict current access but cannot fabricate a broader signed
+scope or substitute an MLS key using only its own signature.
+
+Historical roster verification may request one exact retained transition or the
+endpoint's selected unexpired Welcome as evidence. Current shared-room authority
+still governs that read. A past-only grant may inspect locally decrypted retained
+content without publishing a live epoch-ready receipt. Required removals and
+history windows excluding the present prohibit ready/send admission. A missing
+future transition is an explicit resynchronisation result.
+
+Authenticated events, decrypted application content, and normalized local FTS
+entries share the encrypted endpoint store. Removing an event cascades to its
+plaintext/index rows and its consumed crypto delivery copy. Terminal outbox and
+approval copies expire when their authenticated retry window is closed under the
+client retention policy. Pending or explicitly abandoned unknown operations and
+unresolved approval previews remain bounded, inspectable records until resolution;
+expiry never rewinds a sender ratchet or invents a rejection. The ordinary and
+crypto outboxes settle accepted/rejected outcomes in one transaction.
+
+The local client checks current membership, grant history bounds and recipient
+filters before online encrypted search/context. It never requests server plaintext
+search. Explicit offline archive search is marked stale. These local tests do not
+establish qualification of a native HyperNet confidential conversation; that is a
+separate integration gate.

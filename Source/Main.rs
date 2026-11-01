@@ -54,6 +54,11 @@ enum Command {
         #[command(subcommand)]
         command: conversation::Room,
     },
+    /// Inspect and manage endpoint encryption, contact trust and private-group epochs.
+    Crypto {
+        #[command(subcommand)]
+        command: conversation::encryption_cli::Command,
+    },
     Send(conversation::Send),
     History(conversation::History),
     Search(conversation::Search),
@@ -318,6 +323,7 @@ fn main() -> ExitCode {
                 Command::Service { command } => conversation::service(command),
                 Command::Profile { command } => conversation::profile(command),
                 Command::Room { command } => conversation::room(command),
+                Command::Crypto { command } => conversation::encryption_cli::run(command),
                 Command::Send(request) => conversation::send(request),
                 Command::History(request) => conversation::history(request),
                 Command::Search(request) => conversation::search(request),

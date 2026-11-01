@@ -10,39 +10,46 @@ impl App {
             ui.label("Select a joined room or create one. Your drafts are retained when the connection is unavailable.");
             return;
         };
-        ui.heading(format!("# {}", text::identity_display(&room.summary.name)));
-        ui.label(&room.summary.topic);
-        ui.horizontal_wrapped(|ui| {
-            ui.label("Community room · Service-readable");
-            if room.stale {
-                ui.label("Retained copy; current access is not confirmed");
-            }
-            if ui.button("Leave").clicked() {
-                self.model.dispatch(Command::Leave(room.summary.room));
-            }
-            if ui.button("Mark read").clicked() {
-                self.model.dispatch(Command::MarkRead {
-                    room: room.summary.room,
-                    sequence: room
-                        .events
-                        .last()
-                        .map_or(room.read_sequence, |e| e.sequence),
+        egui::Panel::bottom("composer").show(ui, |ui| self.composer(ui));
+        let controls_height = (ui.available_height() * 0.55).clamp(0.0, 320.0);
+        egui::ScrollArea::vertical()
+            .id_salt(("room-controls", room.summary.room))
+            .max_height(controls_height)
+            .show(ui, |ui| {
+                ui.heading(format!("# {}", text::identity_display(&room.summary.name)));
+                ui.label(&room.summary.topic);
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(display::confidentiality(room.summary.confidentiality));
+                    if room.stale {
+                        ui.label("Retained copy; current access is not confirmed");
+                    }
+                    if ui.button("Leave").clicked() {
+                        self.model.dispatch(Command::Leave(room.summary.room));
+                    }
+                    if ui.button("Mark read").clicked() {
+                        self.model.dispatch(Command::MarkRead {
+                            room: room.summary.room,
+                            sequence: room
+                                .events
+                                .last()
+                                .map_or(room.read_sequence, |e| e.sequence),
+                        });
+                    }
                 });
-            }
-        });
-        if let Some(gap) = &room.gap {
-            ui.horizontal_wrapped(|ui| {
-                ui.colored_label(egui::Color32::YELLOW, format!("History gap: {gap}"));
-                if ui.button("Resynchronise").clicked() {
-                    self.model.dispatch(Command::Resynchronise);
+                if let Some(gap) = &room.gap {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.colored_label(egui::Color32::YELLOW, format!("History gap: {gap}"));
+                        if ui.button("Resynchronise").clicked() {
+                            self.model.dispatch(Command::Resynchronise);
+                        }
+                    });
+                }
+                self.encryption(ui);
+                self.search_controls(ui);
+                if room.focus.is_some() && ui.button("Return to live conversation").clicked() {
+                    self.model.select(room.summary.room);
                 }
             });
-        }
-        self.search_controls(ui);
-        if room.focus.is_some() && ui.button("Return to live conversation").clicked() {
-            self.model.select(room.summary.room);
-        }
-        egui::Panel::bottom("composer").show(ui, |ui| self.composer(ui));
         if let Some(search) = &snapshot.search {
             ui.horizontal(|ui| {
                 ui.strong(if search.running {
@@ -111,9 +118,23 @@ impl App {
                     }
                 });
                 ui.add(
-                    egui::Label::new(display::event_text(event))
-                        .wrap()
-                        .selectable(true),
+                    egui::Label::new(display::event_text_with_content(
+                        event,
+                        self.model
+                            .snapshot
+                            .search
+                            .as_ref()
+                            .and_then(|s| s.content.get(&event.event))
+                            .or_else(|| {
+                                self.model
+                                    .snapshot
+                                    .selected
+                                    .as_ref()
+                                    .and_then(|r| r.content.get(&event.event))
+                            }),
+                    ))
+                    .wrap()
+                    .selectable(true),
                 )
                 .context_menu(|ui| {
                     if ui.button("Reply").clicked() {
@@ -153,10 +174,12 @@ impl App {
     }
     fn search_controls(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
+            let width = (ui.available_width() - 66.0).max(40.0);
             let input = ui.add(
                 egui::TextEdit::singleline(&mut self.query)
                     .id(egui::Id::unique("search"))
                     .hint_text("Search this room")
+                    .desired_width(width)
                     .char_limit(256),
             );
             let enter = input.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
@@ -165,20 +188,19 @@ impl App {
             }
         });
         ui.collapsing("Search filters", |ui| {
-            egui::Grid::new("search-filters")
-                .num_columns(2)
-                .show(ui, |ui| {
-                    for (label, value) in [
-                        ("Acting sender name or ID", &mut self.find_sender),
-                        ("Represented name or ID", &mut self.find_represented),
-                        ("From date (UTC or ISO 8601)", &mut self.find_from),
-                        ("Before date (UTC or ISO 8601)", &mut self.find_until),
-                    ] {
-                        ui.label(label);
-                        ui.add(egui::TextEdit::singleline(value).char_limit(300));
-                        ui.end_row();
-                    }
-                });
+            for (label, value) in [
+                ("Acting sender name or ID", &mut self.find_sender),
+                ("Represented name or ID", &mut self.find_represented),
+                ("From date (UTC or ISO 8601)", &mut self.find_from),
+                ("Before date (UTC or ISO 8601)", &mut self.find_until),
+            ] {
+                ui.label(label);
+                ui.add(
+                    egui::TextEdit::singleline(value)
+                        .desired_width(ui.available_width())
+                        .char_limit(300),
+                );
+            }
         });
     }
     fn start_search(&mut self) {

@@ -79,12 +79,14 @@ impl App {
                         if let Some(action) = action {
                             ui.label(format!("{:?} · {:?}",action.operation,action.target));
                             ui.label(format!("Attribution: {:?}",action.actor));
-                            if let Ok(body) = action.body.deserialized::<hrc::messaging::Send>() { ui.add(egui::Label::new(body.text).wrap().selectable(true)); }
+                            if let Some(hrc::client::MessageContent::Decrypted(body))=snapshot.inspection.proposed_content.get(&pending.action_digest) {ui.add(egui::Label::new(&body.text).wrap().selectable(true));}
+                            else if action.body.deserialized::<hrc::crypto::EncryptedBody>().is_ok() {ui.label("Encrypted proposal cannot be approved until this endpoint verifies its plaintext.");}
+                            else if let Ok(body) = action.body.deserialized::<hrc::messaging::Send>() { ui.add(egui::Label::new(body.text).wrap().selectable(true)); }
                             else if let Ok(json) = serde_json::to_string_pretty(&action.body) { ui.monospace(json); }
                         } else { ui.label("Candidate could not be verified for display"); }
                         ui.label(format!("Digest {} · expires UTC {} · state {}",pending.action_digest,display::timestamp(pending.expires_ms),pending.state));
                         ui.horizontal(|ui| {
-                            if ui.add_enabled(action.is_some() && pending.state == 0,egui::Button::new("Approve this exact action")).clicked() { self.model.dispatch(Command::DecideApproval { grant:grant.reference, decision:delegation::Decision {approval:pending.approval,action_digest:pending.action_digest}, approve:true }); }
+                            if ui.add_enabled(action.is_some_and(|a|a.body.deserialized::<hrc::crypto::EncryptedBody>().is_err() || matches!(snapshot.inspection.proposed_content.get(&pending.action_digest),Some(hrc::client::MessageContent::Decrypted(_)))) && pending.state == 0,egui::Button::new("Approve this exact action")).clicked() { self.model.dispatch(Command::DecideApproval { grant:grant.reference, decision:delegation::Decision {approval:pending.approval,action_digest:pending.action_digest}, approve:true }); }
                             if ui.button("Reject").clicked() { self.model.dispatch(Command::DecideApproval { grant:grant.reference, decision:delegation::Decision {approval:pending.approval,action_digest:pending.action_digest}, approve:false }); }
                         });
                     });

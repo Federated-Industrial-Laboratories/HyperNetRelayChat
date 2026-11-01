@@ -16,12 +16,17 @@ pub enum FrameKind {
     CryptoAction = 10,
     CryptoEvent = 11,
     CryptoFederation = 12,
+    DeviceHello = 13,
+    DeviceChallenge = 14,
+    DeviceProof = 15,
+    DeviceReceipt = 16,
+    CryptoResponse = 17,
 }
 impl FrameKind {
     pub fn maximum_bytes(self) -> usize {
         if matches!(
             self,
-            Self::CryptoAction | Self::CryptoEvent | Self::CryptoFederation
+            Self::CryptoAction | Self::CryptoEvent | Self::CryptoFederation | Self::CryptoResponse
         ) {
             CRYPTO_FRAME_BYTES
         } else {
@@ -45,6 +50,11 @@ impl TryFrom<u8> for FrameKind {
             10 => Ok(Self::CryptoAction),
             11 => Ok(Self::CryptoEvent),
             12 => Ok(Self::CryptoFederation),
+            13 => Ok(Self::DeviceHello),
+            14 => Ok(Self::DeviceChallenge),
+            15 => Ok(Self::DeviceProof),
+            16 => Ok(Self::DeviceReceipt),
+            17 => Ok(Self::CryptoResponse),
             _ => Err(Error::Feature),
         }
     }

@@ -1,4 +1,8 @@
 use super::*;
+#[path = "../Confidential/Workflow.rs"]
+mod confidential;
+#[path = "../Identity/Lifecycle.rs"]
+mod lifecycle;
 use crate::{conversations, delegation, identity, messaging, moderation};
 use std::{
     cell::Cell,
@@ -180,8 +184,18 @@ fn run(home: &mut Home, p: &Party, a: &Action) -> Outcome {
             true
         })
         .unwrap();
-    let signed = sign_response(&response, home.signing_key()).unwrap();
-    let decoded = verify_response(&signed, &home.signing_key().verifying_key()).unwrap();
+    let signed = if a.operation.is_crypto_transition() {
+        sign_crypto_response(&response, home.signing_key())
+    } else {
+        sign_response(&response, home.signing_key())
+    }
+    .unwrap();
+    let decoded = if a.operation.is_crypto_transition() {
+        verify_crypto_response(&signed, &home.signing_key().verifying_key())
+    } else {
+        verify_response(&signed, &home.signing_key().verifying_key())
+    }
+    .unwrap();
     assert!(
         encode(decoded.value()).unwrap() == encode(&response).unwrap(),
         "signed response changed canonical content"
@@ -793,13 +807,31 @@ fn expired_windows_cannot_reopen_and_confidentiality_never_downgrades() {
         },
     );
     private.operation_id.window = new.id;
+    let Outcome::Committed { body, .. } = run(&mut home, &alice, &private) else {
+        panic!("private room creation")
+    };
+    let private_room = body
+        .deserialized::<messaging::Committed>()
+        .unwrap()
+        .room
+        .unwrap();
+    let mut plaintext = send(&alice, private_room, "must never downgrade");
+    plaintext.operation_id.window = new.id;
     assert!(matches!(
-        run(&mut home, &alice, &private),
-        Outcome::Rejected {
-            code: ErrorCode::UnsupportedFeature,
-            ..
-        }
+        run(&mut home, &alice, &plaintext),
+        Outcome::Rejected { .. }
     ));
+    let stored: u64 = home
+        .store
+        .read(Duration::from_secs(1), |db| {
+            db.query_row(
+                "SELECT count(*) FROM hrc_events WHERE room=?1 AND kind=20",
+                [private_room.to_string()],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(stored, 0);
 }
 
 #[test]

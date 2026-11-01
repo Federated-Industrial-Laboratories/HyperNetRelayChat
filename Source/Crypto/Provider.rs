@@ -62,7 +62,7 @@ pub fn initialize(store: &mut Store) -> Result<()> {
         }
     })?;
     if let Some(version) = current {
-        return if version == 1 {
+        return if version == 2 {
             Ok(())
         } else {
             Err(Error::Conflict)
@@ -75,19 +75,19 @@ pub fn initialize(store: &mut Store) -> Result<()> {
     atomic(
         store,
         "schema",
-        b"OpenMLS 0.9.1/sqlite storage 0.3.0/HRC 1",
+        b"OpenMLS 0.9.1/sqlite storage 0.3.0/HRC 2",
         |tx| {
             for sql in ddl {
                 tx.execute_batch(&sql)?;
             }
             tx.execute_batch(SCHEMA)?;
-            Ok(((), b"schema 1".to_vec()))
+            Ok(((), b"schema 2".to_vec()))
         },
     )
 }
 const SCHEMA: &str = r#"
-CREATE TABLE crypto_schema(version INTEGER NOT NULL CHECK(version=1));
-INSERT INTO crypto_schema VALUES(1);
+CREATE TABLE crypto_schema(version INTEGER NOT NULL CHECK(version=2));
+INSERT INTO crypto_schema VALUES(2);
 CREATE TABLE crypto_devices(endpoint BLOB PRIMARY KEY,actor BLOB NOT NULL,key BLOB NOT NULL);
 CREATE TABLE crypto_groups(id BLOB PRIMARY KEY,room BLOB NOT NULL,mode TEXT NOT NULL CHECK(mode IN ('member','public')),cursor INTEGER NOT NULL,frozen INTEGER NOT NULL DEFAULT 0,sends INTEGER NOT NULL DEFAULT 0,gaps INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE crypto_packages(digest BLOB PRIMARY KEY,endpoint BLOB NOT NULL,room BLOB NOT NULL,bytes BLOB NOT NULL,package_ref BLOB NOT NULL);
@@ -95,7 +95,7 @@ CREATE TABLE crypto_creation(group_id BLOB PRIMARY KEY,request BLOB NOT NULL,inf
 CREATE TABLE crypto_transitions(group_id BLOB NOT NULL,sequence INTEGER NOT NULL,input_digest BLOB NOT NULL,result BLOB NOT NULL,PRIMARY KEY(group_id,sequence));
 CREATE TABLE crypto_joins(group_id BLOB PRIMARY KEY,input_digest BLOB NOT NULL,result BLOB NOT NULL);
 CREATE TABLE crypto_pending(group_id BLOB PRIMARY KEY,epoch INTEGER NOT NULL,request BLOB NOT NULL,commit_bytes BLOB NOT NULL,welcome BLOB,roster BLOB NOT NULL);
-CREATE TABLE crypto_outbox(operation BLOB PRIMARY KEY,window_id BLOB NOT NULL,group_id BLOB NOT NULL,epoch INTEGER NOT NULL,input_digest BLOB NOT NULL,context BLOB NOT NULL,ciphertext BLOB NOT NULL,action BLOB NOT NULL,plaintext TEXT NOT NULL,state TEXT NOT NULL CHECK(state IN ('pending','committed','rejected')));
+CREATE TABLE crypto_outbox(operation BLOB PRIMARY KEY,window_id BLOB NOT NULL,group_id BLOB NOT NULL,epoch INTEGER NOT NULL,input_digest BLOB NOT NULL,context BLOB NOT NULL,ciphertext BLOB NOT NULL,action BLOB NOT NULL,plaintext BLOB NOT NULL,state TEXT NOT NULL CHECK(state IN ('pending','committed','rejected','abandoned')));
 CREATE UNIQUE INDEX crypto_one_pending_sender ON crypto_outbox(group_id) WHERE state='pending';
 CREATE TABLE crypto_deliveries(group_id BLOB NOT NULL,sequence INTEGER NOT NULL,event BLOB NOT NULL,digest BLOB NOT NULL,result BLOB NOT NULL,PRIMARY KEY(group_id,sequence));
 CREATE TABLE crypto_approvals(operation BLOB PRIMARY KEY,window_id BLOB NOT NULL,group_id BLOB NOT NULL,epoch INTEGER NOT NULL,sender BLOB NOT NULL,digest BLOB NOT NULL,result BLOB NOT NULL,state TEXT NOT NULL CHECK(state IN ('pending','approved','rejected','delivered')));

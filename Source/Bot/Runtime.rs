@@ -85,10 +85,10 @@ pub(super) fn run(config: Config, stop: Arc<AtomicBool>, on_ready: impl FnOnce()
                 state::presence(&mut client.store, &verified, &window, now)?;
                 resolve_plan(&mut client, &config, &stop)?;
             }
-            let actor = actor(&mut client, config.grant)?;
+            let (actor, grant) = actor(&mut client, config.grant)?;
             let room = config.rooms[room_index % config.rooms.len()];
             room_index = room_index.wrapping_add(1);
-            let at_head = pull(&mut client, &config, room, actor, &stop)?;
+            let at_head = pull(&mut client, &config, room, actor, grant.as_ref(), &stop)?;
             if !stop.load(Ordering::Acquire) {
                 resolve_plan(&mut client, &config, &stop)?;
                 startup.observe(
@@ -228,12 +228,12 @@ fn accepted(response: Response) -> Result<Value> {
         _ => Err(Error::PendingOutcome),
     }
 }
-fn actor(client: &mut Client, grant: Option<Id>) -> Result<Actor> {
+fn actor(client: &mut Client, grant: Option<Id>) -> Result<(Actor, Option<delegation::Grant>)> {
     let base = client
         .prepare(Operation::HistoryPage, Target::Service, Value::Null)?
         .actor;
     let Some(id) = grant else {
-        return Ok(base);
+        return Ok((base, None));
     };
     let mut after = None;
     for _ in 0..32 {
@@ -254,13 +254,16 @@ fn actor(client: &mut Client, grant: Option<Id>) -> Result<Actor> {
             {
                 return Err(Error::Grant);
             }
-            return Ok(Actor::Delegated {
-                acting: grant.scope.agent,
-                operator: grant.operator,
-                represented: grant.owner,
-                represented_security_generation: grant.owner_security_generation,
-                grant: grant.reference,
-            });
+            return Ok((
+                Actor::Delegated {
+                    acting: grant.scope.agent.clone(),
+                    operator: grant.operator,
+                    represented: grant.owner,
+                    represented_security_generation: grant.owner_security_generation,
+                    grant: grant.reference,
+                },
+                Some(grant),
+            ));
         }
         if page.next.is_none() {
             return Err(Error::Grant);
@@ -282,28 +285,36 @@ pub(super) fn trigger(event: &Event) -> bool {
     };
     body.parent.is_none() && body.causation.is_none() && body.text.trim() == "!help"
 }
+pub(super) fn encrypted_trigger(event: &Event, body: &crate::crypto::ApplicationMessage) -> bool {
+    event.kind == Operation::MessageSend
+        && matches!(event.actor, Actor::Direct { .. })
+        && event
+            .body
+            .deserialized::<crate::crypto::EncryptedEvent>()
+            .is_ok_and(|message| {
+                message.validate_event(event).is_ok()
+                    && message.context.parent.is_none()
+                    && message.context.causation.is_none()
+            })
+        && body.text.trim() == "!help"
+}
 fn pull(
     client: &mut Client,
     config: &Config,
     room: RoomId,
     actor: Actor,
+    grant: Option<&delegation::Grant>,
     stop: &AtomicBool,
 ) -> Result<bool> {
     let prior = state::room(&mut client.store, room)?;
-    let mut request = client.prepare(
-        Operation::HistoryPage,
-        Target::Room(room),
-        Value::serialized(&messaging::Page {
+    let page = client.history_messages(
+        room,
+        &messaging::Page {
             cursor: prior.cursor.clone(),
             limit: 32,
-        })
-        .map_err(|_| Error::State)?,
+        },
+        grant,
     )?;
-    request.actor = actor.clone();
-    let response = client.execute(&request)?;
-    let page: messaging::PageResult = accepted(response)?
-        .deserialized()
-        .map_err(|_| Error::State)?;
     let key = VerifyingKey::from_bytes(client.profile.server.signing_key.as_bytes())
         .map_err(|_| Error::State)?;
     let cursor = verify_cursor(&page.cursor.0, &key).map_err(|_| Error::State)?;
@@ -342,48 +353,53 @@ fn pull(
     if stop.load(Ordering::Acquire) {
         return Ok(false);
     }
-    let mut reply = None;
-    if prior.live
-        && now.lower_ms >= state::next_reply(&mut client.store)?
-        && let Some(event) = page.events.iter().find(|e| trigger(e))
-    {
-        let mut action = client.prepare(
-            Operation::MessageReply,
-            Target::Room(room),
-            Value::serialized(&messaging::Send {
-                text: config.help.clone(),
-                mentions: vec![],
-                parent: Some(event.event),
-                causation: Some(event.event),
+    let selected = if prior.live && now.lower_ms >= state::next_reply(&mut client.store)? {
+        page.events
+            .iter()
+            .find(|event| match page.content.get(&event.event) {
+                Some(client::MessageContent::Decrypted(body)) => encrypted_trigger(event, body),
+                Some(_) => false,
+                None => trigger(event),
             })
-            .map_err(|_| Error::State)?,
-        )?;
-        action.actor = actor;
-        action.expected.insert(Revision::Room, page.room_revision);
-        action
-            .expected
-            .insert(Revision::Filter, cursor.value().filter_revision);
-        let bytes = client.sign(&action)?;
-        let signer = VerifyingKey::from_bytes(client.profile.registration.endpoint_key.as_bytes())
-            .map_err(|_| Error::State)?;
-        reply = Some((
-            verify_action(&bytes, &signer).map_err(|_| Error::State)?,
-            event.event,
-        ));
-    }
+    } else {
+        None
+    };
     let window = client.session()?.ready.window.clone();
-    state::advance(
-        &mut client.store,
-        state::Advance {
-            room,
-            prior: prior.cursor.as_ref(),
-            cursor: &page.cursor,
-            live: prior.live || !page.has_more,
-            reply: reply.as_ref().map(|(r, event)| (r, *event)),
-            window: &window,
-            now,
-        },
-    )?;
+    if let Some(event) = selected {
+        let message = messaging::Send {
+            text: config.help.clone(),
+            mentions: vec![],
+            parent: Some(event.event),
+            causation: Some(event.event),
+        };
+        client.prepare_send_with(room, &message, grant, false, None, |db, reply| {
+            state::advance_in(
+                db,
+                &state::Advance {
+                    room,
+                    prior: prior.cursor.as_ref(),
+                    cursor: &page.cursor,
+                    live: true,
+                    reply: Some((reply, event.event)),
+                    window: &window,
+                    now,
+                },
+            )
+        })?;
+    } else {
+        state::advance(
+            &mut client.store,
+            state::Advance {
+                room,
+                prior: prior.cursor.as_ref(),
+                cursor: &page.cursor,
+                live: prior.live || !page.has_more,
+                reply: None,
+                window: &window,
+                now,
+            },
+        )?;
+    }
     Ok(!page.has_more)
 }
 fn settle_local(client: &mut Client) -> Result<()> {

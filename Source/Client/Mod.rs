@@ -1,5 +1,25 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Shared persistent client state for CLI, terminal, GUI and agents.
+#[path = "ConversationRead.rs"]
+mod conversation_read;
+pub use conversation_read::ConversationPage;
+#[path = "Approvals.rs"]
+mod approvals;
+pub use approvals::GrantPreview;
+#[path = "Encrypted.rs"]
+mod encrypted;
+pub use encrypted::PreparedSend;
+#[path = "Archive.rs"]
+mod archive;
+#[path = "EncryptedHistory.rs"]
+mod encrypted_history;
+#[path = "Roster.rs"]
+mod roster;
+#[path = "TrustStore.rs"]
+mod trust_store;
+pub use archive::{CryptoView, MessageContent};
+#[path = "Devices.rs"]
+pub mod devices;
 #[path = "Network.rs"]
 pub mod network;
 #[path = "Outbox.rs"]
@@ -8,6 +28,8 @@ pub mod outbox;
 mod runtime;
 #[path = "Setup.rs"]
 pub mod setup;
+#[path = "Trust.rs"]
+pub mod trust;
 pub use runtime::{Client, Error, Result};
 #[path = "Json.rs"]
 pub mod json;

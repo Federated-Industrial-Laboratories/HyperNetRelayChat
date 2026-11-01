@@ -65,6 +65,8 @@ backup. New-device encrypted history remains future-only.
 
 Add `--diagnostics` to `service run` to report fixed lifecycle categories on
 standard error. Diagnostics contain no messages, account identifiers or keys.
+Failed authority observations include fixed disposition categories and monotonic
+deadline timings. Authentication failures identify their fixed validation stage.
 Output is limited to a burst of eight lines, one line per second thereafter and
 128 lines per process. Client errors distinguish local configuration and storage,
 HyperNet preparation, session authentication, clock and handshake failures.

@@ -71,6 +71,8 @@ impl Worker {
             self.pull(room)?;
         }
         self.snapshot.privacy = Some(self.client.session()?.refresh_privacy()?);
+        // A slow or explicit refresh must not immediately schedule another full poll.
+        self.poll = std::time::Instant::now();
         Ok(())
     }
     pub(super) fn pages<T: serde::de::DeserializeOwned>(
@@ -124,7 +126,13 @@ impl Worker {
             .cloned()
             .ok_or(Error::Input)?;
         let cached = cache::room(&mut self.client.store, room).map_err(|_| Error::Storage)?;
+        let content = super::super::archive::content(&mut self.client.store, &cached.events)
+            .map_err(|_| Error::Storage)?;
+        let crypto = super::super::archive::view(&mut self.client.store, room)
+            .map_err(|_| Error::Storage)?;
         self.snapshot.selected = Some(RoomView {
+            crypto,
+            content,
             focus: None,
             summary,
             members: cached.members,
@@ -173,17 +181,46 @@ impl Worker {
             match self.read(Operation::RoomInspect, Target::Room(room), &home::Empty {}) {
                 Ok(view) => view,
                 Err(error) => {
-                    cache::invalidate(&mut self.client.store, room).map_err(|_| Error::Storage)?;
-                    if let Some(view) = &mut self.snapshot.selected
-                        && view.summary.room == room
+                    if cache::inspection_failed(&mut self.client.store, room, &error)
+                        .map_err(|_| Error::Storage)?
                     {
-                        view.events.clear();
-                        view.members.clear();
-                        view.gap = Some("CurrentRoomAccessUnavailable".into());
+                        self.caught_up.remove(&room);
+                        if let Some(view) = &mut self.snapshot.selected
+                            && view.summary.room == room
+                        {
+                            view.events.clear();
+                            view.content.clear();
+                            view.members.clear();
+                            view.gap = Some("CurrentRoomAccessUnavailable".into());
+                        }
                     }
                     return Err(error);
                 }
             };
+        if current.confidentiality != RoomConfidentiality::Community {
+            let result = self.pull_encrypted(
+                room,
+                current,
+                cached.events.last().map(|e| e.sequence).unwrap_or(0),
+            );
+            if result.is_err()
+                && cache::room(&mut self.client.store, room)
+                    .map_err(|_| Error::Storage)?
+                    .gap
+                    .is_some()
+            {
+                self.caught_up.remove(&room);
+                if let Some(view) = &mut self.snapshot.selected
+                    && view.summary.room == room
+                {
+                    view.events.clear();
+                    view.content.clear();
+                    view.members.clear();
+                    view.gap = Some("CurrentRoomAccessUnavailable".into());
+                }
+            }
+            return result;
+        }
         let page = self.read::<messaging::PageResult, _>(
             Operation::EventsResume,
             Target::Room(room),
@@ -197,6 +234,11 @@ impl Worker {
             Err(Error::Rejected {
                 code: ErrorCode::ResynchronisationRequired,
                 detail,
+            })
+            | Err(Error::Refused {
+                code: ErrorCode::ResynchronisationRequired,
+                detail,
+                ..
             }) => {
                 cache::invalidate(&mut self.client.store, room).map_err(|_| Error::Storage)?;
                 self.caught_up.remove(&room);
@@ -284,9 +326,30 @@ impl Worker {
             }) {
                 continue;
             }
-            let body: messaging::Send = event.body.deserialized().map_err(|_| Error::Input)?;
-            let mention = body
-                .mentions
+            let mentions = if event
+                .body
+                .deserialized::<crate::crypto::EncryptedEvent>()
+                .is_ok()
+            {
+                let content = super::super::archive::content(
+                    &mut self.client.store,
+                    std::slice::from_ref(event),
+                )
+                .map_err(|_| Error::Storage)?;
+                match content.get(&event.event) {
+                    Some(super::super::MessageContent::Decrypted(message)) => {
+                        message.mentions.clone()
+                    }
+                    _ => continue,
+                }
+            } else {
+                event
+                    .body
+                    .deserialized::<messaging::Send>()
+                    .map_err(|_| Error::Input)?
+                    .mentions
+            };
+            let mention = mentions
                 .iter()
                 .any(|mention| mention.account == self.snapshot.account);
             if prefs.notifications == NotificationMode::Mentions && !mention {
@@ -310,11 +373,7 @@ impl Worker {
 
 impl Worker {
     pub(super) fn open_event(&mut self, room: RoomId, event: Id) -> Result<()> {
-        let context: messaging::ContextResult = self.read(
-            Operation::HistoryContext,
-            Target::Room(room),
-            &messaging::Context { event },
-        )?;
+        let context = self.client.message_context(room, event, None)?;
         if !context
             .events
             .iter()
@@ -333,12 +392,92 @@ impl Worker {
         }
         let view = self.snapshot.selected.as_mut().ok_or(Error::Input)?;
         view.events = context.events;
+        view.content = context.content;
         view.members = context.members;
         view.summary.revision = context.room_revision;
         view.focus = Some(event);
         view.stale = false;
         view.gap = None;
         view.has_more = false;
+        Ok(())
+    }
+}
+
+impl Worker {
+    fn pull_encrypted(
+        &mut self,
+        room: RoomId,
+        current: conversations::Inspection,
+        previous: u64,
+    ) -> Result<()> {
+        let initial = self.client.crypto_inspect(room, None)?;
+        if let Some(selected) = &mut self.snapshot.selected
+            && selected.summary.room == room
+        {
+            selected.crypto = Some(initial.clone());
+        }
+        if super::super::encrypted::require_trust(&initial).is_err() {
+            return Ok(());
+        }
+        let view = self.client.crypto_sync(room, None)?;
+        let mut cached = cache::room(&mut self.client.store, room).map_err(|_| Error::Storage)?;
+        cached.events.retain(|e| {
+            !matches!(
+                e.kind,
+                Operation::MessageSend | Operation::MessageReply | Operation::MessageAction
+            ) || !conversations::subjects(&e.actor)
+                .iter()
+                .any(|a| view.remote.ignored.contains(a))
+        });
+        if self.caught_up.contains(&room) {
+            self.notify(
+                room,
+                &cached
+                    .events
+                    .iter()
+                    .filter(|e| e.sequence > previous)
+                    .cloned()
+                    .collect::<Vec<_>>(),
+            )?;
+        }
+        let cursor = cached
+            .cursor
+            .as_ref()
+            .map(|c| {
+                VerifyingKey::from_bytes(self.client.profile.server.signing_key.as_bytes())
+                    .map_err(|_| Error::Input)
+                    .and_then(|k| {
+                        verify_cursor(&c.0, &k)
+                            .map(|c| c.value().sequence)
+                            .map_err(|_| Error::Input)
+                    })
+            })
+            .transpose()?
+            .unwrap_or(0);
+        let more = self
+            .snapshot
+            .rooms
+            .iter()
+            .find(|s| s.room == room)
+            .is_some_and(|s| cursor < s.sequence);
+        if !more {
+            self.caught_up.insert(room);
+        }
+        let content = super::super::archive::content(&mut self.client.store, &cached.events)
+            .map_err(|_| Error::Storage)?;
+        if let Some(selected) = &mut self.snapshot.selected
+            && selected.summary.room == room
+        {
+            if selected.focus.is_none() {
+                selected.events = cached.events;
+                selected.content = content;
+            }
+            selected.crypto = Some(view);
+            selected.members = current.members;
+            selected.read_sequence = current.read_sequence;
+            selected.has_more = more;
+            selected.stale = false;
+        }
         Ok(())
     }
 }

@@ -109,6 +109,26 @@ pub(super) fn room(store: &mut Store, room: RoomId) -> storage::Result<Cached> {
  let (cursor,members,gap)=meta.unwrap_or_default();Ok(Cached{events,cursor:cursor.map(Blob),members:members.map(|v|decode(&v)).transpose()?.unwrap_or_default(),gap})
 })
 }
+pub(super) fn inspection_failed(
+    store: &mut Store,
+    room: RoomId,
+    error: &super::Error,
+) -> storage::Result<bool> {
+    if !matches!(
+        error,
+        super::Error::Rejected {
+            code: ErrorCode::Denied | ErrorCode::Expired | ErrorCode::ResynchronisationRequired,
+            ..
+        } | super::Error::Refused {
+            code: ErrorCode::Denied | ErrorCode::Expired | ErrorCode::ResynchronisationRequired,
+            ..
+        }
+    ) {
+        return Ok(false);
+    }
+    invalidate(store, room)?;
+    Ok(true)
+}
 pub(super) fn invalidate(store: &mut Store, room: RoomId) -> storage::Result<()> {
     store.write(|db|{db.execute("DELETE FROM client_events WHERE room=?1",[room.to_string()])?;db.execute("UPDATE client_rooms SET cursor=NULL,members=NULL,gap='ResynchronisationRequired' WHERE id=?1",[room.to_string()])?;Ok(Commit::new((),encode(&("HRC.ClientInvalidate",room))?))})
 }
@@ -275,7 +295,10 @@ pub(super) fn save_filters(
             .collect::<rusqlite::Result<Vec<_>>>()?;
         drop(stmt);
         for event in events {
-            if crate::conversations::subjects(&event.actor)
+            if matches!(
+                event.kind,
+                Operation::MessageSend | Operation::MessageReply | Operation::MessageAction
+            ) && crate::conversations::subjects(&event.actor)
                 .iter()
                 .any(|subject| ignored.contains(subject))
             {
