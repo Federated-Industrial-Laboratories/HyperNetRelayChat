@@ -25,6 +25,9 @@ pub fn send(stream: &Stream, frame: &Frame, timeout: Duration) -> Result<(), Err
                 .map_err(|_| Error::Deadline)?,
         )
         .ok_or(Error::Deadline)?;
+    send_before(stream, frame, deadline)
+}
+pub(crate) fn send_before(stream: &Stream, frame: &Frame, deadline: u64) -> Result<(), Error> {
     let bytes = frame.encode().map_err(|_| Error::Frame)?;
     for chunk in bytes.chunks(65536) {
         stream
@@ -43,6 +46,9 @@ pub fn receive(stream: &Stream, timeout: Duration) -> Result<Frame, Error> {
                 .map_err(|_| Error::Deadline)?,
         )
         .ok_or(Error::Deadline)?;
+    receive_before(stream, deadline)
+}
+pub(crate) fn receive_before(stream: &Stream, deadline: u64) -> Result<Frame, Error> {
     let mut header = [0; 5];
     stream
         .recv_exact_before(&mut header, deadline)

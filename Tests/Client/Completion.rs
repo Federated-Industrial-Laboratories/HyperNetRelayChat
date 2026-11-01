@@ -501,3 +501,153 @@ fn shutdown_persists_every_accepted_local_draft_and_closes_admission() {
     );
     assert!(reopened.pending().unwrap().is_empty());
 }
+
+fn read_result(outcome: Outcome) -> Response {
+    let action = action();
+    Response {
+        home: action.home,
+        operation_id: action.operation_id,
+        action_digest: action_digest(&action).unwrap(),
+        outcome,
+    }
+}
+fn temporary_read() -> Response {
+    read_result(Outcome::Refused {
+        code: ErrorCode::Unavailable,
+        detail: "TransportAuthorityExpired".into(),
+        retry_after_ms: Some(250),
+    })
+}
+#[test]
+fn temporary_read_keeps_its_original_deadline_without_restarting_completed_work() {
+    let end = crate::clock::boot_ms().unwrap() + 5000;
+    let mut calls = 0;
+    let expected = action().operation_id;
+    let response = retry_read(
+        end,
+        || false,
+        |passed| {
+            assert_eq!(passed, end);
+            calls += 1;
+            Ok(if calls == 1 {
+                temporary_read()
+            } else {
+                read_result(Outcome::Result { body: Value::Null })
+            })
+        },
+    )
+    .unwrap();
+    assert_eq!(calls, 2);
+    assert_eq!(response.operation_id, expected);
+    assert!(matches!(response.outcome, Outcome::Result { .. }));
+}
+#[test]
+fn read_retry_respects_permanent_outcomes_and_transport_failures() {
+    for outcome in [
+        Outcome::Refused {
+            code: ErrorCode::Denied,
+            detail: "Denied".into(),
+            retry_after_ms: Some(250),
+        },
+        Outcome::Refused {
+            code: ErrorCode::Expired,
+            detail: "Expired".into(),
+            retry_after_ms: Some(250),
+        },
+        Outcome::Rejected {
+            code: ErrorCode::Unavailable,
+            detail: "DurableRejection".into(),
+        },
+    ] {
+        let mut value = Some(outcome);
+        retry_read(
+            crate::clock::boot_ms().unwrap() + 5000,
+            || false,
+            |_| {
+                Ok(read_result(
+                    value.take().expect("permanent outcome retried"),
+                ))
+            },
+        )
+        .unwrap();
+    }
+    let mut calls = 0;
+    let result = retry_read(
+        crate::clock::boot_ms().unwrap() + 5000,
+        || false,
+        |_| {
+            calls += 1;
+            Err(Error::Network(
+                crate::client::network::Error::Authentication,
+            ))
+        },
+    );
+    assert_eq!(calls, 1);
+    assert!(matches!(
+        result,
+        Err(Error::Network(
+            crate::client::network::Error::Authentication
+        ))
+    ));
+}
+#[test]
+fn read_retry_has_a_finite_attempt_count_and_honours_interruption_and_retry_guidance() {
+    let mut calls = 0;
+    let response = retry_read(
+        crate::clock::boot_ms().unwrap() + 5000,
+        || false,
+        |_| {
+            calls += 1;
+            Ok(temporary_read())
+        },
+    )
+    .unwrap();
+    assert_eq!(calls, 5);
+    assert!(matches!(response.outcome, Outcome::Refused { .. }));
+    let interrupted = std::cell::Cell::new(false);
+    let result = retry_read(
+        crate::clock::boot_ms().unwrap() + 5000,
+        || interrupted.get(),
+        |_| {
+            interrupted.set(true);
+            Ok(temporary_read())
+        },
+    );
+    assert!(matches!(result, Err(Error::Offline)));
+    calls = 0;
+    let response = retry_read(
+        crate::clock::boot_ms().unwrap() + 100,
+        || false,
+        |_| {
+            calls += 1;
+            Ok(temporary_read())
+        },
+    )
+    .unwrap();
+    assert_eq!(calls, 1);
+    assert!(matches!(response.outcome, Outcome::Refused { .. }));
+}
+#[test]
+fn a_read_result_after_the_original_deadline_is_not_reported_as_current() {
+    let result = retry_read(
+        crate::clock::boot_ms().unwrap() + 20,
+        || false,
+        |_| {
+            thread::sleep(Duration::from_millis(30));
+            Ok(read_result(Outcome::Result { body: Value::Null }))
+        },
+    );
+    assert!(matches!(
+        result,
+        Err(Error::Network(crate::client::network::Error::Transport))
+    ));
+}
+
+#[test]
+fn current_read_api_refuses_a_mutation_before_preparation_or_outbox_write() {
+    let (_fixture, mut worker, room) = worker();
+    let result =
+        worker.read::<Value, _>(Operation::MessageSend, Target::Room(room), &home::Empty {});
+    assert!(matches!(result, Err(Error::Input)));
+    assert!(worker.client.pending().unwrap().is_empty());
+}
