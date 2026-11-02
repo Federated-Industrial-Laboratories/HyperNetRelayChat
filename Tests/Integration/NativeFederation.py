@@ -56,7 +56,7 @@ def run(configuration, controls, record):
         home.start(); origin.start()
         for name,(flow,_) in peers.items():
             actors[name] = flow.session(name)['acting']
-        origin.outcome(origin.api('Bob',1,{'kind':'account','account':accounts['Bob']},{'nickname':'OriginBob'}))
+        origin.outcome(origin.api('Bob',1,{'kind':'account','id':accounts['Bob']},{'nickname':'OriginBob'}))
         home.stop(); origin.stop()
         home_descriptor, origin_descriptor = home.json_file(descriptors['Home']), home.json_file(descriptors['Origin'])
         keys = {}

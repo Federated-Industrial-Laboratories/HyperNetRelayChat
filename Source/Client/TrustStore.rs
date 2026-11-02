@@ -55,12 +55,10 @@ impl Client {
                 detail: "ContactCapacityExceeded".into(),
             });
         }
-        let mut records:Vec<ContinuityRecord>=self.store.read(Duration::from_secs(1),|db| {
+        let records:Vec<ContinuityRecord>=self.store.read(Duration::from_secs(1),|db| {
             db.prepare("SELECT record FROM client_contact_records WHERE account=?1 ORDER BY number LIMIT 1025")?.query_map([account.to_string()],|r|cache::decode(&r.get::<_,Vec<u8>>(0)?))?.collect()
         }).map_err(|_|Error::Storage)?;
-        let mut after = records.len() as u64;
-        let retained = after;
-        let mut current = None;
+        let retained = records.len();
         let identity_server = self
             .profile
             .identity_server(account.origin)
@@ -69,70 +67,48 @@ impl Client {
         let identity_key = VerifyingKey::from_bytes(identity_server.signing_key.as_bytes())
             .map_err(|_| Error::Configuration)?;
         let mut checkpoint_digest = None;
-        loop {
-            let page: identity::PublicIdentity = self.read_as(
-                Operation::AccountPublicIdentity,
-                Target::Account(account),
-                &identity::PublicIdentityRequest {
-                    room,
-                    after,
-                    limit: 4,
-                    evidence,
-                },
-                grant,
-            )?;
-            if page.identity.account != account || page.identity.home != identity_server.home {
-                return Err(Error::Input);
-            }
-            if account.origin != room.home.network {
-                let bytes = page.origin_checkpoint.as_ref().ok_or(Error::Input)?;
-                let checkpoint = verify_origin_identity_checkpoint(&bytes.0, &identity_key)
-                    .map_err(|_| Error::Input)?;
-                let value = checkpoint.value();
-                if value.origin != identity_server.home
-                    || value.account != account
-                    || cache::encode(&value.state).map_err(|_| Error::Input)?
-                        != cache::encode(&page.identity).map_err(|_| Error::Input)?
-                    || checkpoint_digest.is_some_and(|digest| digest != checkpoint.digest())
-                    || evidence.is_none()
-                        && !self
-                            .profile
-                            .clock
-                            .sample()
-                            .map_err(|_| Error::Clock)?
-                            .permits(value.issued_ms, value.expires_ms)
-                {
+        let (snapshot, records) =
+            read_continuity(records, account, identity_server.home, |after, limit| {
+                let page: identity::PublicIdentity = self.read_as(
+                    Operation::AccountPublicIdentity,
+                    Target::Account(account),
+                    &identity::PublicIdentityRequest {
+                        room,
+                        after,
+                        limit,
+                        evidence,
+                    },
+                    grant,
+                )?;
+                if page.identity.account != account || page.identity.home != identity_server.home {
                     return Err(Error::Input);
                 }
-                checkpoint_digest = Some(checkpoint.digest());
-            } else if page.origin_checkpoint.is_some() {
-                return Err(Error::Input);
-            }
-            if current
-                .as_ref()
-                .is_some_and(|old: &IdentitySnapshot| old.head != page.identity.head)
-            {
-                return Err(Error::Rejected {
-                    code: ErrorCode::Conflict,
-                    detail: "ContactChangedDuringInspection".into(),
-                });
-            }
-            current = Some(page.identity);
-            records.extend(page.continuity.items);
-            if records.len() > 1024 {
-                return Err(Error::Input);
-            }
-            match page.continuity.next {
-                Some(next) => {
-                    let next: u64 = next.parse().map_err(|_| Error::Input)?;
-                    if next <= after {
+                if account.origin != room.home.network {
+                    let bytes = page.origin_checkpoint.as_ref().ok_or(Error::Input)?;
+                    let checkpoint = verify_origin_identity_checkpoint(&bytes.0, &identity_key)
+                        .map_err(|_| Error::Input)?;
+                    let value = checkpoint.value();
+                    if value.origin != identity_server.home
+                        || value.account != account
+                        || cache::encode(&value.state).map_err(|_| Error::Input)?
+                            != cache::encode(&page.identity).map_err(|_| Error::Input)?
+                        || checkpoint_digest.is_some_and(|digest| digest != checkpoint.digest())
+                        || evidence.is_none()
+                            && !self
+                                .profile
+                                .clock
+                                .sample()
+                                .map_err(|_| Error::Clock)?
+                                .permits(value.issued_ms, value.expires_ms)
+                    {
                         return Err(Error::Input);
                     }
-                    after = next;
+                    checkpoint_digest = Some(checkpoint.digest());
+                } else if page.origin_checkpoint.is_some() {
+                    return Err(Error::Input);
                 }
-                None => break,
-            }
-        }
+                Ok(page)
+            })?;
         let associated=self.store.read(Duration::from_secs(1),|db|db.query_row("SELECT EXISTS(SELECT 1 FROM client_contact_rooms WHERE room=?1 AND account=?2)",params![room.to_string(),account.to_string()],|r|r.get::<_,bool>(0))).map_err(|_|Error::Storage)?;
         if !associated {
             self.store
@@ -148,7 +124,6 @@ impl Client {
                 })
                 .map_err(|_| Error::Storage)?;
         }
-        let snapshot = current.ok_or(Error::Input)?;
         let operator = if let AccountClass::Agent { operator } = snapshot.classification {
             if operator == account {
                 return Err(Error::Input);
@@ -223,7 +198,7 @@ impl Client {
             }
             let view=checked.view(state.clone());
             tx.execute("INSERT INTO client_contacts VALUES(?1,?2,?3,?4,?5) ON CONFLICT(account) DO UPDATE SET head=excluded.head",params![account.to_string(),view.anchor.as_bytes(),view.head.as_bytes(),snapshot.legacy_anchor,state==TrustState::Trusted])?;
-            for record in checked.records.iter().skip(retained as usize) {
+            for record in checked.records.iter().skip(retained) {
                 tx.execute("INSERT INTO client_contact_records VALUES(?1,?2,?3)",params![account.to_string(),record.index,cache::encode(record)?])?;
             }
             Ok(Commit::new(view,checked.hashes.last().ok_or(rusqlite::Error::InvalidQuery)?.as_bytes().to_vec()))
@@ -280,6 +255,63 @@ impl Client {
         Ok(CheckedChain { records, hashes })
     }
 }
+/// Continuation cursors name the last returned record, including byte-limited short pages.
+fn read_continuity(
+    mut records: Vec<ContinuityRecord>,
+    account: AccountId,
+    home: ServiceId,
+    mut read: impl FnMut(u64, u16) -> Result<identity::PublicIdentity>,
+) -> Result<(IdentitySnapshot, Vec<ContinuityRecord>)> {
+    const RECORD_LIMIT: usize = 1024;
+    const PAGE_LIMIT: u16 = 4;
+    if records.len() > RECORD_LIMIT {
+        return Err(Error::Input);
+    }
+    let mut after = records.len() as u64;
+    let mut head = None;
+    // Each continuation consumes at least one remaining record. One final empty
+    // page is allowed when the retained chain already matches the current head.
+    for _ in 0..(RECORD_LIMIT - records.len()).max(1) {
+        let page = read(after, PAGE_LIMIT)?;
+        if page.identity.account != account || page.identity.home != home {
+            return Err(Error::Input);
+        }
+        if head.is_some_and(|old| old != page.identity.head) {
+            return Err(Error::Rejected {
+                code: ErrorCode::Conflict,
+                detail: "ContactChangedDuringInspection".into(),
+            });
+        }
+        head = Some(page.identity.head);
+        let items = page.continuity.items;
+        if items.len() > usize::from(PAGE_LIMIT)
+            || records.len() + items.len() > RECORD_LIMIT
+            || items
+                .iter()
+                .enumerate()
+                .any(|(offset, record)| record.index != after + offset as u64 + 1)
+        {
+            return Err(Error::Input);
+        }
+        let end = after + items.len() as u64;
+        if let Some(next) = page.continuity.next {
+            let next: u64 = next.parse().map_err(|_| Error::Input)?;
+            if items.is_empty() || next != end || end >= RECORD_LIMIT as u64 {
+                return Err(Error::Input);
+            }
+        } else {
+            records.extend(items);
+            return Ok((page.identity, records));
+        }
+        records.extend(items);
+        after = end;
+    }
+    Err(Error::Input)
+}
+
+#[cfg(test)]
+#[path = "../../Tests/Client/ContinuityPages.rs"]
+mod pagination_tests;
 pub(super) fn trust_required() -> Error {
     Error::Rejected {
         code: ErrorCode::Denied,
