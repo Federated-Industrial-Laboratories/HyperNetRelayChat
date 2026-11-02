@@ -22,6 +22,19 @@ pub struct CryptoView {
     pub contacts: Vec<trust::ContactTrust>,
     pub future_only: bool,
 }
+impl CryptoView {
+    pub(super) fn history_visible(&self, event: &Event) -> bool {
+        event.room == self.remote.room
+            && event.timestamp_ms >= self.remote.history_from_ms
+            && event.timestamp_ms <= self.remote.history_until_ms
+            && (!matches!(
+                event.kind,
+                Operation::MessageSend | Operation::MessageReply | Operation::MessageAction
+            ) || !crate::conversations::subjects(&event.actor)
+                .iter()
+                .any(|account| self.remote.ignored.contains(account)))
+    }
+}
 // Independently bounded objects avoid coupling a maximum filter list to the
 // recursive-node cost of an unrelated maximum contact list.
 #[derive(Serialize, Deserialize)]

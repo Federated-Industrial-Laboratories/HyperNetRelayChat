@@ -170,6 +170,18 @@ fn private_group_requires_invitation_orders_mls_and_blocks_stale_recipient_keys(
     let first = inspect(&mut home, &alice, room);
     assert!(first.send_barrier);
     ready(&mut home, &alice, room, &first, None);
+    let history = |cursor| {
+        action(
+            &alice,
+            Operation::CryptoHistory,
+            Target::Room(room),
+            &messaging::Page { cursor, limit: 16 },
+        )
+    };
+    let Outcome::Result { body } = run(&mut home, &alice, &history(None)) else {
+        panic!("initial encrypted history")
+    };
+    let before: messaging::PageResult = body.deserialized().unwrap();
     let package = b.device.publish_key_package(&mut b.store, room).unwrap();
     committed(run(
         &mut home,
@@ -234,6 +246,21 @@ fn private_group_requires_invitation_orders_mls_and_blocks_stale_recipient_keys(
     );
     let winner = committed(run(&mut home, &alice, &selected));
     assert_eq!(committed(run(&mut home, &alice, &selected)), winner);
+    assert!(matches!(
+        run(&mut home, &alice, &history(Some(before.cursor))),
+        Outcome::Rejected { code: ErrorCode::ResynchronisationRequired, detail }
+            if detail == "CursorContext"
+    ));
+    let Outcome::Result { body } = run(&mut home, &alice, &history(None)) else {
+        panic!("current encrypted history")
+    };
+    let resumed: messaging::PageResult = body.deserialized().unwrap();
+    assert!(
+        resumed
+            .events
+            .iter()
+            .any(|event| Some(event.event) == winner)
+    );
     let epoch = inspect(&mut home, &alice, room);
     assert_eq!(epoch.epoch, 1);
     assert!(epoch.send_barrier);

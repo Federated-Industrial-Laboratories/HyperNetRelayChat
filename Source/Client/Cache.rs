@@ -121,14 +121,38 @@ pub(super) fn room(store: &mut Store, room: RoomId) -> storage::Result<Cached> {
 }
 pub(super) fn inspection_failed(
     store: &mut Store,
+    operation: Operation,
     room: RoomId,
     error: &super::Error,
 ) -> storage::Result<bool> {
+    // A history cursor can expire or lose its room revision while access remains
+    // valid. Deleting encrypted events would also erase unrecoverable plaintext.
+    if operation == Operation::CryptoHistory && cursor_context_changed(error) {
+        return Ok(false);
+    }
     if !access_unavailable(error) {
         return Ok(false);
     }
     invalidate(store, room)?;
     Ok(true)
+}
+pub(super) fn cursor_context_changed(error: &super::Error) -> bool {
+    matches!(error,
+        super::Error::Rejected { code: ErrorCode::ResynchronisationRequired, detail }
+        | super::Error::Refused { code: ErrorCode::ResynchronisationRequired, detail, .. }
+        if detail == "CursorContext")
+}
+pub(super) fn restart_cursor(store: &mut Store, room: RoomId) -> storage::Result<()> {
+    store.write(|db| {
+        db.execute(
+            "UPDATE client_rooms SET cursor=NULL WHERE id=?1",
+            [room.to_string()],
+        )?;
+        Ok(Commit::new(
+            (),
+            encode(&("HRC.ClientHistoryRestart", room))?,
+        ))
+    })
 }
 pub(super) fn access_unavailable(error: &super::Error) -> bool {
     matches!(
