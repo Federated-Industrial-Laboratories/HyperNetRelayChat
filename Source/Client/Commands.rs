@@ -31,6 +31,7 @@ impl Worker {
                 mentions,
             } => {
                 self.client.save_draft_mentions(room, &text, &mentions)?;
+                self.draft_saved(room);
                 if let Some(v) = &mut self.snapshot.selected
                     && v.summary.room == room
                 {
@@ -303,14 +304,7 @@ impl Worker {
             parent,
             causation,
         } = message;
-        self.client.save_draft_mentions(room, &text, &mentions)?;
-        if let Some(v) = &mut self.snapshot.selected
-            && v.summary.room == room
-        {
-            v.draft = text.clone();
-            v.draft_mentions = mentions.clone();
-        }
-        self.publish();
+        let owns_draft = self.preserve_send_draft(room, &text, &mentions)?;
         if grant
             .as_ref()
             .is_some_and(|g| g.scope.mode == delegation::Mode::Draft)
@@ -365,6 +359,10 @@ impl Worker {
         {
             let approval = Id::random().map_err(|_| Error::Input)?;
             action.approval = Some(approval);
+            if owns_draft {
+                super::super::outbox::bind_draft(&mut self.client.store, &action)
+                    .map_err(|_| Error::Storage)?;
+            }
             let bytes = self.client.sign(&action)?;
             let now = self
                 .client
@@ -403,6 +401,10 @@ impl Worker {
         }
         self.operation = Some(operation);
         self.delivery_room = Some(room);
+        if owns_draft {
+            super::super::outbox::bind_draft(&mut self.client.store, &action)
+                .map_err(|_| Error::Storage)?;
+        }
         self.remember(&action)?;
         let response = self.client.execute(&action)?;
         self.response(response)?;
@@ -456,7 +458,9 @@ impl Worker {
             Outcome::Result { body } => body.deserialized().map_err(|_| Error::Input)?,
             outcome => return Err(Error::from_outcome(outcome)),
         };
-        view.events.extend(page.events);
+        view.events.extend(page.events.into_iter().filter(|event| {
+            !cache::filtered(&self.snapshot.inspection.filters, &event.actor, false)
+        }));
         if view.events.len() > 256 {
             view.events.drain(..view.events.len() - 256);
         }

@@ -505,7 +505,7 @@ fn old_draft_schema_migrates_without_changing_text_or_recreating_state() {
     outbox::save_draft(&mut store, room, "preserved").unwrap();
     store
         .write(|db| {
-            db.execute_batch("ALTER TABLE client_drafts DROP COLUMN mentions")?;
+            db.execute_batch("ALTER TABLE client_drafts DROP COLUMN sending; ALTER TABLE client_drafts DROP COLUMN mentions")?;
             Ok(storage::Commit::new((), b"old schema fixture".to_vec()))
         })
         .unwrap();
@@ -515,6 +515,36 @@ fn old_draft_schema_migrates_without_changing_text_or_recreating_state() {
         Some("preserved")
     );
     assert!(outbox::draft_mentions(&mut store, room).unwrap().is_empty());
+    let before = store.usage().unwrap().commit_counter;
+    outbox::migrate(&mut store).unwrap();
+    assert_eq!(store.usage().unwrap().commit_counter, before);
+}
+
+#[test]
+fn existing_mention_drafts_migrate_without_claiming_ownership_for_old_outbox_actions() {
+    let f = Fixture::new();
+    let mut store = f.create();
+    let action = action();
+    let Target::Room(room) = action.target else {
+        unreachable!()
+    };
+    let message: crate::messaging::Send = action.body.deserialized().unwrap();
+    outbox::save_draft_mentions(&mut store, room, &message.text, &message.mentions).unwrap();
+    store
+        .write(|db| {
+            db.execute_batch("ALTER TABLE client_drafts DROP COLUMN sending")?;
+            Ok(storage::Commit::new(
+                (),
+                b"previous mention draft schema".to_vec(),
+            ))
+        })
+        .unwrap();
+    outbox::migrate(&mut store).unwrap();
+    assert!(!outbox::clear_sent_draft(&mut store, &action).unwrap());
+    assert_eq!(
+        outbox::draft(&mut store, room).unwrap().as_deref(),
+        Some(message.text.as_str())
+    );
     let before = store.usage().unwrap().commit_counter;
     outbox::migrate(&mut store).unwrap();
     assert_eq!(store.usage().unwrap().commit_counter, before);

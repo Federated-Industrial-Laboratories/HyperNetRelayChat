@@ -411,7 +411,15 @@ fn reserved_disconnect_releases_one_held_request_without_starting_it() {
             && matches!(v.connection, ConnectionState::Backoff { .. })
     });
     let request = controller
-        .dispatch(Command::SetNickname("Bób界".into()))
+        .dispatch(Command::Send {
+            room,
+            text: "older send held for reconnect".into(),
+            mentions: vec![],
+            parent: None,
+            causation: None,
+            action: false,
+            grant: None,
+        })
         .unwrap();
     let waiting = wait(&|v| {
         v.status.as_ref().is_some_and(|s| {
@@ -679,4 +687,243 @@ fn current_read_api_refuses_a_mutation_before_preparation_or_outbox_write() {
         worker.read::<Value, _>(Operation::MessageSend, Target::Room(room), &home::Empty {});
     assert!(matches!(result, Err(Error::Input)));
     assert!(worker.client.pending().unwrap().is_empty());
+}
+
+#[test]
+fn acknowledged_newer_draft_survives_older_send_commit_or_refusal_and_reopen() {
+    for committed_send in [false, true] {
+        for newer in ["newer saved draft", ""] {
+            let (fixture, mut worker, room) = worker();
+            let action = action();
+            let message: messaging::Send = action.body.deserialized().unwrap();
+            worker
+                .shared
+                .queue
+                .lock()
+                .unwrap()
+                .draft_sends
+                .insert(1, (room, false));
+            worker.run_command(Queued::new(
+                2,
+                Command::SaveDraft {
+                    room,
+                    text: newer.into(),
+                    mentions: vec![],
+                },
+            ));
+            assert!(worker.snapshot.completions.last().unwrap().error.is_none());
+            worker.request = Some(1);
+            assert!(
+                !worker
+                    .preserve_send_draft(room, &message.text, &message.mentions)
+                    .unwrap()
+            );
+            let result = outcome(
+                &mut worker,
+                &action,
+                if committed_send {
+                    committed()
+                } else {
+                    Outcome::Rejected {
+                        code: ErrorCode::Denied,
+                        detail: "CurrentMembership".into(),
+                    }
+                },
+            );
+            assert_eq!(result.is_ok(), committed_send);
+            if result.is_ok() {
+                worker.clear_matching_draft(&action).unwrap();
+            }
+            assert_eq!(worker.snapshot.selected.as_ref().unwrap().draft, newer);
+            assert!(worker.client.pending().unwrap().is_empty());
+            drop(worker);
+            let mut reopened = Client::open_offline(&fixture.root).unwrap();
+            assert_eq!(reopened.draft(room).unwrap().unwrap_or_default(), newer);
+        }
+    }
+}
+
+#[test]
+fn ordinary_send_owns_only_its_saved_revision_even_when_newer_text_is_identical() {
+    for later_save in [false, true] {
+        let (fixture, mut worker, room) = worker();
+        let action = action();
+        let message: messaging::Send = action.body.deserialized().unwrap();
+        worker
+            .client
+            .save_draft(room, "previous unfinished text")
+            .unwrap();
+        assert!(
+            worker
+                .preserve_send_draft(room, &message.text, &message.mentions)
+                .unwrap()
+        );
+        super::super::outbox::bind_draft(&mut worker.client.store, &action).unwrap();
+        if later_save {
+            worker.run_command(Queued::new(
+                78,
+                Command::SaveDraft {
+                    room,
+                    text: message.text.clone(),
+                    mentions: message.mentions.clone(),
+                },
+            ));
+        }
+        outcome(&mut worker, &action, committed()).unwrap();
+        drop(worker);
+        // The exact draft/operation association, including its invalidation by a
+        // same-text edit, must survive reopening before uncertain-send resolution.
+        let mut reopened = Client::open_offline(&fixture.root).unwrap();
+        assert_eq!(
+            super::super::outbox::clear_sent_draft(&mut reopened.store, &action).unwrap(),
+            !later_save
+        );
+        assert_eq!(
+            reopened.draft(room).unwrap(),
+            later_save.then_some(message.text)
+        );
+        assert!(reopened.pending().unwrap().is_empty());
+    }
+}
+
+fn received_event(local: u8) -> Event {
+    let mut action = action();
+    let mut acting = action.actor.acting().clone();
+    acting.account.local = Id::from_bytes([local; 32]);
+    action.actor = Actor::Direct { acting };
+    let Target::Room(room) = action.target else {
+        unreachable!()
+    };
+    Event {
+        home: action.home,
+        room,
+        event: Id::from_bytes([local; 32]),
+        sequence: u64::from(local),
+        timestamp_ms: 0,
+        action_digest: action_digest(&action).unwrap(),
+        actor: action.actor,
+        operation_id: action.operation_id,
+        kind: Operation::MessageSend,
+        body: action.body,
+    }
+}
+fn received_search(room: RoomId, events: Vec<Event>) -> SearchView {
+    SearchView {
+        room,
+        query: messaging::Search {
+            terms: vec!["draft".into()],
+            sender: None,
+            represented: None,
+            from_ms: None,
+            until_ms: None,
+            cursor: Some(Blob(vec![1])),
+            limit: 16,
+        },
+        events,
+        has_more: true,
+        running: false,
+        cancelled: false,
+    }
+}
+
+#[test]
+fn current_ignore_refilters_live_search_focus_and_queued_notifications_before_later_read_failure() {
+    for focused in [false, true] {
+        let (_fixture, mut worker, room) = worker();
+        let mut ignored = received_event(50);
+        let kept = received_event(51);
+        let operator = received_event(52).actor.represented();
+        ignored.actor = Actor::Delegated {
+            acting: ignored.actor.acting().clone(),
+            operator,
+            represented: received_event(53).actor.represented(),
+            represented_security_generation: 1,
+            grant: GrantRef {
+                id: Id::from_bytes([54; 32]),
+                generation: 1,
+            },
+        };
+        let view = worker.snapshot.selected.as_mut().unwrap();
+        view.events = vec![ignored.clone(), kept.clone()];
+        view.focus = focused.then_some(ignored.event);
+        worker.snapshot.search = Some(received_search(room, vec![ignored.clone(), kept.clone()]));
+        worker.notify(room, &[ignored, kept.clone()]).unwrap();
+        assert_eq!(worker.snapshot.notifications.len(), 2);
+        worker
+            .install_filters(vec![moderation::FilterState {
+                subject: operator,
+                ignored: true,
+                muted: false,
+            }])
+            .unwrap();
+        // The filter is published even before a subsequent inspection can fail.
+        let published = Arc::clone(&worker.shared.snapshot.lock().unwrap());
+        assert_eq!(published.search.as_ref().unwrap().events.len(), 1);
+        assert_eq!(published.notifications.len(), 1);
+        worker.finish_view(Err(unavailable()));
+        worker.publish();
+        let view = worker.snapshot.selected.as_ref().unwrap();
+        assert!(view.focus.is_none());
+        assert_eq!(view.events.len(), usize::from(!focused));
+        let search = worker.snapshot.search.as_ref().unwrap();
+        assert_eq!(search.events[0].event, kept.event);
+        assert!(!search.has_more && search.query.cursor.is_none());
+        assert_eq!(worker.snapshot.notifications[0].event, kept.event);
+    }
+}
+
+#[test]
+fn current_mute_cancels_queued_notifications_without_hiding_history() {
+    let (_fixture, mut worker, room) = worker();
+    let event = received_event(50);
+    worker.snapshot.selected.as_mut().unwrap().events = vec![event.clone()];
+    worker.snapshot.search = Some(received_search(room, vec![event.clone()]));
+    worker.notify(room, std::slice::from_ref(&event)).unwrap();
+    assert_eq!(worker.snapshot.notifications.len(), 1);
+    worker
+        .install_filters(vec![moderation::FilterState {
+            subject: event.actor.represented(),
+            ignored: false,
+            muted: true,
+        }])
+        .unwrap();
+    assert!(worker.snapshot.notifications.is_empty());
+    assert_eq!(worker.snapshot.selected.as_ref().unwrap().events.len(), 1);
+    assert_eq!(worker.snapshot.search.as_ref().unwrap().events.len(), 1);
+}
+
+#[test]
+fn denied_focused_history_discards_old_context_but_transient_failure_preserves_it() {
+    let (_fixture, mut worker, room) = worker();
+    let event = received_event(50);
+    let view = worker.snapshot.selected.as_mut().unwrap();
+    view.events = vec![event.clone()];
+    view.focus = Some(event.event);
+    worker.snapshot.search = Some(received_search(room, vec![event.clone()]));
+    worker.notify(room, std::slice::from_ref(&event)).unwrap();
+    assert!(
+        worker
+            .context_result(room, event.event, Err(unavailable()))
+            .is_err()
+    );
+    assert_eq!(worker.snapshot.selected.as_ref().unwrap().events.len(), 1);
+    let denied = Error::Rejected {
+        code: ErrorCode::Denied,
+        detail: "CurrentHistoryAccess".into(),
+    };
+    assert!(
+        worker
+            .context_result(room, event.event, Err(denied))
+            .is_err()
+    );
+    let published = Arc::clone(&worker.shared.snapshot.lock().unwrap());
+    let view = published.selected.as_ref().unwrap();
+    assert!(view.events.is_empty() && view.focus.is_none() && view.stale && view.gap.is_some());
+    assert!(published.search.is_none() && published.notifications.is_empty());
+    assert!(
+        cache::room(&mut worker.client.store, room)
+            .unwrap()
+            .gap
+            .is_some()
+    );
 }

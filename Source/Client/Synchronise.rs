@@ -112,14 +112,46 @@ impl Worker {
     pub(super) fn inspect(&mut self) -> Result<()> {
         self.snapshot.inspection.stale = true;
         let target = Target::Account(self.snapshot.account);
-        self.snapshot.inspection.filters =
-            self.pages(Operation::ModerationFilters, target.clone())?;
-        cache::save_filters(&mut self.client.store, &self.snapshot.inspection.filters)
-            .map_err(|_| Error::Storage)?;
+        let filters = self.pages(Operation::ModerationFilters, target.clone())?;
+        self.install_filters(filters)?;
         self.snapshot.inspection.grants = self.pages(Operation::DelegationList, target.clone())?;
         self.snapshot.inspection.agents = self.pages(Operation::AgentList, target)?;
         self.snapshot.inspection.stale = false;
         Ok(())
+    }
+    pub(super) fn install_filters(&mut self, filters: Vec<moderation::FilterState>) -> Result<()> {
+        self.snapshot.inspection.filters = filters;
+        let filters = &self.snapshot.inspection.filters;
+        if let Some(view) = &mut self.snapshot.selected {
+            view.events
+                .retain(|event| !cache::filtered(filters, &event.actor, false));
+            if view
+                .focus
+                .is_some_and(|focus| !view.events.iter().any(|event| event.event == focus))
+            {
+                view.focus = None;
+                view.events.clear();
+                view.stale = true;
+                view.has_more = false;
+            }
+        }
+        if let Some(view) = &mut self.snapshot.search {
+            let previous = view.events.len();
+            view.events
+                .retain(|event| !cache::filtered(filters, &event.actor, false));
+            if previous != view.events.len() {
+                view.has_more = false;
+                view.query.cursor = None;
+            }
+        }
+        self.snapshot
+            .notifications
+            .retain(|notification| !cache::filtered(filters, &notification.actor, true));
+        // Current filters take effect before any fallible cache write or later
+        // inspection read; an old snapshot must not remain visible during either.
+        self.publish();
+        cache::save_filters(&mut self.client.store, &self.snapshot.inspection.filters)
+            .map_err(|_| Error::Storage)
     }
     pub(super) fn select(&mut self, room: RoomId) -> Result<()> {
         let summary = self
@@ -134,7 +166,13 @@ impl Worker {
             focus: None,
             summary,
             members: cached.members,
-            events: cached.events,
+            events: cached
+                .events
+                .into_iter()
+                .filter(|event| {
+                    !cache::filtered(&self.snapshot.inspection.filters, &event.actor, false)
+                })
+                .collect(),
             draft: self.client.draft(room)?.unwrap_or_default(),
             draft_mentions: self.client.draft_mentions(room)?,
             stale: true,
@@ -266,7 +304,13 @@ impl Worker {
             && view.summary.room == room
         {
             if view.focus.is_none() {
-                view.events = cached.events;
+                view.events = cached
+                    .events
+                    .into_iter()
+                    .filter(|event| {
+                        !cache::filtered(&self.snapshot.inspection.filters, &event.actor, false)
+                    })
+                    .collect();
             }
             view.members = page.members;
             view.stale = false;
@@ -293,10 +337,7 @@ impl Worker {
             {
                 continue;
             }
-            if self.snapshot.inspection.filters.iter().any(|f| {
-                (f.ignored || f.muted)
-                    && crate::conversations::subjects(&event.actor).contains(&f.subject)
-            }) {
+            if cache::filtered(&self.snapshot.inspection.filters, &event.actor, true) {
                 continue;
             }
             let body: messaging::Send = event.body.deserialized().map_err(|_| Error::Input)?;
@@ -314,6 +355,7 @@ impl Worker {
                 event: event.event,
                 sound: self.snapshot.preferences.sound && prefs.sound,
                 mention,
+                actor: event.actor.clone(),
             });
             if self.snapshot.notifications.len() > 64 {
                 self.snapshot.notifications.remove(0);
@@ -325,11 +367,52 @@ impl Worker {
 
 impl Worker {
     pub(super) fn open_event(&mut self, room: RoomId, event: Id) -> Result<()> {
-        let context: messaging::ContextResult = self.read(
+        let result = self.read(
             Operation::HistoryContext,
             Target::Room(room),
             &messaging::Context { event },
-        )?;
+        );
+        self.context_result(room, event, result)
+    }
+    pub(super) fn context_result(
+        &mut self,
+        room: RoomId,
+        event: Id,
+        result: Result<messaging::ContextResult>,
+    ) -> Result<()> {
+        let context = match result {
+            Ok(context) => context,
+            Err(error) => {
+                if cache::access_unavailable(&error) {
+                    if let Some(view) = &mut self.snapshot.selected
+                        && view.summary.room == room
+                        && view.focus == Some(event)
+                    {
+                        view.events.clear();
+                        view.members.clear();
+                        view.focus = None;
+                        view.stale = true;
+                        view.has_more = false;
+                        view.gap = Some("CurrentHistoryAccessUnavailable".into());
+                    }
+                    if self
+                        .snapshot
+                        .search
+                        .as_ref()
+                        .is_some_and(|view| view.room == room)
+                    {
+                        self.snapshot.search = None;
+                    }
+                    self.snapshot
+                        .notifications
+                        .retain(|notification| notification.room != room);
+                    self.caught_up.remove(&room);
+                    self.publish();
+                    cache::invalidate(&mut self.client.store, room).map_err(|_| Error::Storage)?;
+                }
+                return Err(error);
+            }
+        };
         if !context
             .events
             .iter()
@@ -347,11 +430,21 @@ impl Worker {
             self.select(room)?;
         }
         let view = self.snapshot.selected.as_mut().ok_or(Error::Input)?;
-        view.events = context.events;
+        view.events = context
+            .events
+            .into_iter()
+            .filter(|event| {
+                !cache::filtered(&self.snapshot.inspection.filters, &event.actor, false)
+            })
+            .collect();
         view.members = context.members;
         view.summary.revision = context.room_revision;
-        view.focus = Some(event);
-        view.stale = false;
+        view.focus = view
+            .events
+            .iter()
+            .any(|entry| entry.event == event)
+            .then_some(event);
+        view.stale = view.focus.is_none();
         view.gap = None;
         view.has_more = false;
         Ok(())
