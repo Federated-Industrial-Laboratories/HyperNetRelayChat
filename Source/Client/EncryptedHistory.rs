@@ -193,7 +193,7 @@ impl Client {
                     event.kind,
                     Operation::CryptoPropose | Operation::CryptoCommit | Operation::CryptoRecover
                 ) {
-                    self.receive_transition(event, grant)?;
+                    self.receive_transition(event, grant, &device)?;
                 } else if matches!(
                     event.kind,
                     Operation::MessageSend | Operation::MessageReply | Operation::MessageAction
@@ -316,15 +316,13 @@ impl Client {
         &mut self,
         event: &Event,
         grant: Option<&delegation::Grant>,
+        device: &crypto::Device,
     ) -> Result<()> {
         let transition: domain::TransitionEvent =
             event.body.deserialized().map_err(|_| Error::Input)?;
         if digest(&transition.commit.0) != transition.commit_digest {
             return Err(Error::Input);
         }
-        self.check_members_contacts(event.room, &transition.members, grant, event.event)?;
-        let roster = self.trusted_roster(event.room, &transition.members, false)?;
-        let device = self.crypto_device()?;
         let exists = self
             .store
             .read(Duration::from_secs(1), |db| {
@@ -341,9 +339,14 @@ impl Client {
         let state = device
             .state(&mut self.store, transition.group)
             .map_err(failure)?;
+        // The verified Welcome or prior transition already establishes this position.
+        // Superseded rosters cannot advance MLS and may contain contacts that a
+        // future-only endpoint never trusted. New transitions still need full trust.
         if event.sequence <= state.cursor {
             return Ok(());
         }
+        self.check_members_contacts(event.room, &transition.members, grant, event.event)?;
+        let roster = self.trusted_roster(event.room, &transition.members, false)?;
         if let Some(epoch) = transition.previous_epoch {
             if transition.epoch != epoch + 1 {
                 return Err(Error::Input);
@@ -474,6 +477,10 @@ impl Client {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "../../Tests/Client/EncryptedTransitions.rs"]
+mod tests;
 
 pub(super) fn epoch_in(
     tx: &rusqlite::Transaction<'_>,
