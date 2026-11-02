@@ -86,7 +86,6 @@ impl Error {
         use network::Error as Network;
         match self {
             Self::Clock | Self::Unknown => Some(0),
-            Self::Network(error) if error.retryable_session() => Some(0),
             Self::Refused {
                 code: ErrorCode::Unavailable | ErrorCode::RateLimited | ErrorCode::Overloaded,
                 retry_after_ms,
@@ -97,6 +96,7 @@ impl Error {
                 retry_after_ms,
                 ..
             }) => Some(retry_after_ms.unwrap_or(1000).min(60000)),
+            Self::Network(error) if error.retryable_session() => Some(0),
             _ => None,
         }
     }

@@ -72,7 +72,15 @@ impl Run {
         };
         thread::sleep(Duration::from_secs(2));
         ensure(Instant::now() < deadline, "StepDeadline")?;
-        let value = f(deadline)
+        let started = Instant::now();
+        let result = f(deadline);
+        eprintln!(
+            "{}",
+            json!({"case":"FederationStep", "step":self.steps, "principal":principal,
+                "operation":operation, "elapsedMs":started.elapsed().as_millis(),
+                "returnedOk":result.is_ok()})
+        );
+        let value = result
             .map_err(|code| format!("principal={principal} operation={operation} status={code}"))?;
         ensure(Instant::now() < deadline, "StepDeadline")?;
         self.steps += 1;
@@ -118,7 +126,20 @@ fn ensure(ok: bool, code: &str) -> Result<()> {
     if ok { Ok(()) } else { Err(code.into()) }
 }
 fn net<T>(result: client::Result<T>) -> Result<T> {
-    result.map_err(|e| e.code().into())
+    result.map_err(|e| match e {
+        client::Error::Refused {
+            code,
+            detail,
+            retry_after_ms,
+        }
+        | client::Error::Network(client::network::Error::ForwardRefused {
+            code,
+            detail,
+            retry_after_ms,
+        }) => format!("Refused:{code:?}:{detail:?}:retryMs={retry_after_ms:?}"),
+        client::Error::Rejected { code, detail } => format!("Rejected:{code:?}:{detail:?}"),
+        _ => e.code().into(),
+    })
 }
 fn retry_delay(error: &client::Error) -> Option<u64> {
     match error {
