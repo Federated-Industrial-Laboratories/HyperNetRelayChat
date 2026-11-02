@@ -6,6 +6,7 @@ import { resolve, relative, isAbsolute } from 'node:path';
 import { createRequire } from 'node:module';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createHash } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 
 const [mdsDirectory, destination, ...extra] = process.argv.slice(2);
 if (!mdsDirectory || !destination || extra.length) {
@@ -23,6 +24,21 @@ const require = createRequire(pathToFileURL(packageFile));
 const { snapshot, build, check } = await import(pathToFileURL(require.resolve('@metalheart/mds')));
 const config = JSON.parse(await readFile(new URL('mds.config.json', import.meta.url), 'utf8'));
 const repository = fileURLToPath(new URL('../../', import.meta.url));
+if (!config.source.revision) {
+  const tag = config.source.tag;
+  if (typeof tag !== 'string' || tag !== `v${config.site.version}`) {
+    throw new Error('Select a full source revision or the exact product version tag.');
+  }
+  const reference = `refs/tags/${tag}`;
+  const git = args => execFileSync('git', ['--no-optional-locks', '-C', repository, ...args], {
+    encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 4096,
+  }).trim();
+  git(['check-ref-format', reference]);
+  config.source.revision = git(['rev-parse', '--verify', '--end-of-options', `${reference}^{commit}`]);
+  if (!/^[a-f0-9]{40}$/.test(config.source.revision)) {
+    throw new Error('The release tag must resolve to one full Git commit.');
+  }
+}
 const workspace = resolve(destination);
 const withinRepository = relative(repository, workspace);
 if (!withinRepository || (!withinRepository.startsWith('../') && !isAbsolute(withinRepository))) {

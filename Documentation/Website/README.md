@@ -86,9 +86,13 @@ the existing MDS runtime.
 
 1. Complete HRC qualification and update its authoritative status, compatibility,
    capacity and package instructions. Commit those manuals with the release work.
-2. Change the configuration's exact source revision and product version. Update
-   the footer's source reference, navigation and publication edits as needed.
-   Add a source tag only if it resolves to that exact documentation commit.
+2. Set the product version and source tag, for example `0.1.0` and `v0.1.0`.
+   Remove the development source revision. Commit the final configuration and
+   manuals before creating the release tag. The builder resolves that explicit
+   tag to a full commit before exporting; a missing tag fails without using HEAD.
+   The exported configuration and manifest retain both the full commit and tag.
+   A supplied source revision must match its tag. Update the footer, navigation
+   and publication edits as needed.
 3. Rebuild in the same output workspace. Check every new or changed procedure,
    technical search, keyboard navigation and narrow-screen reading.
 4. Once the selected source is qualified, set the intended channel and indexing
