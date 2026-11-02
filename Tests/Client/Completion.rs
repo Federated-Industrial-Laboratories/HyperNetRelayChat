@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Keep durable effect outcomes separate from subsequent view and connection failures.
+#[path = "SessionReuse.rs"]
+mod session_reuse;
 use super::*;
 use crate::{
     client::tests::{Fixture, action},

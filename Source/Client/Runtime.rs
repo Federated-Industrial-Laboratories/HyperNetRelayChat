@@ -81,6 +81,17 @@ impl Error {
             _ => Self::Unknown,
         }
     }
+    /// A verified temporary origin refusal leaves the existing session synchronized.
+    /// This permits bounded recovery, not stale authority or a replacement operation.
+    pub fn can_reuse_session(&self) -> bool {
+        matches!(
+            self,
+            Self::Network(network::Error::ForwardRefused {
+                code: ErrorCode::Unavailable | ErrorCode::RateLimited | ErrorCode::Overloaded,
+                ..
+            })
+        )
+    }
     /// Reconnection may resolve exact retained effects; it never creates a replacement action.
     pub(crate) fn retry_delay_ms(&self) -> Option<u64> {
         use network::Error as Network;

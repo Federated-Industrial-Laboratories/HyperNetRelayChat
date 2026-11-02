@@ -443,12 +443,19 @@ impl Worker {
         self.delivery_room = None;
     }
     fn tick(&mut self) {
-        if self.desired && self.client.session().is_err() && Instant::now() >= self.retry {
+        if self.desired
+            && (self.client.session().is_err()
+                || matches!(self.snapshot.connection, ConnectionState::Backoff { .. }))
+            && Instant::now() >= self.retry
+        {
             if let Err(error) = self.connect() {
                 self.error(error);
             }
             self.publish();
-        } else if self.client.session().is_ok() && self.poll.elapsed() >= Duration::from_secs(5) {
+        } else if !matches!(self.snapshot.connection, ConnectionState::Backoff { .. })
+            && self.client.session().is_ok()
+            && self.poll.elapsed() >= Duration::from_secs(5)
+        {
             self.poll = Instant::now();
             if let Err(error) = self.refresh() {
                 self.error(error);
@@ -599,10 +606,12 @@ impl Worker {
         });
         let retry = e.retry_delay_ms();
         if retry.is_some() || matches!(e, Error::Network(_) | Error::Refused { .. }) {
-            self.client.disconnect();
+            if !e.can_reuse_session() {
+                self.client.disconnect();
+                *self.shared.stream.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            }
             self.stale();
             self.caught_up.clear();
-            *self.shared.stream.lock().unwrap_or_else(|e| e.into_inner()) = None;
             if retry.is_none() {
                 self.desired = false;
                 self.snapshot.connection = ConnectionState::Offline;
@@ -627,10 +636,17 @@ impl Worker {
         }
     }
     fn connect(&mut self) -> Result<()> {
+        let reuse = matches!(self.snapshot.connection, ConnectionState::Backoff { .. })
+            && self.client.session().is_ok();
         self.desired = true;
-        self.snapshot.connection = ConnectionState::Connecting;
-        self.publish();
-        self.client.connect()?;
+        if reuse && Instant::now() < self.retry {
+            return Ok(());
+        }
+        if !reuse {
+            self.snapshot.connection = ConnectionState::Connecting;
+            self.publish();
+            self.client.connect()?;
+        }
         *self.shared.stream.lock().unwrap_or_else(|e| e.into_inner()) =
             Some(self.client.session()?.stream_handle());
         self.snapshot.connection = ConnectionState::Resolving;

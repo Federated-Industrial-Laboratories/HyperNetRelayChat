@@ -47,6 +47,24 @@ struct Observation {
     principal: &'static str,
     operation: &'static str,
     deadline: Instant,
+    phase: &'static str,
+    attempt: u32,
+    last_failure: Option<String>,
+    effect: Option<&'static str>,
+}
+fn observe_retry(
+    observation: &Mutex<Observation>,
+    phase: &'static str,
+    attempt: u32,
+    failure: Option<String>,
+) -> Result<()> {
+    let mut state = observation.lock().map_err(|_| "ObservationUnavailable")?;
+    state.phase = phase;
+    state.attempt = attempt;
+    if let Some(failure) = failure {
+        state.last_failure = Some(failure.chars().take(256).collect());
+    }
+    Ok(())
 }
 struct Run {
     end: Instant,
@@ -69,6 +87,10 @@ impl Run {
             principal,
             operation,
             deadline,
+            phase: "Start",
+            attempt: 0,
+            last_failure: None,
+            effect: None,
         };
         thread::sleep(Duration::from_secs(2));
         ensure(Instant::now() < deadline, "StepDeadline")?;
@@ -95,10 +117,11 @@ impl Run {
         body: &T,
     ) -> Result<Outcome> {
         let mut replays = 0;
+        let observation = Arc::clone(&self.observation);
         let value = self.step(who, "ExactOperation", |end| {
             let action = net(c.prepare_as(op, target, body, None))?;
             let signed = net(c.sign(&action))?;
-            exact(c, &action, &signed, end, &mut replays)
+            exact(c, &action, &signed, end, &mut replays, &observation)
         });
         self.replays += replays;
         value
@@ -115,8 +138,16 @@ impl Run {
             net(c.prepare_send(room, text, grant, false, None))
         })?;
         let mut replays = 0;
+        let observation = Arc::clone(&self.observation);
         let outcome = self.step(who, "SubmitExactMessage", |end| {
-            exact(c, &prepared.action, &prepared.signed, end, &mut replays)
+            exact(
+                c,
+                &prepared.action,
+                &prepared.signed,
+                end,
+                &mut replays,
+                &observation,
+            )
         })?;
         self.replays += replays;
         Ok((commit(outcome)?.0.ok_or("MessageEventMissing")?, prepared))
@@ -126,7 +157,10 @@ fn ensure(ok: bool, code: &str) -> Result<()> {
     if ok { Ok(()) } else { Err(code.into()) }
 }
 fn net<T>(result: client::Result<T>) -> Result<T> {
-    result.map_err(|e| match e {
+    result.map_err(|e| describe_error(&e))
+}
+fn describe_error(error: &client::Error) -> String {
+    match error {
         client::Error::Refused {
             code,
             detail,
@@ -138,8 +172,8 @@ fn net<T>(result: client::Result<T>) -> Result<T> {
             retry_after_ms,
         }) => format!("Refused:{code:?}:{detail:?}:retryMs={retry_after_ms:?}"),
         client::Error::Rejected { code, detail } => format!("Rejected:{code:?}:{detail:?}"),
-        _ => e.code().into(),
-    })
+        _ => error.code().into(),
+    }
 }
 fn retry_delay(error: &client::Error) -> Option<u64> {
     match error {
@@ -172,8 +206,13 @@ fn exact(
     signed: &[u8],
     end: Instant,
     replays: &mut u32,
+    observation: &Mutex<Observation>,
 ) -> Result<Outcome> {
     let digest = action_digest(action).map_err(|_| "ActionDigest")?;
+    observation
+        .lock()
+        .map_err(|_| "ObservationUnavailable")?
+        .effect = Some(action.operation.name());
     let mut attempted = false;
     loop {
         ensure(Instant::now() < end, "ExactOperationDeadline")?;
@@ -182,6 +221,12 @@ fn exact(
             && net(c.pending())?.iter().any(|p| {
                 p.action.action().operation_id == action.operation_id && p.action.digest() == digest
             });
+        observe_retry(
+            observation,
+            if pending { "Resolve" } else { "Submit" },
+            *replays,
+            None,
+        )?;
         let result = if pending {
             c.retry_pending(action.operation_id, digest)
         } else {
@@ -206,10 +251,18 @@ fn exact(
                         }
                         Outcome::Refused {
                             code:
-                                ErrorCode::Unavailable | ErrorCode::RateLimited | ErrorCode::Overloaded,
+                                code @ (ErrorCode::Unavailable
+                                | ErrorCode::RateLimited
+                                | ErrorCode::Overloaded),
                             retry_after_ms,
-                            ..
+                            detail,
                         } => {
+                            observe_retry(
+                                observation,
+                                "ResolverBackoff",
+                                *replays,
+                                Some(format!("{code:?}:{detail}:retryMs={retry_after_ms:?}")),
+                            )?;
                             pause(end, retry_after_ms.unwrap_or(1000))?;
                             attempted = true;
                             *replays += 1;
@@ -223,21 +276,37 @@ fn exact(
                     }
                 };
                 if let Outcome::Refused {
-                    code: ErrorCode::Unavailable | ErrorCode::RateLimited | ErrorCode::Overloaded,
+                    code:
+                        code @ (ErrorCode::Unavailable | ErrorCode::RateLimited | ErrorCode::Overloaded),
                     retry_after_ms,
-                    ..
+                    detail,
                 } = outcome
                 {
+                    observe_retry(
+                        observation,
+                        "EffectBackoff",
+                        *replays,
+                        Some(format!("{code:?}:{detail}:retryMs={retry_after_ms:?}")),
+                    )?;
                     pause(end, retry_after_ms.unwrap_or(1000))?
                 } else {
                     return Ok(outcome);
                 }
             }
             Err(e) => {
-                let delay = retry_delay(&e).ok_or_else(|| e.code().to_string())?;
+                observe_retry(
+                    observation,
+                    "FailureBackoff",
+                    *replays,
+                    Some(describe_error(&e)),
+                )?;
+                let delay = retry_delay(&e).ok_or_else(|| describe_error(&e))?;
                 pause(end, delay)?;
-                c.disconnect();
-                net(c.connect())?;
+                if !e.can_reuse_session() {
+                    observe_retry(observation, "Reconnect", *replays, None)?;
+                    c.disconnect();
+                    net(c.connect())?;
+                }
             }
         }
         attempted = true;
@@ -340,7 +409,7 @@ fn current_read<T>(
             Ok(value) => return Ok(value),
             Err(error) => {
                 let delay = retry_delay(&error).ok_or_else(|| error.code().to_string())?;
-                if matches!(error, client::Error::Network(_)) {
+                if matches!(error, client::Error::Network(_)) && !error.can_reuse_session() {
                     c.disconnect();
                 }
                 pause(end, delay)?;
@@ -668,8 +737,10 @@ fn denied_send(c: &mut Client, action: &Action, signed: &[u8], end: Instant) -> 
             Err(error) => {
                 let delay = retry_delay(&error).ok_or_else(|| error.code().to_string())?;
                 pause(end, delay)?;
-                c.disconnect();
-                net(c.connect())?;
+                if !error.can_reuse_session() {
+                    c.disconnect();
+                    net(c.connect())?;
+                }
             }
         }
     }
@@ -830,6 +901,7 @@ fn workflow(run: &mut Run, r: &Request) -> Result<serde_json::Value> {
         "CiphertextContext",
     )?;
     let mut replays = 0;
+    let observation = Arc::clone(&run.observation);
     let again = run.step("Alice", "ExactCiphertextRetry", |end| {
         let outcome = exact(
             &mut alice,
@@ -837,6 +909,7 @@ fn workflow(run: &mut Run, r: &Request) -> Result<serde_json::Value> {
             &prepared.signed,
             end,
             &mut replays,
+            &observation,
         )?;
         history(&mut alice, r.private, None, end)?;
         Ok(outcome)
@@ -944,6 +1017,7 @@ fn workflow(run: &mut Run, r: &Request) -> Result<serde_json::Value> {
     control(run, r, "ResumeOrigin")?;
     await_ready(run, &mut alice, r.private)?;
     let mut replays = 0;
+    let observation = Arc::clone(&run.observation);
     let resumed = run.step("Alice", "RetryExactCiphertextAfterLeaseRenewal", |end| {
         exact(
             &mut alice,
@@ -951,6 +1025,7 @@ fn workflow(run: &mut Run, r: &Request) -> Result<serde_json::Value> {
             &pending.signed,
             end,
             &mut replays,
+            &observation,
         )
     })?;
     run.replays += replays;
@@ -1349,6 +1424,10 @@ fn main() {
         principal: "Fixture",
         operation: "ReadRequest",
         deadline: end.min(Instant::now() + Duration::from_secs(45)),
+        phase: "ReadRequest",
+        attempt: 0,
+        last_failure: None,
+        effect: None,
     }));
     let done = Arc::new(AtomicBool::new(false));
     let watch = observation.clone();
@@ -1358,8 +1437,12 @@ fn main() {
             let state = watch.lock().unwrap_or_else(|e| e.into_inner()).clone();
             if Instant::now() >= end || Instant::now() >= state.deadline {
                 eprintln!(
-                    "principal={} operation={} status=DeadlineExceeded",
-                    state.principal, state.operation
+                    "{}",
+                    json!({"case":"FederationDeadline", "principal":state.principal,
+                        "operation":state.operation, "status":"DeadlineExceeded",
+                        "effect":state.effect,
+                        "phase":state.phase, "attempt":state.attempt,
+                        "lastFailure":state.last_failure})
                 );
                 std::process::exit(124)
             }
