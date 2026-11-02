@@ -985,3 +985,50 @@ fn prepared_send_effect_preserves_controller_draft_order_on_authority_failure() 
         Some(message.text.as_str())
     );
 }
+
+#[test]
+fn abandoned_unknown_membership_effect_blocks_a_replacement_in_its_room() {
+    let (_fixture, mut worker, room) = worker();
+    let mut action = action();
+    action.operation = Operation::CryptoCommit;
+    action.body = Value::serialized(&crate::confidential::CommitEpoch {
+        group: Id::from_bytes([60; 32]),
+        epoch: 0,
+        commit: Blob(vec![1]),
+        additions: vec![],
+        removals: vec![],
+    })
+    .unwrap();
+    assert!(
+        outcome(
+            &mut worker,
+            &action,
+            Outcome::Refused {
+                code: ErrorCode::Unavailable,
+                detail: "CurrentAdmissionUnavailable".into(),
+                retry_after_ms: Some(1000)
+            }
+        )
+        .is_err()
+    );
+    let saved = worker.client.pending().unwrap().remove(0);
+    worker
+        .client
+        .abandon(saved.action.action().operation_id, saved.action.digest())
+        .unwrap();
+    assert!(matches!(
+        worker.client.crypto_commit(room, &[], &[], None),
+        Err(Error::Unknown)
+    ));
+    assert!(matches!(
+        worker.client.crypto_initialise(room, false),
+        Err(Error::Unknown)
+    ));
+    let pending = worker.client.pending().unwrap();
+    assert_eq!(pending.len(), 1);
+    assert!(pending[0].abandoned);
+    assert_eq!(
+        pending[0].action.signed_bytes(),
+        saved.action.signed_bytes()
+    );
+}

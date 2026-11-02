@@ -53,10 +53,13 @@ ordinary unselected `@text` never gains mention authority.
 pinned upstream provider runs its migrations on an empty in-memory connection;
 the resulting schema is then created in one guarded HRC transaction. This
 temporary connection contains no endpoint keys, messages or live MLS state.
-HRC crypto schema version 2 is accepted; unknown versions refuse startup. This
-is new-profile schema installation, not a general provider upgrade facility.
-An upgrade must supply and qualify an explicit guarded migration before changing
-these pins. All live provider calls borrow the HRC transaction's connection.
+HRC crypto schema version 3 is accepted. A guarded migration from version 2 adds
+an exact operation binding to pending membership transitions without replacing
+their commit or Welcome bytes. Legacy pending transitions remain unbound until
+explicit preparation attaches the matching operation. Unknown versions refuse
+startup. This migration does not change the pinned MLS provider or its schema;
+a provider upgrade requires its own qualified migration. All live provider calls
+borrow the HRC transaction's connection.
 
 `Device::provision` generates and persists an independent MLS signing key.
 `open` checks the persisted actor binding. `publish_key_package` creates one-use
@@ -108,7 +111,19 @@ stored. Approval IDs and all delegated metadata are already bound by the Action.
 ## Membership, ordering and recovery
 
 `prepare_transition` creates an add, remove or self-update commit and keeps it
-pending. Public handshakes are required; external joins, external senders, PSKs
+pending. Its transaction-local finalizer lets the client persist that change,
+the exact signed HRC Action and its outbox identity together. Initial group
+creation uses the same atomic boundary. Current inspection, room revision and
+retry-window preparation finish before either local MLS write. A signing,
+serialization or outbox failure rolls back the candidate too.
+
+A verified rejection, received immediately or resolved after reconnect, settles
+the outbox and only its exact bound membership candidate in one transaction.
+Another operation's rejection cannot clear a newer candidate. An abandoned
+unknown membership operation still blocks replacement work in that room until
+its outcome is resolved; abandonment is not proof that no effect occurred.
+
+Public handshakes are required; external joins, external senders, PSKs
 and unsupported proposal families are rejected. The home uses
 `create_public_in` and `accept_public_in` inside its authoritative room transaction
 to verify public GroupInfo, signatures, expected epoch and the exact next roster.
