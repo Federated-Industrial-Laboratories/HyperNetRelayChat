@@ -70,7 +70,9 @@ failure and reconnect rules still apply. The warning clears when a current
 online view is restored. Partial failure of a compound command remains an error,
 with each earlier confirmed delivery retained independently.
 Network and database work never run in a widget or terminal input callback.
-Disconnect closes the active stream; shutdown joins the bounded worker.
+Disconnect closes the active stream and publishes Offline with stale room and
+inspection state and no active privacy badge, even when the worker is idle.
+Shutdown joins the bounded worker.
 
 ## Local state and reconnect
 
