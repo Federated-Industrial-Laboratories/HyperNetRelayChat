@@ -32,7 +32,7 @@ does not create a HyperNet network; native qualification is a separate check.
 
 ## Companion prerequisites
 
-Use matching HyperNet Core and Suite 0.10.0 with an admitted application and the
+Use HyperNet Core 0.10.1 and Suite 0.10.0 with an admitted application and the
 version-2 `checkAuthority-v2` capability. Configure the receiving service and the
 caller's named target with the diagnostic protocol `hrc-probe/1`. The accepted
 binding, target service, route policy and current application permissions must
