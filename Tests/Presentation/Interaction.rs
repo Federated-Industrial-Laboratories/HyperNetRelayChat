@@ -27,6 +27,8 @@ impl Fixture {
         }
         let endpoint = files::create_key(&root.join("Endpoint.key")).unwrap();
         let profile = Profile {
+            federation: None,
+            agreements: Vec::new(),
             server: Descriptor {
                 version: 1,
                 home,
