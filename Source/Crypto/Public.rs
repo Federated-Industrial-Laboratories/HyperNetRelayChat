@@ -10,6 +10,31 @@ pub struct PublicEpoch {
     pub commit_digest: Id,
 }
 
+/// Check a public, room-bound one-use package before it enters the home queue.
+/// The expected credential must come from the current registered endpoint.
+pub fn validate_key_package_in(
+    db: &Connection,
+    bytes: &[u8],
+    expected: &EndpointCredential,
+) -> Result<()> {
+    if bytes.is_empty() || bytes.len() > crate::protocol::CRYPTO_FRAME_BYTES {
+        return Err(Error::Limit);
+    }
+    let provider = Provider::new(db);
+    let package = KeyPackageIn::tls_deserialize_exact(bytes)
+        .map_err(|_| Error::Invalid)?
+        .validate(provider.crypto(), ProtocolVersion::Mls10)
+        .map_err(|_| Error::Verification)?;
+    if package.ciphersuite() != SUITE
+        || package.last_resort()
+        || package.leaf_node().signature_key().as_slice() != expected.mls_key.as_bytes()
+    {
+        return Err(Error::Binding);
+    }
+    ApprovedRoster::new(expected.room, vec![expected.clone()])?
+        .credential(package.leaf_node().credential(), &expected.actor)
+}
+
 /// Call inside the same Store transaction as room creation and endpoint authority.
 /// The caller supplies the current approved roster from authenticated registrations.
 pub fn create_public_in(

@@ -66,6 +66,7 @@ impl Queued {
                 | Command::SetRoomPreferences { .. }
                 | Command::CloseSearch
                 | Command::AbandonPending { .. }
+                | Command::TrustContact { .. }
         )
     }
     fn new(id: u64, command: Command) -> Self {
@@ -84,6 +85,14 @@ impl Queued {
                 Command::Send { .. }
                     | Command::MarkRead { .. }
                     | Command::CreateRoom { .. }
+                    | Command::CreatePrivateGroup { .. }
+                    | Command::CreateDirect { .. }
+                    | Command::Invite { .. }
+                    | Command::CryptoEnrol
+                    | Command::CryptoPublish { .. }
+                    | Command::CryptoInitialise { .. }
+                    | Command::CryptoCommit { .. }
+                    | Command::CryptoSync { .. }
                     | Command::Join(_)
                     | Command::Leave(_)
                     | Command::SetTopic { .. }
@@ -620,7 +629,7 @@ impl Worker {
         self.publish();
         let pending = self.client.pending()?;
         self.deliveries()?;
-        for p in pending.iter().filter(|p| !p.abandoned) {
+        for p in pending.iter().filter(|p| !p.abandoned && !p.held) {
             let response = self
                 .client
                 .retry_pending(p.action.action().operation_id, p.action.digest())?;
@@ -654,6 +663,7 @@ impl Worker {
                     .retain(|d| d.operation_id != operation_id);
                 self.snapshot.deliveries.push(Delivery {
                     abandoned: p.abandoned,
+                    held: p.held,
                     request_id,
                     operation: p.action.action().operation,
                     operation_id,
@@ -697,6 +707,7 @@ impl Worker {
                 .retain(|d| d.operation_id != operation_id);
             self.snapshot.deliveries.push(Delivery {
                 abandoned: p.abandoned,
+                held: p.held,
                 request_id,
                 operation: p.action.action().operation,
                 operation_id,
@@ -721,6 +732,7 @@ impl Worker {
             .retain(|d| d.operation_id != action.operation_id);
         self.snapshot.deliveries.push(Delivery {
             abandoned: false,
+            held: false,
             request_id: self.request,
             operation: action.operation,
             operation_id: action.operation_id,
@@ -746,7 +758,7 @@ impl Worker {
         let Target::Room(room) = action.target else {
             return Err(Error::Input);
         };
-        let message: messaging::Send = action.body.deserialized().map_err(|_| Error::Input)?;
+        let message = self.client.own_plaintext(action)?;
         if super::outbox::clear_sent_draft(&mut self.client.store, action)
             .map_err(|_| Error::Storage)?
             && let Some(view) = &mut self.snapshot.selected
@@ -765,6 +777,7 @@ impl Worker {
             .retain(|d| d.operation_id != r.operation_id);
         self.snapshot.deliveries.push(Delivery {
             abandoned: false,
+            held: false,
             request_id: self.request,
             operation: self.operation.unwrap_or(Operation::OperationResolve),
             operation_id: r.operation_id,

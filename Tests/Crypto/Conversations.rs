@@ -111,13 +111,14 @@ impl Client {
             group: id(5),
             epoch,
             parent: None,
+            causation: None,
         }
     }
     fn send(&mut self, n: u8, epoch: u64, roster: &ApprovedRoster, text: &str) -> PreparedMessage {
         let context = self.context(n, epoch);
         let device = self.device.clone();
         device
-            .prepare_message(self.store(), &context, roster, text, |action| {
+            .prepare_message(self.store(), &context, roster, text, |_, action| {
                 crate::protocol::sign_action(
                     &action,
                     &crate::protocol::SigningKey::from_bytes(&[91; 32]),
@@ -243,7 +244,9 @@ fn durable_sender_outbox_receiver_restart_and_duplicates() {
     let device = alice.device.clone();
     let context = alice.context(20, 1);
     assert!(matches!(
-        device.prepare_message(alice.store(), &context, &both, "different", |a| encode(&a)),
+        device.prepare_message(alice.store(), &context, &both, "different", |_, a| encode(
+            &a
+        )),
         Err(Error::Conflict)
     ));
 }
@@ -254,7 +257,7 @@ fn transaction_failure_rolls_back_sender_receiver_and_finalization() {
     let a = alice.device.clone();
     let context = alice.context(21, 1);
     assert!(
-        a.prepare_message(alice.store(), &context, &both, "rollback", |_| Err(
+        a.prepare_message(alice.store(), &context, &both, "rollback", |_, _| Err(
             Error::Conflict
         ))
         .is_err()
@@ -308,7 +311,7 @@ fn exact_approval_decrypts_once_and_pending_sender_blocks() {
             &context,
             &both,
             "approve this exact text",
-            |a| encode(&a),
+            |_, a| encode(&a),
         )
         .unwrap();
     assert_eq!(
@@ -325,7 +328,7 @@ fn exact_approval_decrypts_once_and_pending_sender_blocks() {
     );
     let next = alice.context(24, 1);
     assert!(matches!(
-        a.prepare_message(alice.store(), &next, &both, "later", |a| encode(&a)),
+        a.prepare_message(alice.store(), &next, &both, "later", |_, a| encode(&a)),
         Err(Error::Conflict)
     ));
     b.decide_preview(bob.store(), &incoming(&message), true)
@@ -584,9 +587,13 @@ fn abandoned_candidates_are_bounded_and_epoch_update_restores_send() {
         let mut context = alice.context(50 + n as u8, 1);
         context.approval = Some(id(90));
         let message = a
-            .prepare_message(alice.store(), &context, &both, "rejected preview", |a| {
-                encode(&a)
-            })
+            .prepare_message(
+                alice.store(),
+                &context,
+                &both,
+                "rejected preview",
+                |_, a| encode(&a),
+            )
             .unwrap();
         b.preview(bob.store(), &incoming(&message), &both, 1)
             .unwrap();
@@ -597,7 +604,7 @@ fn abandoned_candidates_are_bounded_and_epoch_update_restores_send() {
     }
     let context = alice.context(59, 1);
     assert!(matches!(
-        a.prepare_message(alice.store(), &context, &both, "limit", |a| encode(&a)),
+        a.prepare_message(alice.store(), &context, &both, "limit", |_, a| encode(&a)),
         Err(Error::Resynchronise)
     ));
     let transition = a
@@ -779,9 +786,13 @@ fn invalid_membership_transition_freezes_position_and_sends() {
     assert_eq!(state.epoch, 1);
     let context = bob.context(63, 1);
     assert!(matches!(
-        b.prepare_message(bob.store(), &context, &both, "must not send", |a| encode(
-            &a
-        )),
+        b.prepare_message(
+            bob.store(),
+            &context,
+            &both,
+            "must not send",
+            |_, a| encode(&a)
+        ),
         Err(Error::Suspended)
     ));
 }
@@ -810,7 +821,7 @@ fn retention_closes_retry_windows_and_never_rewinds_sender_or_cursor() {
             &message.context,
             &both,
             "expire local copies",
-            |a| encode(&a)
+            |_, a| encode(&a)
         ),
         Err(Error::Conflict)
     ));
@@ -821,7 +832,7 @@ fn retention_closes_retry_windows_and_never_rewinds_sender_or_cursor() {
     let mut context = alice.context(65, 1);
     context.operation_id.window = id(71);
     let next = a
-        .prepare_message(alice.store(), &context, &both, "current window", |a| {
+        .prepare_message(alice.store(), &context, &both, "current window", |_, a| {
             encode(&a)
         })
         .unwrap();
@@ -830,3 +841,6 @@ fn retention_closes_retry_windows_and_never_rewinds_sender_or_cursor() {
         DeliveryOutcome::Message("current window".into())
     );
 }
+
+#[path = "Coupling.rs"]
+mod coupling;

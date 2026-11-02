@@ -108,6 +108,90 @@ impl Worker {
                     &messaging::Unread { sequence },
                 )?;
             }
+            CreatePrivateGroup { name } => {
+                self.effect(
+                    Operation::RoomCreate,
+                    Target::Service,
+                    &conversations::Create {
+                        name,
+                        confidentiality: RoomConfidentiality::PrivateGroup,
+                    },
+                )?;
+            }
+            CreateDirect { recipient } => {
+                self.effect(
+                    Operation::DirectCreate,
+                    Target::Service,
+                    &crate::confidential::Direct { recipient },
+                )?;
+            }
+            Invite { room, account } => {
+                self.effect(
+                    Operation::RoomInvite,
+                    Target::Room(room),
+                    &crate::confidential::Invite { account },
+                )?;
+            }
+            CryptoEnrol => {
+                self.operation = Some(Operation::CryptoEnrolEndpoint);
+                let response = self.client.crypto_enrol()?;
+                self.response(response)?;
+            }
+            CryptoInspect { room, grant } => {
+                let view = self.client.crypto_inspect(room, grant.as_deref())?;
+                let selected = self
+                    .snapshot
+                    .selected
+                    .as_mut()
+                    .filter(|v| v.summary.room == room)
+                    .ok_or(Error::Input)?;
+                selected.crypto = Some(view);
+                return Ok(());
+            }
+            CryptoPublish { room, grant } => {
+                self.operation = Some(Operation::CryptoPublishKeyPackage);
+                let response = self.client.crypto_publish(room, grant.as_deref())?;
+                self.response(response)?;
+            }
+            CryptoInitialise { room, recover } => {
+                self.operation = Some(if recover {
+                    Operation::CryptoRecover
+                } else {
+                    Operation::CryptoPropose
+                });
+                let response = self.client.crypto_initialise(room, recover)?;
+                self.response(response)?;
+            }
+            CryptoCommit {
+                room,
+                additions,
+                removals,
+            } => {
+                self.operation = Some(Operation::CryptoCommit);
+                let response = self
+                    .client
+                    .crypto_commit(room, &additions, &removals, None)?;
+                self.response(response)?;
+            }
+            CryptoSync { room, grant } => {
+                let view = self.client.crypto_sync(room, grant.as_deref())?;
+                let selected = self
+                    .snapshot
+                    .selected
+                    .as_mut()
+                    .filter(|v| v.summary.room == room)
+                    .ok_or(Error::Input)?;
+                selected.crypto = Some(view);
+                return Ok(());
+            }
+            TrustContact {
+                account,
+                anchor_digest,
+                legacy,
+            } => {
+                self.client.trust_contact(account, anchor_digest, legacy)?;
+                return Ok(());
+            }
             CreateRoom { name } => {
                 self.effect(
                     Operation::RoomCreate,
@@ -184,18 +268,10 @@ impl Worker {
                 )?;
             }
             InspectGrant(reference) => {
-                let inspection: delegation::Inspection = self.read(
-                    Operation::DelegationInspect,
-                    Target::Delegation(reference),
-                    &home::Empty {},
-                )?;
-                self.snapshot.inspection.proposed = inspection
-                    .pending
-                    .iter()
-                    .map(crate::client::json::pending_action)
-                    .collect::<std::result::Result<Vec<_>, _>>()
-                    .map_err(|_| Error::Input)?;
-                self.snapshot.inspection.grant = Some(inspection);
+                let preview = self.client.inspect_grant(reference)?;
+                self.snapshot.inspection.proposed = preview.candidates;
+                self.snapshot.inspection.proposed_content = preview.content;
+                self.snapshot.inspection.grant = Some(preview.inspection);
                 return Ok(());
             }
             ChangeGrant { grant, change } => {
@@ -213,15 +289,13 @@ impl Worker {
                 decision,
                 approve,
             } => {
-                self.effect(
-                    if approve {
-                        Operation::ApprovalApprove
-                    } else {
-                        Operation::ApprovalReject
-                    },
-                    Target::Delegation(grant),
-                    &decision,
-                )?;
+                self.operation = Some(if approve {
+                    Operation::ApprovalApprove
+                } else {
+                    Operation::ApprovalReject
+                });
+                let response = self.client.decide_approval(grant, &decision, approve)?;
+                self.response(response)?;
                 let view = self.command(InspectGrant(grant));
                 self.finish_view(view);
                 return Ok(());
@@ -280,7 +354,7 @@ impl Worker {
                     _ => None,
                 };
                 self.remember(candidate.action())?;
-                let response = self.client.execute_signed(&bytes)?;
+                let response = self.client.submit_candidate(&bytes)?;
                 self.response(response)?;
                 self.clear_matching_draft(candidate.action())?;
                 cache::complete_candidate(&mut self.client.store, id)
@@ -320,50 +394,56 @@ impl Worker {
         if self.client.session().is_err() {
             return Err(Error::Offline);
         }
-        if self.client.pending()?.iter().any(|p| !p.abandoned) {
+        if self
+            .client
+            .pending()?
+            .iter()
+            .any(|p| !p.abandoned && !p.held)
+        {
             self.client.resolve_pending()?;
-            if self.client.pending()?.iter().any(|p| !p.abandoned) {
+            if self
+                .client
+                .pending()?
+                .iter()
+                .any(|p| !p.abandoned && !p.held)
+            {
                 return Err(Error::Unknown);
             }
         }
-        let operation = if parent.is_some() {
-            Operation::MessageReply
-        } else if is_action {
-            Operation::MessageAction
+        let approval = if grant
+            .as_ref()
+            .is_some_and(|g| g.scope.mode == delegation::Mode::Approve)
+        {
+            Some(Id::random().map_err(|_| Error::Input)?)
         } else {
-            Operation::MessageSend
+            None
         };
-        let body = Value::serialized(&messaging::Send {
+        let message = messaging::Send {
             text,
             mentions,
             parent,
             causation,
-        })
-        .map_err(|_| Error::Input)?;
-        let mut action = self.client.prepare(operation, Target::Room(room), body)?;
-        if let Some(g) = &grant {
-            if g.home != self.snapshot.home || g.scope.agent != self.client.session()?.ready.acting
-            {
-                return Err(Error::Input);
-            }
-            action.actor = Actor::Delegated {
-                acting: g.scope.agent.clone(),
-                operator: g.operator,
-                represented: g.owner,
-                represented_security_generation: g.owner_security_generation,
-                grant: g.reference,
-            };
-        }
+        };
+        let prepared = self.client.prepare_preserved_send_with(
+            room,
+            &message,
+            grant.as_deref(),
+            is_action,
+            approval,
+            |tx, action| {
+                if owns_draft {
+                    super::super::outbox::bind_draft_transaction(tx, action.action(), &message)?;
+                }
+                Ok(())
+            },
+        )?;
+        let action = prepared.action;
+        let operation = action.operation;
         if let Some(g) = &grant
             && g.scope.mode == delegation::Mode::Approve
         {
-            let approval = Id::random().map_err(|_| Error::Input)?;
-            action.approval = Some(approval);
-            if owns_draft {
-                super::super::outbox::bind_draft(&mut self.client.store, &action)
-                    .map_err(|_| Error::Storage)?;
-            }
-            let bytes = self.client.sign(&action)?;
+            let approval = action.approval.ok_or(Error::Input)?;
+            let bytes = prepared.signed;
             let now = self
                 .client
                 .profile
@@ -401,12 +481,8 @@ impl Worker {
         }
         self.operation = Some(operation);
         self.delivery_room = Some(room);
-        if owns_draft {
-            super::super::outbox::bind_draft(&mut self.client.store, &action)
-                .map_err(|_| Error::Storage)?;
-        }
         self.remember(&action)?;
-        let response = self.client.execute(&action)?;
+        let response = self.client.execute_signed(&prepared.signed)?;
         self.response(response)?;
         self.clear_matching_draft(&action)?;
         let view = self.refresh();
@@ -425,6 +501,7 @@ impl Worker {
             Vec::new()
         };
         self.snapshot.search = Some(SearchView {
+            content: Default::default(),
             room,
             query: query.clone(),
             events,
@@ -440,30 +517,25 @@ impl Worker {
             return Ok(());
         }
         self.publish();
-        let action = self.client.prepare(
-            Operation::SearchQuery,
-            Target::Room(room),
-            Value::serialized(&query).map_err(|_| Error::Input)?,
-        )?;
-        let response = self
+        let result = self
             .client
-            .search_cancellable(&action, &self.shared.cancel)?;
+            .search_messages(room, &query, None, &self.shared.cancel);
         let view = self.snapshot.search.as_mut().ok_or(Error::Input)?;
         view.running = false;
         if self.shared.cancel.load(Ordering::Acquire) {
             view.cancelled = true;
             return Ok(());
         }
-        let page: messaging::PageResult = match response.outcome {
-            Outcome::Result { body } => body.deserialized().map_err(|_| Error::Input)?,
-            outcome => return Err(Error::from_outcome(outcome)),
-        };
+        let page = result?;
+        view.content.extend(page.content);
         view.events.extend(page.events.into_iter().filter(|event| {
             !cache::filtered(&self.snapshot.inspection.filters, &event.actor, false)
         }));
         if view.events.len() > 256 {
             view.events.drain(..view.events.len() - 256);
         }
+        view.content
+            .retain(|id, _| view.events.iter().any(|event| event.event == *id));
         view.query.cursor = Some(page.cursor);
         view.has_more = page.has_more;
         Ok(())

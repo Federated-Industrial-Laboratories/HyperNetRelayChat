@@ -58,9 +58,9 @@ must recover the original selection to a current room view without a gap, Online
 connection, current inspection and privacy within that command's original bound.
 The helper does not dispatch another selection. Successful offline selection
 still exposes stale cached state. Other command errors fail the check. Network
-commands wait for current online state before their single
-dispatch, within the same original command deadline. Earlier readiness of another
-Controller does not imply this Controller is still online. A send
+commands wait for current online state before their single dispatch, within the
+same original command deadline. Earlier readiness of another Controller does not
+imply this Controller is still online. A send
 with a visibly pending delivery may recover only if the same request, operation
 ID and Action digest become committed through the Controller's own resolution.
 Permanent refusals, abandonment and replacement identities fail. Evidence counts
@@ -130,7 +130,84 @@ Diagnostic failure does not replace the original workflow failure. CLI result
 records include boot-time start and finish; connection-preparation stderr retains
 the static adapter failure category. No diagnostic triggers another effect or retry.
 
-This workflow qualifies community conversations. The dedicated Crypto contract
-tests qualify persistent MLS behaviour; encrypted client flows and independently
-administered federation require their own real integration scenarios before
-release.
+The baseline qualifies community conversations. The optional confidential helper
+below adds native encrypted client scenarios. Independently administered
+federation requires its own real integration scenario before release. A helper's
+presence or successful compilation is not a passing qualification result.
+
+
+## Confidential conversation extension
+
+Build `cargo build --example native-confidential-client` from the same candidate
+as the service and CLI. Select its exact executable with
+`configuration.confidentialClientBinary` or `HRC_NATIVE_CONFIDENTIAL_CLIENT`.
+This selector is independent of the Controller extension. The helper runs after
+the baseline and optional Controller/bot scenarios, before final HyperNet grant
+withdrawal. No process shares its Alice, Bob or Agent profile while it runs.
+The private request contains `alice`, `bob`, `agent`, the typed existing community
+`room` identity, and `bobRecovery`, the separately held fixture owner-key path.
+The key is used only by the production device-proof API and never enters output.
+
+For independent confidential qualification, select `configuration.confidentialClientOnly`
+or `HRC_NATIVE_CONFIDENTIAL_ONLY=1`. This mode uses the same shipped CLI setup,
+three profiles and room joins, then runs the confidential helper and final actual
+HyperNet authority refusal. It reports `conversationBaselineIncluded=false` and
+does not rerun unrelated baseline or Controller scenarios. It cannot be combined
+with local-client-only mode. Its original overall and per-step deadlines remain.
+
+The helper uses public production Client APIs and the profiles' real admitted
+HyperNet sessions and signed clock. It creates and joins an explicitly invited
+private group; each endpoint generates its own MLS key. It explicitly accepts
+inspected nonlegacy account anchors, publishes one-use packages, commits the
+membership transition, processes Welcome and verifies the selected epoch.
+A multilingual message with a stable account mention must decrypt without
+rewriting the authenticated Event body. Replaying the exact retained ciphertext
+Action must resolve to the original event. Closing and reopening Bob's store must
+preserve locally indexed content; offline search is stale, and online search
+rechecks current authority. Active recipient ignore must remove that content
+from current search presentation.
+
+A fresh scoped autonomous grant adds the agent as a delegated MLS leaf. Earlier
+plaintext must remain unavailable to that new endpoint. A new delegated encrypted
+message must preserve its represented account and exact grant attribution.
+Revocation must establish a send barrier and required removal; an already prepared
+old-epoch send must be durably rejected without publication. Only the verified
+removal transition restores sending. A separate invited confidential direct room
+then completes the same actual encrypted send/decrypt path.
+
+The device scenario authorizes and activates an exact new endpoint, verifies its
+independent encrypted state, then disables it. Owner-key recovery replaces Bob's
+old endpoint generation and must establish the encrypted-room removal barrier.
+After the old leaf is removed, the recovered endpoint explicitly requests and
+receives future-message admission. Earlier ciphertext remains available under
+room policy, but its plaintext is unavailable; a new message must decrypt.
+Device retries retain the same signed request and original step deadline.
+Participants that return after another participant's workflow open a fresh session
+before their next read or effect preparation. These connections require current
+HyperNet permission within the original step deadline. A revoked delegated read
+is checked on the independent endpoint's fresh session so a closed idle stream
+cannot stand in for the required permission refusal.
+Current inspection, history, online search and encrypted synchronisation share
+bounded recovery for typed transient failures within the original step deadline.
+Session recovery uses the production client; synchronisation retains the client's
+exact readiness outbox operation. Contact trust is written once after a successful
+current inspection. Retained search remains offline.
+
+Each scenario operation has a 45-second watchdog. The total defaults to 600
+seconds, bounded by the driver's remaining conversation budget; the parent adds
+a subprocess deadline. Two-second pacing precedes operations to respect the
+crypto-account burst/refill budget. Explicitly prepared operations can recover
+only their original Action ID, digest and signed bytes through the production
+resolver. The helper never recreates an uncertain effect with a new ID. A
+high-level crypto method that cannot expose its original operation after failure
+causes the scenario to fail rather than be blindly redispatched. Diagnostics name
+only principal, operation and bounded status; they contain no keys or chat text.
+The helper does not read private SQL state or manufacture protocol authority.
+
+The current CLI returns `ConversationPage` directly for `history` and `search`,
+and `GrantPreview` directly for `agent inspect`. The driver checks these exact
+shapes. Delegated send preflight rejects denied/expired access with the exact
+`OperationDenied` or `OperationExpired` failure code and separately verifies no
+matching event was published. Availability, malformed input and unrelated failures
+cannot satisfy those refusal cases. The prior M4 qualification tree and its
+recorded results remain separate from this updated candidate.

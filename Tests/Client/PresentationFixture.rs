@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Explicit offline presentation data; this fixture does not establish HyperNet authority.
 use crate::{
-    client::{self, cache, outbox},
+    client::{self, archive, cache, outbox},
     conversations::{Member, Summary},
     messaging::{PageResult, Send},
     protocol::*,
@@ -75,6 +75,11 @@ fn export_offline_presentation_fixture() {
     .unwrap();
     outbox::initialize(&mut store).unwrap();
     cache::initialize(&mut store).unwrap();
+    let confidential = std::env::var_os("HRC_PRESENTATION_CONFIDENTIAL").is_some();
+    if confidential {
+        crate::crypto::initialize(&mut store).unwrap();
+        archive::initialize(&mut store).unwrap();
+    }
     let rooms = [
         RoomId {
             home,
@@ -89,13 +94,19 @@ fn export_offline_presentation_fixture() {
         .iter()
         .enumerate()
         .map(|(i, room)| Summary {
+            confidentiality: if confidential && i == 1 {
+                RoomConfidentiality::PrivateGroup
+            } else {
+                RoomConfidentiality::Community
+            },
+            invited: false,
             room: *room,
             name: ["laboratory", "休憩室"][i].into(),
             topic: "Offline interface fixture; no current network authority.".into(),
             revision: 1,
-            sequence: 3,
+            sequence: if confidential && i == 1 { 0 } else { 3 },
             joined: true,
-            unread: 3,
+            unread: if confidential && i == 1 { 0 } else { 3 },
         })
         .collect();
     cache::save_rooms(&mut store, &summaries).unwrap();
@@ -132,6 +143,46 @@ fn export_offline_presentation_fixture() {
     ];
     let now = crate::clock::TimeBounds::test_now().upper_ms;
     for room in rooms {
+        let private = confidential && room == rooms[1];
+        if private {
+            archive::save_view(
+                &mut store,
+                &archive::CryptoView {
+                    remote: crate::confidential::Inspection {
+                        room,
+                        confidentiality: RoomConfidentiality::PrivateGroup,
+                        group: None,
+                        epoch: 0,
+                        commit_digest: None,
+                        sequence: 0,
+                        send_barrier: true,
+                        frozen: false,
+                        members: vec![],
+                        packages: vec![],
+                        required_removals: vec![],
+                        history_from_ms: 0,
+                        history_until_ms: u64::MAX,
+                        filter_revision: 1,
+                        ignored: vec![],
+                    },
+                    local: None,
+                    future_only: true,
+                    contacts: (20..52)
+                        .map(|n| client::trust::ContactTrust {
+                            account: AccountId {
+                                origin: home.network,
+                                local: super::id(n),
+                            },
+                            anchor: super::id(n),
+                            head: super::id(n),
+                            recovery_key: super::id(n + 50),
+                            state: client::trust::TrustState::UntrustedRegistration,
+                        })
+                        .collect(),
+                },
+            )
+            .unwrap();
+        }
         let mut events = Vec::new();
         for (index, text) in [
             "Welcome to the offline interface fixture.",
@@ -139,6 +190,7 @@ fn export_offline_presentation_fixture() {
             "你好。مرحبا. Persistent history and keyboard navigation.",
         ]
         .iter()
+        .take(if private { 0 } else { 3 })
         .enumerate()
         {
             let mut acting = base.actor.acting().clone();
@@ -188,7 +240,7 @@ fn export_offline_presentation_fixture() {
             home,
             room,
             account,
-            sequence: 3,
+            sequence: if private { 0 } else { 3 },
             membership_revision: 1,
             filter_revision: 1,
             access_digest: Id::random().unwrap(),

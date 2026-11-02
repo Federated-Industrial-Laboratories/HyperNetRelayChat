@@ -29,6 +29,7 @@ pub struct Pending {
     target: Target,
     outcome_known: bool,
     abandoned: bool,
+    held: bool,
 }
 pub fn pending(directory: &Path) -> std::result::Result<Vec<Pending>, Error> {
     let profile = Profile::load(directory).map_err(|_| Error)?;
@@ -44,6 +45,7 @@ pub fn pending(directory: &Path) -> std::result::Result<Vec<Pending>, Error> {
             target: p.action.action().target.clone(),
             outcome_known: false,
             abandoned: p.abandoned,
+            held: p.held,
         })
         .collect())
 }

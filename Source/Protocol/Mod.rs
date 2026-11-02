@@ -5,6 +5,8 @@
 mod cbor;
 #[path = "Frame.rs"]
 mod frame;
+#[path = "Lifecycle.rs"]
+mod lifecycle;
 #[path = "Signed.rs"]
 mod signed;
 #[path = "Types.rs"]
@@ -14,6 +16,7 @@ pub use cbor::{canonical_decode, canonical_encode};
 pub use ciborium::Value;
 pub use ed25519_dalek::{SigningKey, VerifyingKey};
 pub use frame::{Frame, FrameHeader, FrameKind};
+pub use lifecycle::*;
 pub use signed::*;
 pub use types::*;
 

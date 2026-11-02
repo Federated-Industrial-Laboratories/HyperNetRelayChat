@@ -103,9 +103,10 @@ pub(crate) fn operate(
         Operation::MessageSend | Operation::MessageReply | Operation::MessageAction => {
             send(db, action, now, permit)
         }
-        Operation::HistoryPage | Operation::EventsSubscribe | Operation::EventsResume => {
-            history::page(db, action, now, permit, signer, cancel)
-        }
+        Operation::HistoryPage
+        | Operation::EventsSubscribe
+        | Operation::EventsResume
+        | Operation::CryptoHistory => history::page(db, action, now, permit, signer, cancel),
         Operation::HistoryContext => history::context(db, action, now, permit, signer),
         Operation::SearchQuery => history::search(db, action, now, permit, signer, cancel),
         Operation::UnreadSet => history::unread(db, action, now),
@@ -113,14 +114,21 @@ pub(crate) fn operate(
     }
 }
 fn send(db: &Transaction<'_>, action: &Action, now: TimeBounds, permit: Permit) -> Domain<Outcome> {
-    let body: Send = unpack(&action.body)?;
-    crate::text::message(&body.text)
-        .map_err(|_| Fault::Reject(ErrorCode::InvalidInput, "MessageText"))?;
-    if (action.operation == Operation::MessageReply) != body.parent.is_some() {
+    let access = conversations::access(db, action, now)?;
+    let (event_body, text, parent, cause) =
+        if access.confidentiality == RoomConfidentiality::Community {
+            let body: Send = unpack(&action.body)?;
+            crate::text::message(&body.text)
+                .map_err(|_| Fault::Reject(ErrorCode::InvalidInput, "MessageText"))?;
+            validate_mentions(db, access.room, &body)?;
+            (value(&body)?, body.text, body.parent, body.causation)
+        } else {
+            let (event, parent, cause) = crate::confidential::message(db, action, now)?;
+            (event, String::new(), parent, cause)
+        };
+    if (action.operation == Operation::MessageReply) != parent.is_some() {
         return invalid("ReplyParent");
     }
-    let access = conversations::access(db, action, now)?;
-    validate_mentions(db, access.room, &body)?;
     if conversations::restriction(db, access.room, &action.actor, 1, now)? {
         return deny("RoomSilenced");
     }
@@ -135,11 +143,11 @@ fn send(db: &Transaction<'_>, action: &Action, now: TimeBounds, permit: Permit) 
         }
         Ok((root, depth))
     };
-    if let Some(parent) = body.parent {
+    if let Some(parent) = parent {
         accessible(parent)?;
     }
     let mut causality = None;
-    if let Some(cause) = body.causation {
+    if let Some(cause) = cause {
         if matches!(action.actor, Actor::Direct { .. }) {
             return invalid("HumanCausation");
         }
@@ -163,8 +171,7 @@ fn send(db: &Transaction<'_>, action: &Action, now: TimeBounds, permit: Permit) 
         }
         causality = Some((cause, root, depth + 1, grant));
     }
-    let event_body = value(&body)?;
-    let outcome = record(db, action, access.room, event_body, &body.text, now)?;
+    let outcome = record(db, action, access.room, event_body, &text, now)?;
     if let (
         Some((cause, root, depth, grant)),
         Outcome::Committed {

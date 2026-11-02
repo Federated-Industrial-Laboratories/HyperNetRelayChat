@@ -17,6 +17,39 @@ pub const HELP: &[(&str, &str)] = &[
     ),
     ("/part", "Leave the selected room"),
     ("/create NAME", "Create a community room"),
+    ("/private NAME", "Create an encrypted private group"),
+    (
+        "/msg ACCOUNT",
+        "Invite an account to a confidential conversation",
+    ),
+    (
+        "/whisper ACCOUNT",
+        "Invite an account to a confidential conversation",
+    ),
+    (
+        "/invite ACCOUNT",
+        "Invite an account to the selected private group",
+    ),
+    (
+        "/crypto enrol|inspect|publish|start|sync",
+        "Manage this endpoint's encrypted room access",
+    ),
+    (
+        "/crypto add PACKAGE",
+        "Commit an explicitly published endpoint package",
+    ),
+    (
+        "/crypto remove ENDPOINT",
+        "Remove an endpoint from the encrypted epoch",
+    ),
+    (
+        "/crypto recover",
+        "Explicitly create a fresh encrypted group; future traffic only",
+    ),
+    (
+        "/trust ACCOUNT ANCHOR [legacy]",
+        "Pin the inspected first-contact fingerprint",
+    ),
     ("/me TEXT", "Send an action"),
     ("/nick NAME", "Change your displayed nickname"),
     (
@@ -297,6 +330,66 @@ pub fn parse(
         "/join" if !rest.is_empty() => request(Command::Join(target_room(snapshot, rest)?)),
         "/part" | "/leave" => request(Command::Leave(room(snapshot)?)),
         "/create" if !rest.is_empty() => request(Command::CreateRoom { name: rest.into() }),
+        "/private" if !rest.is_empty() => {
+            request(Command::CreatePrivateGroup { name: rest.into() })
+        }
+        "/msg" | "/whisper" if !rest.is_empty() => request(Command::CreateDirect {
+            recipient: account(snapshot, rest)?,
+        }),
+        "/invite" if !rest.is_empty() => request(Command::Invite {
+            room: room(snapshot)?,
+            account: account(snapshot, rest)?,
+        }),
+        "/crypto" => {
+            let (operation, argument) = rest.split_once(' ').unwrap_or((rest, ""));
+            request(match operation {
+                "enrol" if argument.is_empty() => Command::CryptoEnrol,
+                "inspect" if argument.is_empty() => Command::CryptoInspect {
+                    room: room(snapshot)?,
+                    grant: None,
+                },
+                "publish" if argument.is_empty() => Command::CryptoPublish {
+                    room: room(snapshot)?,
+                    grant: None,
+                },
+                "start" | "recover" if argument.is_empty() => Command::CryptoInitialise {
+                    room: room(snapshot)?,
+                    recover: operation == "recover",
+                },
+                "sync" if argument.is_empty() => Command::CryptoSync {
+                    room: room(snapshot)?,
+                    grant: None,
+                },
+                "add" => Command::CryptoCommit {
+                    room: room(snapshot)?,
+                    additions: vec![argument.parse().map_err(|_| "Use a package digest")?],
+                    removals: vec![],
+                },
+                "remove" => Command::CryptoCommit {
+                    room: room(snapshot)?,
+                    additions: vec![],
+                    removals: vec![argument.parse().map_err(|_| "Use an endpoint ID")?],
+                },
+                _ => {
+                    return Err(
+                        "Use /crypto enrol, inspect, publish, start, sync, add, remove or recover",
+                    );
+                }
+            })
+        }
+        "/trust" => {
+            let fields = rest.split_whitespace().collect::<Vec<_>>();
+            if !(2..=3).contains(&fields.len()) || fields.len() == 3 && fields[2] != "legacy" {
+                return Err("Use /trust ACCOUNT ANCHOR [legacy]");
+            }
+            request(Command::TrustContact {
+                account: account(snapshot, fields[0])?,
+                anchor_digest: fields[1]
+                    .parse()
+                    .map_err(|_| "Use the inspected anchor digest")?,
+                legacy: fields.len() == 3,
+            })
+        }
         "/me" if !rest.is_empty() => return send(rest, input.len() - rest.len(), true),
         "/nick" if !rest.is_empty() => request(Command::SetNickname(rest.into())),
         "/presence" if !rest.is_empty() => request(Command::SetPresence(hrc::identity::Presence {

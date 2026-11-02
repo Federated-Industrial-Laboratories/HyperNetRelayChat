@@ -79,6 +79,7 @@ pub struct Status {
 #[derive(Clone, Debug)]
 pub struct Delivery {
     pub abandoned: bool,
+    pub held: bool,
     pub request_id: Option<u64>,
     pub operation: Operation,
     pub operation_id: OperationId,
@@ -99,10 +100,12 @@ pub struct Notification {
 }
 #[derive(Clone, Debug)]
 pub struct RoomView {
+    pub crypto: Option<super::CryptoView>,
     pub focus: Option<Id>,
     pub summary: conversations::Summary,
     pub members: Vec<conversations::Member>,
     pub events: Vec<Event>,
+    pub content: std::collections::BTreeMap<Id, super::MessageContent>,
     pub draft: String,
     pub draft_mentions: Vec<messaging::Mention>,
     pub stale: bool,
@@ -119,6 +122,7 @@ pub struct Inspection {
     pub agents: Vec<identity::AgentEndpoint>,
     pub grant: Option<delegation::Inspection>,
     pub proposed: Vec<Action>,
+    pub proposed_content: std::collections::BTreeMap<Id, super::MessageContent>,
     pub stale: bool,
 }
 #[derive(Clone, Debug)]
@@ -126,6 +130,7 @@ pub struct SearchView {
     pub room: RoomId,
     pub query: messaging::Search,
     pub events: Vec<Event>,
+    pub content: std::collections::BTreeMap<Id, super::MessageContent>,
     pub has_more: bool,
     pub running: bool,
     pub cancelled: bool,
@@ -198,6 +203,43 @@ pub enum Command {
     },
     CreateRoom {
         name: String,
+    },
+    CreatePrivateGroup {
+        name: String,
+    },
+    CreateDirect {
+        recipient: AccountId,
+    },
+    Invite {
+        room: RoomId,
+        account: AccountId,
+    },
+    CryptoEnrol,
+    CryptoInspect {
+        room: RoomId,
+        grant: Option<Box<delegation::Grant>>,
+    },
+    CryptoPublish {
+        room: RoomId,
+        grant: Option<Box<delegation::Grant>>,
+    },
+    CryptoInitialise {
+        room: RoomId,
+        recover: bool,
+    },
+    CryptoCommit {
+        room: RoomId,
+        additions: Vec<Id>,
+        removals: Vec<Id>,
+    },
+    CryptoSync {
+        room: RoomId,
+        grant: Option<Box<delegation::Grant>>,
+    },
+    TrustContact {
+        account: AccountId,
+        anchor_digest: Id,
+        legacy: bool,
     },
     Join(RoomId),
     Leave(RoomId),

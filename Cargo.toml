@@ -18,6 +18,10 @@ path = "Source/Main.rs"
 name = "native-local-client"
 path = "Tests/Integration/NativeLocalClient.rs"
 
+[[example]]
+name = "native-confidential-client"
+path = "Tests/Integration/NativeConfidential.rs"
+
 [dependencies]
 clap = { version = "4.6.7", features = ["derive"] }
 serde = { version = "1.0.229", features = ["derive"] }

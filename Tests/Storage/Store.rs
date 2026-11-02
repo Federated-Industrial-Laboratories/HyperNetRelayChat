@@ -303,3 +303,29 @@ fn replacing_a_live_directory_or_database_fences_before_new_effects() {
         assert_eq!(store.commit_counter(), 1);
     }
 }
+
+#[test]
+fn named_domain_savepoint_can_rollback_effects_without_escaping_guarded_commit() {
+    let f = Fixture::new();
+    let mut store = f.create();
+    add(&mut store, "before").unwrap();
+    store
+        .write(|tx| {
+            tx.execute_batch("SAVEPOINT hrc_domain_effects")?;
+            tx.execute("INSERT INTO messages(body) VALUES('rejected effect')", [])?;
+            tx.execute_batch("ROLLBACK TO hrc_domain_effects; RELEASE hrc_domain_effects")?;
+            assert!(tx.execute_batch("COMMIT").is_err());
+            assert!(tx.execute_batch("SAVEPOINT arbitrary").is_err());
+            assert!(tx.execute("DELETE FROM _hrc_continuity", []).is_err());
+            Ok(Commit::new((), b"durable rejection".to_vec()))
+        })
+        .unwrap();
+    assert_eq!(count(&mut store), 1);
+    assert_eq!(store.commit_counter(), 2);
+    assert!(
+        store
+            .read(Duration::from_secs(1), |db| db
+                .execute_batch("SAVEPOINT hrc_domain_effects"))
+            .is_err()
+    );
+}

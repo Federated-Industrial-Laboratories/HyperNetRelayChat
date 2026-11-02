@@ -41,6 +41,30 @@ pub fn actor(actor: &Actor, members: &[Member]) -> String {
         ),
     }
 }
+pub fn event_text_with_content(
+    event: &Event,
+    content: Option<&hrc::client::MessageContent>,
+) -> String {
+    match content {
+        Some(hrc::client::MessageContent::Decrypted(message)) => message.text.clone(),
+        Some(hrc::client::MessageContent::Rejected(reason)) => {
+            format!("Encrypted content rejected: {reason:?}")
+        }
+        Some(hrc::client::MessageContent::Unavailable) => {
+            "Encrypted content unavailable on this endpoint".into()
+        }
+        None => event_text(event),
+    }
+}
+pub fn confidentiality(mode: RoomConfidentiality) -> &'static str {
+    match mode {
+        RoomConfidentiality::Community => "Community room · Service-readable",
+        RoomConfidentiality::ConfidentialDirect => {
+            "Confidential conversation · End-to-end encrypted"
+        }
+        RoomConfidentiality::PrivateGroup => "Private group · End-to-end encrypted",
+    }
+}
 pub fn event_text(event: &Event) -> String {
     if matches!(
         event.kind,
@@ -50,10 +74,28 @@ pub fn event_text(event: &Event) -> String {
             .body
             .deserialized::<messaging::Send>()
             .map(|body| body.text)
-            .unwrap_or_else(|_| "Unsupported message content".into())
+            .unwrap_or_else(|_| {
+                if event
+                    .body
+                    .deserialized::<hrc::crypto::EncryptedEvent>()
+                    .is_ok()
+                {
+                    "Encrypted content unavailable on this endpoint".into()
+                } else {
+                    "Unsupported message content".into()
+                }
+            })
     } else {
         match event.kind {
             Operation::RoomCreate => "created the room",
+            Operation::DirectCreate => "created a confidential conversation",
+            Operation::RoomInvite => "invited an account",
+            Operation::CryptoPropose => "initialised endpoint encryption",
+            Operation::CryptoCommit => "changed the encrypted membership epoch",
+            Operation::CryptoRecover => {
+                "started a fresh encrypted group; prior history is not transferred"
+            }
+            Operation::CryptoReport => "froze encrypted sending after a verification failure",
             Operation::RoomJoin => "joined",
             Operation::RoomLeave => "left",
             Operation::RoomSetTopic => "changed the topic",
@@ -86,6 +128,9 @@ pub fn connection(snapshot: &Snapshot) -> String {
     }
 }
 pub fn delivery(delivery: &hrc::client::Delivery) -> String {
+    if delivery.held {
+        return "Held locally; exact approval is required before submission".into();
+    }
     match &delivery.outcome {
         None => "Queued locally; outcome is not yet known".into(),
         Some(Outcome::Committed { .. }) => "Committed by the service".into(),

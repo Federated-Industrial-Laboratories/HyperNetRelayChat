@@ -165,7 +165,9 @@ class Conversation:
         args = ['history' if term is None else 'search','--profile',self.profiles[name],'--room',address(room),'--limit','50']
         if term is not None:
             args += ['--term',term]
-        return self.outcome(self.cli(name+'History' if term is None else name+'Search',*args),'result')['events']
+        page = self.cli(name+'History' if term is None else name+'Search',*args)
+        assert page['stale'] is False and isinstance(page['content'], dict), 'Expected current ConversationPage'
+        return page['events']
 
     def grant(self, room, expires_ms=None, export_name='AgentGrant.json'):
         now = int(time.time()*1000)
@@ -179,8 +181,9 @@ class Conversation:
         grant = self.outcome(result)
         reference = grant
         exported = self.exchange/export_name
-        self.outcome(self.cli('AgentInspect','agent','inspect','--profile',self.profiles['Alice'],
-                     '--grant',reference['id'],'--generation',reference['generation'],'--export',exported),'result')
+        inspected = self.cli('AgentInspect','agent','inspect','--profile',self.profiles['Alice'],
+                     '--grant',reference['id'],'--generation',reference['generation'],'--export',exported)
+        assert inspected['inspection']['grant']['reference'] == reference and inspected['inspection']['pending'] == []
         return reference, exported
 
     def main(self):
@@ -190,11 +193,26 @@ class Conversation:
         assert isinstance(only_local, bool), 'localClientOnly must be boolean'
         setting = os.environ.get('HYPERNET_HRC_LOCAL_CLIENT_ONLY', '0')
         assert setting in ('0', '1'), 'Invalid local-client workflow selection'
-        if only_local or setting == '1':
-            assert self.local_client_binary(), 'Local-client workflow requires its executable'
+        only_local = only_local or setting == '1'
+        only_confidential = self.config.get('confidentialClientOnly', False)
+        assert isinstance(only_confidential, bool), 'confidentialClientOnly must be boolean'
+        confidential_setting = os.environ.get('HRC_NATIVE_CONFIDENTIAL_ONLY', '0')
+        assert confidential_setting in ('0', '1'), 'Invalid confidential workflow selection'
+        only_confidential = only_confidential or confidential_setting == '1'
+        assert not (only_local and only_confidential), 'Select one independent client workflow'
+        if only_local or only_confidential:
+            binary = self.confidential_client_binary() if only_confidential else self.local_client_binary()
+            assert binary, 'Independent client workflow requires its executable'
             for name in ('Bob', 'Agent'):
                 self.outcome(self.cli(name+'Joined','room','join','--profile',self.profiles[name],
                                       '--room',address(room)))
+            if only_confidential:
+                self.confidential_client(room)
+                self.authority_refusal(room)
+                self.record(dict(case='NativeConfidentialClientWorkflow',passed=True,protocol='hrc/1',
+                                 realCliProvisioning=True,conversationBaselineIncluded=False,
+                                 confidentialClientIncluded=True,noDirectFallback=True))
+                return
             self.local_client(room)
             reference, _ = self.grant(room)
             revoked = self.outcome(self.cli('LocalBotGrantRevoked','agent','revoke',
@@ -220,20 +238,21 @@ class Conversation:
         reference, exported = self.grant(room)
         delegated = 'Delegated native reply'
         self.outcome(self.send('Agent',room,delegated,exported))
-        self.outcome(self.send('Agent',other,'Out of scope',exported),'rejected','denied')
+        self.denied_send('Agent',other,'Out of scope',exported,'OperationDenied')
         def lifecycle(operation):
             nonlocal reference
             reference=self.outcome(self.cli('Agent'+operation.title(),'agent',operation,
                 '--profile',self.profiles['Alice'],'--grant',reference['id'],'--generation',reference['generation']))
         lifecycle('pause')
-        self.outcome(self.send('Agent',room,'Paused effect',exported),'rejected','denied')
+        self.denied_send('Agent',room,'Paused effect',exported,'OperationDenied')
         lifecycle('resume')
         exported=self.exchange/'AgentResumedGrant.json'
-        self.outcome(self.cli('AgentInspectResumed','agent','inspect','--profile',self.profiles['Alice'],
-            '--grant',reference['id'],'--generation',reference['generation'],'--export',exported),'result')
+        inspected = self.cli('AgentInspectResumed','agent','inspect','--profile',self.profiles['Alice'],
+            '--grant',reference['id'],'--generation',reference['generation'],'--export',exported)
+        assert inspected['inspection']['grant']['reference'] == reference and inspected['inspection']['pending'] == []
         self.outcome(self.send('Agent',room,'Resumed effect',exported))
         lifecycle('revoke')
-        self.outcome(self.send('Agent',room,'Revoked effect',exported),'rejected','denied')
+        self.denied_send('Agent',room,'Revoked effect',exported,'OperationDenied')
         events = self.events('Bob',room)
         matching = [e for e in events if isinstance(e['body'],dict) and e['body'].get('text')==delegated]
         assert len(matching)==1 and matching[0]['actor']['mode']=='delegated'
@@ -245,7 +264,7 @@ class Conversation:
         remaining=(expiry-int(time.time()*1000)+300)/1000
         if remaining>0:
             time.sleep(min(remaining,8))
-        self.outcome(self.send('Agent',room,'Expired permission effect',expiring),'rejected','expired')
+        self.denied_send('Agent',room,'Expired permission effect',expiring,'OperationExpired')
         self.record(dict(case='NativeExpiredDelegationRefusesEffect',passed=True))
         self.filters(room)
         self.stop(); self.start()
@@ -254,10 +273,41 @@ class Conversation:
         self.local_client(room)
         if self.local_client_binary():
             self.bot(room, reference)
+        self.confidential_client(room)
         self.authority_refusal(room)
         self.record(dict(case='NativeHrcConversation',passed=True,protocol='hrc/1',
-                         allHrcOperationsThroughCli=not self.local_client_binary(),
-                         localControllerIncluded=bool(self.local_client_binary()),noDirectFallback=True))
+                         allHrcOperationsThroughCli=not (self.local_client_binary() or self.confidential_client_binary()),
+                         localControllerIncluded=bool(self.local_client_binary()),
+                         confidentialClientIncluded=bool(self.confidential_client_binary()),noDirectFallback=True))
+
+    def denied_send(self, name, room, text, grant, code):
+        result = self.send(name, room, text, grant, failure=True)
+        assert json.loads(result.stderr) == dict(status='Failed', code=code), 'Wrong permanent preflight refusal'
+        assert not self.events('Alice', room, text), 'Refused message was published'
+
+    def confidential_client_binary(self):
+        return self.config.get('confidentialClientBinary') or os.environ.get('HRC_NATIVE_CONFIDENTIAL_CLIENT')
+
+    def confidential_client(self, room):
+        binary = self.confidential_client_binary()
+        if not binary:
+            return
+        binary = Path(binary).resolve(strict=True)
+        assert binary.is_file() and os.access(binary, os.X_OK), 'Native confidential executable unavailable'
+        maximum = min(600, int(self.deadline - time.monotonic()) - 2)
+        assert maximum >= 120, 'Insufficient remaining confidential conversation budget'
+        request = self.json_file(dict(alice=str(self.profiles['Alice']), bob=str(self.profiles['Bob']),
+                                     agent=str(self.profiles['Agent']), room=room,
+                                     bobRecovery=str(self.recovery/'Bob.key')))
+        result = subprocess.run([str(binary), '--request', str(request), '--maximum-seconds', str(maximum)],
+                                capture_output=True, timeout=maximum+1)
+        assert len(result.stdout) <= 65536 and len(result.stderr) <= 65536, 'Confidential helper output bound'
+        self.record(dict(case='NativeConfidentialProcess', exitCode=result.returncode,
+                         stdout=result.stdout.decode(errors='replace'), stderr=result.stderr.decode(errors='replace')))
+        assert result.returncode == 0, 'Native confidential workflow failed'
+        evidence = json.loads(result.stdout)
+        assert evidence['case'] == 'NativeConfidentialConversations' and evidence['passed'] is True
+        self.record(evidence)
 
     def local_client_binary(self):
         return self.config.get('localClientBinary') or os.environ.get('HYPERNET_HRC_LOCAL_CLIENT')

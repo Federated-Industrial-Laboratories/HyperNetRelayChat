@@ -182,6 +182,7 @@ pub struct EncryptedBody {
     #[serde(with = "bytes")]
     pub ciphertext: Vec<u8>,
     pub parent: Option<Id>,
+    pub causation: Option<Id>,
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -197,6 +198,7 @@ pub struct EncryptionContext {
     pub group: Id,
     pub epoch: u64,
     pub parent: Option<Id>,
+    pub causation: Option<Id>,
 }
 impl EncryptionContext {
     pub fn from_action(action: &Action) -> Result<(Self, EncryptedBody)> {
@@ -217,6 +219,7 @@ impl EncryptionContext {
             group: body.group,
             epoch: body.epoch,
             parent: body.parent,
+            causation: body.causation,
         };
         value.aad()?;
         if body.ciphertext.is_empty()
@@ -267,11 +270,77 @@ impl EncryptionContext {
                 epoch: self.epoch,
                 ciphertext,
                 parent: self.parent,
+                causation: self.causation,
             })
             .map_err(|_| Error::Invalid)?,
             expected: self.expected.clone(),
             approval: self.approval,
             agreement: self.agreement,
         })
+    }
+}
+
+/// The authenticated home event retains all original AAD fields and exact ciphertext.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EncryptedEvent {
+    pub context: EncryptionContext,
+    pub ciphertext: crate::protocol::Blob,
+}
+impl EncryptedEvent {
+    pub fn validate_event(&self, event: &crate::protocol::Event) -> Result<()> {
+        let context = &self.context;
+        if context.home != event.home
+            || context.room != event.room
+            || context.operation_id != event.operation_id
+            || context.actor != event.actor
+            || context.operation != event.kind
+            || crate::protocol::action_digest(&context.action(self.ciphertext.0.clone())?)?
+                != event.action_digest
+        {
+            return Err(Error::Binding);
+        }
+        Ok(())
+    }
+}
+/// Versioned MLS plaintext. Limits apply to original text and grapheme-aligned mention spans.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ApplicationMessage {
+    pub text: String,
+    pub mentions: Vec<crate::messaging::Mention>,
+}
+impl ApplicationMessage {
+    pub fn validate(&self) -> Result<()> {
+        crate::text::message(&self.text).map_err(|_| Error::Invalid)?;
+        crate::messaging::mention_spans(&self.text, &self.mentions).map_err(|_| Error::Invalid)
+    }
+    pub fn bytes(&self) -> Result<Vec<u8>> {
+        self.validate()?;
+        encode(&("HRC MLS plaintext", 1u8, self))
+    }
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        let (domain, version, value): (String, u8, Self) = decode(bytes)?;
+        if domain != "HRC MLS plaintext" || version != 1 {
+            return Err(Error::Invalid);
+        }
+        value.validate()?;
+        Ok(value)
+    }
+}
+impl From<&str> for ApplicationMessage {
+    fn from(text: &str) -> Self {
+        Self {
+            text: text.to_owned(),
+            mentions: Vec::new(),
+        }
+    }
+}
+impl From<String> for ApplicationMessage {
+    fn from(text: String) -> Self {
+        Self {
+            text,
+            mentions: Vec::new(),
+        }
     }
 }

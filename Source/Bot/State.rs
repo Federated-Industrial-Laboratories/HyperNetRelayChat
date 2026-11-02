@@ -172,63 +172,7 @@ pub(super) struct Advance<'a> {
 pub(super) fn advance(store: &mut Store, a: Advance<'_>) -> Result<()> {
     store
         .write(|db| {
-            let (prior, live): (Option<Vec<u8>>, bool) = db.query_row(
-                "SELECT cursor,live FROM bot_rooms WHERE room=?1",
-                [a.room.to_string()],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )?;
-            if prior.as_deref() != a.prior.map(|b| b.0.as_slice()) {
-                return Err(rusqlite::Error::InvalidQuery);
-            }
-            if let Some((reply, trigger)) = a.reply {
-                let body: crate::messaging::Send = reply
-                    .action()
-                    .body
-                    .deserialized()
-                    .map_err(|_| rusqlite::Error::InvalidQuery)?;
-                if !live
-                    || reply.action().operation != Operation::MessageReply
-                    || reply.action().target != Target::Room(a.room)
-                    || matches!(reply.action().actor, Actor::Direct { .. })
-                    || body.parent != Some(trigger)
-                    || body.causation != Some(trigger)
-                {
-                    return Err(rusqlite::Error::InvalidQuery);
-                }
-                let pending: u64 =
-                    db.query_row("SELECT count(*) FROM bot_plans", [], |r| r.get(0))?;
-                if pending != 0 {
-                    return Err(rusqlite::Error::InvalidQuery);
-                }
-                let next: u64 = db.query_row(
-                    "SELECT next_reply FROM bot_meta WHERE singleton=1",
-                    [],
-                    |r| r.get(0),
-                )?;
-                if a.now.lower_ms < next {
-                    return Err(rusqlite::Error::InvalidQuery);
-                }
-                outbox::prepare_transaction(db, reply, a.window, a.now)?;
-                let id = reply.action().operation_id;
-                db.execute(
-                    "INSERT INTO bot_plans VALUES(?1,?2,?3,?4,?5)",
-                    params![
-                        encode(&Some(a.room))?,
-                        id.window.as_hex(),
-                        id.operation.as_hex(),
-                        reply.digest().as_bytes(),
-                        trigger.as_hex()
-                    ],
-                )?;
-                db.execute(
-                    "UPDATE bot_meta SET next_reply=?1 WHERE singleton=1",
-                    [a.now.upper_ms.saturating_add(5000)],
-                )?;
-            }
-            db.execute(
-                "UPDATE bot_rooms SET cursor=?1,live=?2 WHERE room=?3",
-                params![a.cursor.0, a.live, a.room.to_string()],
-            )?;
+            advance_in(db, &a)?;
             Ok(Commit::new(
                 (),
                 encode(&(
@@ -241,6 +185,69 @@ pub(super) fn advance(store: &mut Store, a: Advance<'_>) -> Result<()> {
             ))
         })
         .map_err(|_| Error::State)
+}
+pub(super) fn advance_in(db: &rusqlite::Transaction<'_>, a: &Advance<'_>) -> rusqlite::Result<()> {
+    let now = a.now.refresh().map_err(|_| rusqlite::Error::InvalidQuery)?;
+    let (prior, live): (Option<Vec<u8>>, bool) = db.query_row(
+        "SELECT cursor,live FROM bot_rooms WHERE room=?1",
+        [a.room.to_string()],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    if prior.as_deref() != a.prior.map(|b| b.0.as_slice()) {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    if let Some((reply, trigger)) = a.reply {
+        let (parent, causation) =
+            if let Ok(body) = reply.action().body.deserialized::<crate::messaging::Send>() {
+                (body.parent, body.causation)
+            } else {
+                let (_, body) = crate::crypto::EncryptionContext::from_action(reply.action())
+                    .map_err(|_| rusqlite::Error::InvalidQuery)?;
+                (body.parent, body.causation)
+            };
+        if !live
+            || reply.action().operation != Operation::MessageReply
+            || reply.action().target != Target::Room(a.room)
+            || matches!(reply.action().actor, Actor::Direct { .. })
+            || parent != Some(trigger)
+            || causation != Some(trigger)
+        {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let pending: u64 = db.query_row("SELECT count(*) FROM bot_plans", [], |r| r.get(0))?;
+        if pending != 0 {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let next: u64 = db.query_row(
+            "SELECT next_reply FROM bot_meta WHERE singleton=1",
+            [],
+            |r| r.get(0),
+        )?;
+        if now.lower_ms < next {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        outbox::prepare_transaction(db, reply, a.window, now)?;
+        let id = reply.action().operation_id;
+        db.execute(
+            "INSERT INTO bot_plans VALUES(?1,?2,?3,?4,?5)",
+            params![
+                encode(&Some(a.room))?,
+                id.window.as_hex(),
+                id.operation.as_hex(),
+                reply.digest().as_bytes(),
+                trigger.as_hex()
+            ],
+        )?;
+        db.execute(
+            "UPDATE bot_meta SET next_reply=?1 WHERE singleton=1",
+            [now.upper_ms.saturating_add(5000)],
+        )?;
+    }
+    db.execute(
+        "UPDATE bot_rooms SET cursor=?1,live=?2 WHERE room=?3",
+        params![a.cursor.0, a.live, a.room.to_string()],
+    )?;
+    Ok(())
 }
 pub(super) fn complete(store: &mut Store, plan: &Plan, outcome: &Outcome) -> Result<()> {
     if !matches!(

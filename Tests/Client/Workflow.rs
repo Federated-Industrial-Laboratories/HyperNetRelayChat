@@ -335,6 +335,8 @@ fn cached_pages_and_bound_drafts_survive_restart_without_clock_or_transport() {
         unreachable!()
     };
     let summary = conversations::Summary {
+        confidentiality: RoomConfidentiality::Community,
+        invited: false,
         room,
         name: "local".into(),
         topic: String::new(),
@@ -423,31 +425,6 @@ fn cached_pages_and_bound_drafts_survive_restart_without_clock_or_transport() {
     assert_eq!(prefs.text_scale, 1.25);
     assert!(prefs.quiet);
     let before = store.usage().unwrap().commit_counter;
-    for error in [
-        crate::client::Error::Refused {
-            code: ErrorCode::Unavailable,
-            detail: "TransportAuthorityExpired".into(),
-            retry_after_ms: None,
-        },
-        crate::client::Error::Refused {
-            code: ErrorCode::Overloaded,
-            detail: "StorageCapacity".into(),
-            retry_after_ms: Some(1000),
-        },
-        crate::client::Error::Refused {
-            code: ErrorCode::RateLimited,
-            detail: "OperationBudget".into(),
-            retry_after_ms: Some(1000),
-        },
-        crate::client::Error::Network(crate::client::network::Error::Transport),
-    ] {
-        assert!(!cache::inspection_failed(&mut store, room, &error).unwrap());
-        let saved = cache::room(&mut store, room).unwrap();
-        assert_eq!(saved.cursor.as_ref(), Some(&page.cursor));
-        assert_eq!(saved.events.len(), 1);
-        assert!(saved.gap.is_none());
-        assert_eq!(store.usage().unwrap().commit_counter, before);
-    }
     let mut altered = page.clone();
     altered.events[0].body = Value::Text("substitution".into());
     assert!(
@@ -477,17 +454,7 @@ fn cached_pages_and_bound_drafts_survive_restart_without_clock_or_transport() {
         )
         .is_err()
     );
-    assert!(
-        cache::inspection_failed(
-            &mut store,
-            room,
-            &crate::client::Error::Rejected {
-                code: ErrorCode::Denied,
-                detail: "Membership".into()
-            }
-        )
-        .unwrap()
-    );
+    cache::invalidate(&mut store, room).unwrap();
     let saved = cache::room(&mut store, room).unwrap();
     assert!(saved.events.is_empty());
     assert!(saved.cursor.is_none());
@@ -551,6 +518,83 @@ fn existing_mention_drafts_migrate_without_claiming_ownership_for_old_outbox_act
 }
 
 #[test]
+fn encrypted_draft_binding_is_exact_and_shares_the_outbox_transaction() {
+    let f = Fixture::new();
+    let mut store = f.create();
+    let original = action();
+    let Target::Room(room) = original.target else {
+        unreachable!()
+    };
+    let message: crate::messaging::Send = original.body.deserialized().unwrap();
+    let context = crate::crypto::EncryptionContext {
+        home: original.home,
+        room,
+        operation_id: original.operation_id,
+        actor: original.actor,
+        operation: original.operation,
+        expected: original.expected,
+        approval: None,
+        agreement: None,
+        group: id(60),
+        epoch: 1,
+        parent: None,
+        causation: None,
+    };
+    // Ciphertext is opaque to this local ownership boundary; its exact digest is
+    // bound alongside the plaintext draft, never decoded as a plaintext Send.
+    let encrypted = context.action(vec![1, 2, 3]).unwrap();
+    let verified = signed(&encrypted);
+    let now = TimeBounds::test_now();
+    let window = RetryWindow {
+        id: encrypted.operation_id.window,
+        expires_ms: now.upper_ms + 60000,
+    };
+    outbox::save_draft_mentions(&mut store, room, &message.text, &message.mentions).unwrap();
+    let failed: storage::Result<()> = store.write(|tx| {
+        outbox::prepare_transaction(tx, &verified, &window, now)?;
+        outbox::bind_draft_transaction(tx, &encrypted, &message)?;
+        Err(rusqlite::Error::InvalidQuery)
+    });
+    assert!(failed.is_err());
+    assert!(
+        outbox::pending(
+            &mut store,
+            &SigningKey::from_bytes(&[10; 32]).verifying_key()
+        )
+        .unwrap()
+        .is_empty()
+    );
+    assert!(!outbox::clear_sent_draft(&mut store, &encrypted).unwrap());
+    store
+        .write(|tx| {
+            outbox::prepare_transaction(tx, &verified, &window, now)?;
+            outbox::bind_draft_transaction(tx, &encrypted, &message)?;
+            Ok(storage::Commit::new(
+                (),
+                verified.digest().as_bytes().to_vec(),
+            ))
+        })
+        .unwrap();
+    assert!(
+        !outbox::clear_sent_draft(&mut store, &context.action(vec![4, 5, 6]).unwrap()).unwrap()
+    );
+    drop(store);
+    let mut reopened = f.open();
+    let pending = outbox::pending(
+        &mut reopened,
+        &SigningKey::from_bytes(&[10; 32]).verifying_key(),
+    )
+    .unwrap();
+    assert_eq!(pending[0].action.signed_bytes(), verified.signed_bytes());
+    outbox::save_draft_mentions(&mut reopened, room, &message.text, &message.mentions).unwrap();
+    assert!(!outbox::clear_sent_draft(&mut reopened, &encrypted).unwrap());
+    assert_eq!(
+        outbox::draft(&mut reopened, room).unwrap().as_deref(),
+        Some(message.text.as_str())
+    );
+}
+
+#[test]
 fn controller_starts_offline_and_preserves_correlated_drafts_with_one_store_owner() {
     use crate::client::{self, Command, ConnectionState, Controller, cache};
     let f = Fixture::new();
@@ -563,6 +607,8 @@ fn controller_starts_offline_and_preserves_correlated_drafts_with_one_store_owne
     cache::save_rooms(
         &mut store,
         &[crate::conversations::Summary {
+            confidentiality: RoomConfidentiality::Community,
+            invited: false,
             room,
             name: "offline".into(),
             topic: String::new(),
@@ -768,6 +814,146 @@ fn abandoned_unknown_operations_remain_exact_and_can_record_a_late_outcome() {
     assert!(abandoned && terminal);
 }
 
+#[test]
+fn epoch_ready_settlement_survives_refusal_resolution_restart_and_atomic_failure() {
+    use crate::client::{archive, cache};
+    for mode in 0..3 {
+        let fixture = Fixture::new();
+        let mut store = fixture.create();
+        cache::initialize(&mut store).unwrap();
+        let mut original = action();
+        original.operation = Operation::CryptoEpochReady;
+        let ready = crate::confidential::Ready {
+            group: id(31),
+            epoch: 2,
+            commit_digest: id(32),
+            sequence: 7,
+            welcome: None,
+        };
+        original.body = Value::serialized(&ready).unwrap();
+        let original = signed(&original);
+        let now = TimeBounds::test_now();
+        let window = RetryWindow {
+            id: original.action().operation_id.window,
+            expires_ms: now.upper_ms + 60000,
+        };
+        outbox::prepare(&mut store, &original, &window, now).unwrap();
+        let refused = reply(
+            &original,
+            Outcome::Refused {
+                code: ErrorCode::Unavailable,
+                detail: "TransportAuthorityExpired".into(),
+                retry_after_ms: Some(1000),
+            },
+        );
+        outbox::record(&mut store, &original, &refused, now).unwrap();
+        let marker = archive::ready_key(ready.group, ready.epoch, ready.commit_digest);
+        assert!(!cache::preferences::<bool>(&mut store, &marker).unwrap());
+        drop(store);
+        let mut store = fixture.open();
+        let pending = outbox::pending(
+            &mut store,
+            &SigningKey::from_bytes(&[10; 32]).verifying_key(),
+        )
+        .unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].action.signed_bytes(), original.signed_bytes());
+        let committed = Outcome::Committed {
+            event: None,
+            position: 8,
+            body: Value::Null,
+        };
+        if mode == 0 {
+            store.write(|tx| {
+                tx.execute_batch("CREATE TRIGGER deny_ready BEFORE INSERT ON client_preferences BEGIN SELECT RAISE(ABORT,'ready write failed'); END;")?;
+                Ok(storage::Commit::new((), b"atomic readiness failure".to_vec()))
+            }).unwrap();
+            assert!(
+                outbox::record(
+                    &mut store,
+                    &original,
+                    &reply(&original, committed.clone()),
+                    now
+                )
+                .is_err()
+            );
+            assert_eq!(
+                outbox::pending(
+                    &mut store,
+                    &SigningKey::from_bytes(&[10; 32]).verifying_key()
+                )
+                .unwrap()
+                .len(),
+                1
+            );
+            store
+                .write(|tx| {
+                    tx.execute_batch("DROP TRIGGER deny_ready")?;
+                    Ok(storage::Commit::new(
+                        (),
+                        b"restore readiness writer".to_vec(),
+                    ))
+                })
+                .unwrap();
+        } else {
+            let mut query = original.action().clone();
+            query.operation_id.operation = id(33);
+            query.operation = Operation::OperationResolve;
+            query.target = Target::Service;
+            query.body = Value::serialized(&home::Resolve {
+                operation_id: original.action().operation_id,
+                action_digest: original.digest(),
+            })
+            .unwrap();
+            let query = signed(&query);
+            let result = reply(
+                &query,
+                Outcome::Result {
+                    body: Value::serialized(&home::ResolveResult {
+                        operation_id: original.action().operation_id,
+                        action_digest: original.digest(),
+                        outcome: if mode == 1 {
+                            committed.clone()
+                        } else {
+                            Outcome::Absent
+                        },
+                    })
+                    .unwrap(),
+                },
+            );
+            outbox::record_resolution(&mut store, &original, &query, &result, now).unwrap();
+            if mode == 2 {
+                assert!(!cache::preferences::<bool>(&mut store, &marker).unwrap());
+                assert_eq!(
+                    outbox::pending(
+                        &mut store,
+                        &SigningKey::from_bytes(&[10; 32]).verifying_key()
+                    )
+                    .unwrap()[0]
+                        .action
+                        .signed_bytes(),
+                    original.signed_bytes()
+                );
+            }
+        }
+        if mode != 1 {
+            outbox::record(&mut store, &original, &reply(&original, committed), now).unwrap();
+        }
+        assert!(cache::preferences::<bool>(&mut store, &marker).unwrap());
+        assert!(
+            outbox::pending(
+                &mut store,
+                &SigningKey::from_bytes(&[10; 32]).verifying_key()
+            )
+            .unwrap()
+            .is_empty()
+        );
+        drop(store);
+        let mut store = fixture.open();
+        assert!(cache::preferences::<bool>(&mut store, &marker).unwrap());
+    }
+}
+
 #[path = "PresentationFixture.rs"]
 mod presentation_fixture;
 
@@ -798,6 +984,26 @@ fn transient_nonadmission_preserves_retry_guidance_but_terminal_or_invalid_input
         retry_after_ms: Some(u64::MAX),
     });
     assert_eq!(extreme.retry_delay_ms(), Some(60000));
+    for (code, expected) in [
+        (ErrorCode::Denied, "OperationDenied"),
+        (ErrorCode::Expired, "OperationExpired"),
+    ] {
+        for outcome in [
+            Outcome::Rejected {
+                code,
+                detail: "Permanent policy result".into(),
+            },
+            Outcome::Refused {
+                code,
+                detail: "Permanent admission result".into(),
+                retry_after_ms: None,
+            },
+        ] {
+            let error = Error::from_outcome(outcome);
+            assert_eq!(error.code(), expected);
+            assert_eq!(error.retry_delay_ms(), None);
+        }
+    }
     for code in [
         ErrorCode::Denied,
         ErrorCode::Expired,
@@ -822,3 +1028,28 @@ fn transient_nonadmission_preserves_retry_guidance_but_terminal_or_invalid_input
         assert_eq!(Error::Network(failure).retry_delay_ms(), None);
     }
 }
+
+#[test]
+fn identity_api_keeps_proof_bytes_and_exact_current_state() {
+    let mut a = action();
+    a.operation = Operation::AccountEnrolEndpoint;
+    a.target = Target::Account(a.actor.acting().account);
+    a.body = Value::serialized(&crate::identity::ApproveEndpoint {
+        request: Blob(vec![0, 0xff, 0x80]),
+        revision: 7,
+        head: id(25),
+    })
+    .unwrap();
+    let json = crate::client::json::value(&a).unwrap();
+    assert_eq!(json["body"]["request"], "00ff80");
+    let converted = crate::client::json::action(&serde_json::to_vec(&json).unwrap()).unwrap();
+    assert_eq!(action_bytes(&a).unwrap(), action_bytes(&converted).unwrap());
+    let mut invalid = json;
+    invalid["body"]["head"] = serde_json::json!([25, 25]);
+    assert!(crate::client::json::action(&serde_json::to_vec(&invalid).unwrap()).is_err());
+}
+
+#[path = "EncryptedArchive.rs"]
+mod encrypted_archive;
+#[path = "Trust.rs"]
+mod trust_checks;

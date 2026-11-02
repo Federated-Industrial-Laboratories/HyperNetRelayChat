@@ -14,6 +14,8 @@ fn snapshot() -> Snapshot {
         service: id(4),
     };
     let summary = hrc::conversations::Summary {
+        confidentiality: RoomConfidentiality::Community,
+        invited: false,
         room: RoomId { home, local: id(5) },
         name: "room".into(),
         topic: String::new(),
@@ -33,6 +35,8 @@ fn snapshot() -> Snapshot {
         privacy: None,
         rooms: vec![summary.clone()],
         selected: Some(hrc::client::RoomView {
+            crypto: None,
+            content: std::collections::BTreeMap::new(),
             summary,
             members: vec![hrc::conversations::Member {
                 account,

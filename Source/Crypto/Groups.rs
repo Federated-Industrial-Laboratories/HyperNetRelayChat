@@ -41,6 +41,14 @@ pub enum Change<'a> {
     Remove(&'a [Id]),
     Update,
 }
+/// One membership proposal and its authenticated source epoch.
+pub struct TransitionPreparation<'a> {
+    pub group: Id,
+    pub epoch: u64,
+    pub current: &'a ApprovedRoster,
+    pub next: &'a ApprovedRoster,
+    pub change: Change<'a>,
+}
 
 impl Device {
     pub fn publish_key_package(&self, store: &mut Store, room: RoomId) -> Result<Vec<u8>> {
@@ -75,6 +83,16 @@ impl Device {
         group: Id,
         roster: &ApprovedRoster,
         cursor: u64,
+    ) -> Result<Vec<u8>> {
+        self.create_group_with(store, group, roster, cursor, |_, _| Ok(()))
+    }
+    pub fn create_group_with(
+        &self,
+        store: &mut Store,
+        group: Id,
+        roster: &ApprovedRoster,
+        cursor: u64,
+        persist: impl FnOnce(&Transaction<'_>, &[u8]) -> Result<()>,
     ) -> Result<Vec<u8>> {
         self.check(roster)?;
         if roster.members().len() != 1 || cursor > i64::MAX as u64 {
@@ -117,6 +135,7 @@ impl Device {
                 "INSERT INTO crypto_creation(group_id,request,info) VALUES(?1,?2,?3)",
                 rusqlite::params![group.as_bytes().as_slice(), request, info],
             )?;
+            persist(tx, &info)?;
             Ok((info.clone(), info))
         })
     }
@@ -148,6 +167,33 @@ impl Device {
         next: &ApprovedRoster,
         change: Change<'_>,
     ) -> Result<PendingTransition> {
+        self.prepare_transition_with(
+            store,
+            TransitionPreparation {
+                group,
+                epoch,
+                current,
+                next,
+                change,
+            },
+            |_, _| Ok(()),
+        )
+    }
+    /// Persist the exact application operation in the same transaction as the MLS
+    /// candidate. Existing candidates retain their bytes when attaching legacy state.
+    pub fn prepare_transition_with(
+        &self,
+        store: &mut Store,
+        preparation: TransitionPreparation<'_>,
+        persist: impl FnOnce(&Transaction<'_>, &PendingTransition) -> Result<()>,
+    ) -> Result<PendingTransition> {
+        let TransitionPreparation {
+            group,
+            epoch,
+            current,
+            next,
+            change,
+        } = preparation;
         self.check(current)?;
         if current.room() != next.room() {
             return Err(Error::Binding);
@@ -177,6 +223,7 @@ impl Device {
                     epoch,
                     commit,
                 };
+                persist(tx, &value)?;
                 return Ok((value.clone(), encode(&value)?));
             }
             let outstanding: bool = tx.query_row(
@@ -277,6 +324,7 @@ impl Device {
                 epoch,
                 commit,
             };
+            persist(tx, &value)?;
             Ok((value.clone(), encode(&value)?))
         })
     }
@@ -288,6 +336,16 @@ impl Device {
         order: TransitionOrder,
         commit: &[u8],
         next: &ApprovedRoster,
+    ) -> Result<EpochReceipt> {
+        self.accept_transition_with(store, order, commit, next, |_, _| Ok(()))
+    }
+    pub fn accept_transition_with(
+        &self,
+        store: &mut Store,
+        order: TransitionOrder,
+        commit: &[u8],
+        next: &ApprovedRoster,
+        persist: impl FnOnce(&Transaction<'_>, &EpochReceipt) -> Result<()>,
     ) -> Result<EpochReceipt> {
         let TransitionOrder {
             group,
@@ -366,6 +424,7 @@ impl Device {
                 welcome,
             };
             tx.execute("INSERT INTO crypto_transitions(group_id,sequence,input_digest,result) VALUES(?1,?2,?3,?4)",rusqlite::params![group.as_bytes().as_slice(),sequence,digest(&input).as_bytes().as_slice(),encode(&value)?])?;
+            persist(tx, &value)?;
             Ok((value.clone(), encode(&value)?))
         });
         if matches!(result, Err(Error::Verification | Error::Binding)) {
@@ -383,21 +442,22 @@ impl Device {
     pub fn reject_transition(&self, store: &mut Store, group: Id, commit_digest: Id) -> Result<()> {
         let input = encode(&(group, commit_digest))?;
         atomic(store, "reject transition", &input, |tx| {
-            let commit: Vec<u8> = tx.query_row(
-                "SELECT commit_bytes FROM crypto_pending WHERE group_id=?1",
+            let epoch: u64 = tx.query_row(
+                "SELECT epoch FROM crypto_pending WHERE group_id=?1",
                 [group.as_bytes().as_slice()],
                 |r| r.get(0),
             )?;
-            if digest(&commit) != commit_digest {
+            self.group(&Provider::new(tx), group)?;
+            if !reject_transition_in(
+                tx,
+                metadata(tx, group)?.0,
+                group,
+                epoch,
+                commit_digest,
+                None,
+            )? {
                 return Err(Error::Conflict);
             }
-            let provider = Provider::new(tx);
-            let mut mls = self.group(&provider, group)?;
-            mls.clear_pending_commit(provider.storage())?;
-            tx.execute(
-                "DELETE FROM crypto_pending WHERE group_id=?1",
-                [group.as_bytes().as_slice()],
-            )?;
             Ok(((), input.clone()))
         })
     }
@@ -410,6 +470,31 @@ impl Device {
         welcome: &[u8],
         roster: &ApprovedRoster,
     ) -> Result<GroupState> {
+        self.join_with(
+            store,
+            WelcomeJoin {
+                group,
+                epoch,
+                cursor,
+                welcome,
+                roster,
+            },
+            |_, _| Ok(()),
+        )
+    }
+    pub fn join_with(
+        &self,
+        store: &mut Store,
+        join: WelcomeJoin<'_>,
+        persist: impl FnOnce(&Transaction<'_>, &GroupState) -> Result<()>,
+    ) -> Result<GroupState> {
+        let WelcomeJoin {
+            group,
+            epoch,
+            cursor,
+            welcome,
+            roster,
+        } = join;
         self.check(roster)?;
         let input = encode(&(group, epoch, cursor, digest(welcome), roster))?;
         atomic(store, "welcome", &input, |tx| {
@@ -467,9 +552,84 @@ impl Device {
                     encode(&value)?
                 ],
             )?;
+            persist(tx, &value)?;
             Ok((value.clone(), encode(&value)?))
         })
     }
+}
+
+/// Join a verified terminal rejection to the exact HRC outbox outcome. A repeated
+/// or older rejection cannot erase another locally prepared membership change.
+pub(crate) fn reject_transition_in(
+    tx: &Transaction<'_>,
+    room: RoomId,
+    group: Id,
+    epoch: u64,
+    commit_digest: Id,
+    operation: Option<(crate::protocol::OperationId, Id)>,
+) -> Result<bool> {
+    let pending: Option<(u64, Vec<u8>, Option<Vec<u8>>)> = tx
+        .query_row(
+            "SELECT epoch,commit_bytes,operation FROM crypto_pending WHERE group_id=?1",
+            [group.as_bytes().as_slice()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    let Some((saved_epoch, commit, binding)) = pending else {
+        return Ok(false);
+    };
+    if saved_epoch != epoch || digest(&commit) != commit_digest {
+        return Ok(false);
+    }
+    if metadata(tx, group)?.0 != room {
+        return Ok(false);
+    }
+    if let Some(operation) = operation
+        && binding.as_ref() != Some(&encode(&operation)?)
+    {
+        return Ok(false);
+    }
+    let provider = Provider::new(tx);
+    let mut mls = load(&provider, group)?;
+    mls.clear_pending_commit(provider.storage())?;
+    tx.execute(
+        "DELETE FROM crypto_pending WHERE group_id=?1",
+        [group.as_bytes().as_slice()],
+    )?;
+    Ok(true)
+}
+
+/// Attach an exact signed operation once, including a legacy unbound candidate.
+pub(crate) fn bind_transition_in(
+    tx: &Transaction<'_>,
+    pending: &PendingTransition,
+    operation: crate::protocol::OperationId,
+    action_digest: Id,
+) -> Result<()> {
+    let (epoch, bytes, previous): (u64, Vec<u8>, Option<Vec<u8>>) = tx.query_row(
+        "SELECT epoch,commit_bytes,operation FROM crypto_pending WHERE group_id=?1",
+        [pending.group.as_bytes().as_slice()],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )?;
+    let binding = encode(&(operation, action_digest))?;
+    if epoch != pending.epoch
+        || bytes != pending.commit
+        || previous.as_ref().is_some_and(|old| old != &binding)
+    {
+        return Err(Error::Conflict);
+    }
+    tx.execute(
+        "UPDATE crypto_pending SET operation=?1 WHERE group_id=?2",
+        rusqlite::params![binding, pending.group.as_bytes().as_slice()],
+    )?;
+    Ok(())
+}
+pub struct WelcomeJoin<'a> {
+    pub group: Id,
+    pub epoch: u64,
+    pub cursor: u64,
+    pub welcome: &'a [u8],
+    pub roster: &'a ApprovedRoster,
 }
 fn credential_value(value: &EndpointCredential) -> Result<Credential> {
     Ok(BasicCredential::new(value.bytes()?).into())

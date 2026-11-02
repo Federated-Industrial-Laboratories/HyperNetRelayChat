@@ -38,6 +38,10 @@ pub struct Summary {
     pub sequence: u64,
     pub joined: bool,
     pub unread: u64,
+    #[serde(default)]
+    pub confidentiality: RoomConfidentiality,
+    #[serde(default)]
+    pub invited: bool,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -74,6 +78,7 @@ pub(crate) struct Access {
     pub access_digest: Id,
     pub moderator: bool,
     pub earliest: u64,
+    pub confidentiality: RoomConfidentiality,
 }
 pub(crate) fn target(action: &Action) -> Domain<RoomId> {
     match action.target {
@@ -114,12 +119,7 @@ pub(crate) fn access(db: &Connection, action: &Action, now: TimeBounds) -> Domai
     let Some((sequence, revision, earliest, mode)) = data else {
         return deny("RoomUnavailable");
     };
-    if mode != 0 {
-        return Err(Fault::Reject(
-            ErrorCode::UnsupportedFeature,
-            "RoomEncryption",
-        ));
-    }
+    let confidentiality = mode_value(mode)?;
     if restriction(db, room, &action.actor, 2, now)? {
         return deny("RoomBan");
     }
@@ -154,11 +154,14 @@ pub(crate) fn access(db: &Connection, action: &Action, now: TimeBounds) -> Domai
         access_digest,
         moderator,
         earliest,
+        confidentiality,
     })
 }
 pub(crate) fn operate(db: &Transaction<'_>, action: &Action, now: TimeBounds) -> Domain<Outcome> {
     match action.operation {
         Operation::RoomCreate => create(db, action, now),
+        Operation::DirectCreate => direct(db, action, now),
+        Operation::RoomInvite => invite(db, action, now),
         Operation::RoomList => list(db, action, now),
         Operation::RoomInspect => inspection::read(db, action, now),
         Operation::RoomJoin => join(db, action, now),
@@ -184,6 +187,7 @@ pub(crate) fn operate(db: &Transaction<'_>, action: &Action, now: TimeBounds) ->
                 "UPDATE hrc_rooms SET revision=revision+1 WHERE id=?1",
                 [access.room.to_string()],
             )?;
+            crate::confidential::invalidate_accounts(db, &[action.actor.represented()])?;
             crate::messaging::record(db, action, access.room, Value::Null, "", now)
         }
         Operation::RoomSetTopic => {
@@ -209,16 +213,54 @@ pub(crate) fn operate(db: &Transaction<'_>, action: &Action, now: TimeBounds) ->
         _ => invalid("RoomOperation"),
     }
 }
+pub(crate) fn mode_value(mode: u8) -> Domain<RoomConfidentiality> {
+    match mode {
+        0 => Ok(RoomConfidentiality::Community),
+        1 => Ok(RoomConfidentiality::ConfidentialDirect),
+        2 => Ok(RoomConfidentiality::PrivateGroup),
+        _ => Err(Fault::Sql(rusqlite::Error::InvalidQuery)),
+    }
+}
 fn create(db: &Transaction<'_>, action: &Action, now: TimeBounds) -> Domain<Outcome> {
+    let body: Create = unpack(&action.body)?;
+    if body.confidentiality == RoomConfidentiality::ConfidentialDirect {
+        return invalid("UseDirectCreate");
+    }
+    create_room(db, action, now, &body, None)
+}
+fn direct(db: &Transaction<'_>, action: &Action, now: TimeBounds) -> Domain<Outcome> {
+    let body: crate::confidential::Direct = unpack(&action.body)?;
+    if body.recipient == action.actor.represented() {
+        return invalid("DirectRecipient");
+    }
+    let exists: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM hrc_accounts WHERE id=?1)",
+        [body.recipient.to_string()],
+        |r| r.get(0),
+    )?;
+    if !exists || crate::moderation::ignored(db, body.recipient, &action.actor)? {
+        return deny("RecipientUnavailable");
+    }
+    create_room(
+        db,
+        action,
+        now,
+        &Create {
+            name: "Direct".into(),
+            confidentiality: RoomConfidentiality::ConfidentialDirect,
+        },
+        Some(body.recipient),
+    )
+}
+fn create_room(
+    db: &Transaction<'_>,
+    action: &Action,
+    now: TimeBounds,
+    body: &Create,
+    recipient: Option<AccountId>,
+) -> Domain<Outcome> {
     if action.target != Target::Service || matches!(action.actor, Actor::Delegated { .. }) {
         return deny("RoomCreation");
-    }
-    let body: Create = unpack(&action.body)?;
-    if body.confidentiality != RoomConfidentiality::Community {
-        return Err(Fault::Reject(
-            ErrorCode::UnsupportedFeature,
-            "RoomEncryption",
-        ));
     }
     crate::text::handle(&body.name)
         .map_err(|_| Fault::Reject(ErrorCode::InvalidInput, "RoomName"))?;
@@ -230,8 +272,12 @@ fn create(db: &Transaction<'_>, action: &Action, now: TimeBounds) -> Domain<Outc
         home: action.home,
         local: random()?,
     };
-    let body = value(&(room, &body.name))?;
-    db.execute("INSERT INTO hrc_rooms(id,room,name,topic,owner,revision,sequence,created) VALUES(?1,?2,?3,'',?4,1,0,?5)",params![room.to_string(),encode(&room)?,unpack::<Create>(&action.body)?.name,action.actor.represented().to_string(),now.lower_ms])?;
+    let mode = match body.confidentiality {
+        RoomConfidentiality::Community => 0,
+        RoomConfidentiality::ConfidentialDirect => 1,
+        RoomConfidentiality::PrivateGroup => 2,
+    };
+    db.execute("INSERT INTO hrc_rooms(id,room,name,topic,owner,revision,sequence,created,mode) VALUES(?1,?2,?3,'',?4,1,0,?5,?6)",params![room.to_string(),encode(&room)?,body.name,action.actor.represented().to_string(),now.lower_ms,mode])?;
     db.execute(
         "INSERT INTO hrc_members VALUES(?1,?2,1,1,?3,1)",
         params![
@@ -240,7 +286,64 @@ fn create(db: &Transaction<'_>, action: &Action, now: TimeBounds) -> Domain<Outc
             now.lower_ms
         ],
     )?;
-    crate::messaging::record(db, action, room, body, "", now)
+    if mode != 0 {
+        db.execute(
+            "INSERT INTO hrc_encrypted_rooms(room) VALUES(?1)",
+            [room.to_string()],
+        )?;
+    }
+    if let Some(recipient) = recipient {
+        db.execute(
+            "INSERT INTO hrc_room_invitations VALUES(?1,?2,?3,?4)",
+            params![
+                room.to_string(),
+                recipient.to_string(),
+                action.actor.represented().to_string(),
+                now.lower_ms + DAY
+            ],
+        )?;
+    }
+    crate::messaging::record(db, action, room, value(&(room, &body.name))?, "", now)
+}
+fn invite(db: &Transaction<'_>, action: &Action, now: TimeBounds) -> Domain<Outcome> {
+    let body: crate::confidential::Invite = unpack(&action.body)?;
+    let a = access(db, action, now)?;
+    if !a.moderator
+        || matches!(action.actor, Actor::Delegated { .. })
+        || a.confidentiality != RoomConfidentiality::PrivateGroup
+    {
+        return deny("PrivateGroupModerator");
+    }
+    let exists: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM hrc_accounts WHERE id=?1)",
+        [body.account.to_string()],
+        |r| r.get(0),
+    )?;
+    if !exists || crate::moderation::ignored(db, body.account, &action.actor)? {
+        return deny("RecipientUnavailable");
+    }
+    let joined: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM hrc_members WHERE room=?1 AND account=?2 AND active=1)",
+        params![a.room.to_string(), body.account.to_string()],
+        |r| r.get(0),
+    )?;
+    if joined {
+        return conflict("AlreadyJoined");
+    }
+    db.execute(
+        "DELETE FROM hrc_room_invitations WHERE room=?1 AND expires<=?2",
+        params![a.room.to_string(), now.lower_ms],
+    )?;
+    let count: u64 = db.query_row(
+        "SELECT count(*) FROM hrc_room_invitations WHERE room=?1",
+        [a.room.to_string()],
+        |r| r.get(0),
+    )?;
+    if count >= 32 {
+        return Err(Fault::Reject(ErrorCode::Overloaded, "InvitationLimit"));
+    }
+    db.execute("INSERT INTO hrc_room_invitations VALUES(?1,?2,?3,?4) ON CONFLICT(room,account) DO UPDATE SET inviter=excluded.inviter,expires=excluded.expires",params![a.room.to_string(),body.account.to_string(),action.actor.represented().to_string(),now.lower_ms+DAY])?;
+    crate::messaging::record(db, action, a.room, value(&body)?, "", now)
 }
 fn join(db: &Transaction<'_>, action: &Action, now: TimeBounds) -> Domain<Outcome> {
     empty(&action.body)?;
@@ -252,9 +355,19 @@ fn join(db: &Transaction<'_>, action: &Action, now: TimeBounds) -> Domain<Outcom
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()?;
-    let Some((revision, 0)) = existing else {
+    let Some((revision, mode)) = existing else {
         return deny("RoomUnavailable");
     };
+    mode_value(mode)?;
+    if mode != 0 {
+        if matches!(action.actor, Actor::Delegated { .. }) {
+            return deny("InvitationRecipient");
+        }
+        let invited:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM hrc_room_invitations WHERE room=?1 AND account=?2 AND expires>?3)",params![room.to_string(),action.actor.represented().to_string(),now.upper_ms],|r|r.get(0))?;
+        if !invited {
+            return deny("InvitationRequired");
+        }
+    }
     home::check_revision(action, Revision::Room, revision)?;
     if restriction(db, room, &action.actor, 2, now)? {
         return deny("RoomBan");
@@ -274,13 +387,17 @@ fn join(db: &Transaction<'_>, action: &Action, now: TimeBounds) -> Domain<Outcom
         [room.to_string()],
         |r| r.get(0),
     )?;
-    if count >= 32 {
+    if count >= if mode == 1 { 2 } else { 32 } {
         return Err(Fault::Reject(ErrorCode::Overloaded, "MemberLimit"));
     }
     db.execute("INSERT INTO hrc_members VALUES(?1,?2,1,1,?3,0) ON CONFLICT(room,account) DO UPDATE SET active=1,revision=revision+1,history_from=excluded.history_from",params![room.to_string(),action.actor.represented().to_string(),now.lower_ms])?;
     db.execute(
         "UPDATE hrc_rooms SET revision=revision+1 WHERE id=?1",
         [room.to_string()],
+    )?;
+    db.execute(
+        "DELETE FROM hrc_room_invitations WHERE room=?1 AND account=?2",
+        params![room.to_string(), action.actor.represented().to_string()],
     )?;
     crate::messaging::record(db, action, room, Value::Null, "", now)
 }
@@ -298,11 +415,12 @@ fn list(db: &Transaction<'_>, action: &Action, now: TimeBounds) -> Domain<Outcom
     if matches!(action.actor, Actor::Delegated { .. }) {
         return deny("ExplicitRoomScope");
     }
-    let mut stmt=db.prepare("SELECT r.room,r.name,r.topic,r.revision,r.sequence,COALESCE(m.active,0),COALESCE(u.sequence,0),COALESCE(m.history_from,0) FROM hrc_rooms r LEFT JOIN hrc_members m ON m.room=r.id AND m.account=?1 LEFT JOIN hrc_unread u ON u.room=r.id AND u.account=?1 WHERE r.id>?2 AND r.mode=0 ORDER BY r.id LIMIT 256")?;
+    let mut stmt=db.prepare("SELECT r.room,r.name,r.topic,r.revision,r.sequence,COALESCE(m.active,0),COALESCE(u.sequence,0),COALESCE(m.history_from,0),r.mode,EXISTS(SELECT 1 FROM hrc_room_invitations i WHERE i.room=r.id AND i.account=?1 AND i.expires>?3) FROM hrc_rooms r LEFT JOIN hrc_members m ON m.room=r.id AND m.account=?1 LEFT JOIN hrc_unread u ON u.room=r.id AND u.account=?1 WHERE r.id>?2 AND (r.mode=0 OR m.active=1 OR EXISTS(SELECT 1 FROM hrc_room_invitations i WHERE i.room=r.id AND i.account=?1 AND i.expires>?3)) ORDER BY r.id LIMIT 256")?;
     let rows = stmt.query_map(
         params![
             action.actor.represented().to_string(),
-            body.after.map(|v| v.to_string()).unwrap_or_default()
+            body.after.map(|v| v.to_string()).unwrap_or_default(),
+            now.upper_ms
         ],
         |r| {
             Ok((
@@ -314,12 +432,15 @@ fn list(db: &Transaction<'_>, action: &Action, now: TimeBounds) -> Domain<Outcom
                 r.get::<_, bool>(5)?,
                 r.get::<_, u64>(6)?,
                 r.get::<_, u64>(7)?,
+                r.get::<_, u8>(8)?,
+                r.get::<_, bool>(9)?,
             ))
         },
     )?;
     let mut result = Vec::new();
     for row in rows {
-        let (room, name, topic, revision, sequence, joined, read, history_from) = row?;
+        let (room, name, topic, revision, sequence, joined, read, history_from, mode, invited) =
+            row?;
         if restriction(db, room, &action.actor, 2, now)? {
             continue;
         }
@@ -336,6 +457,8 @@ fn list(db: &Transaction<'_>, action: &Action, now: TimeBounds) -> Domain<Outcom
             sequence,
             joined,
             unread,
+            confidentiality: mode_value(mode)?,
+            invited,
         });
         if canonical_encode(&value(&result)?, ORDINARY_FRAME_BYTES - 4096).is_err() {
             result.pop();

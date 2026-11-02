@@ -8,6 +8,8 @@ pub mod bot;
 pub mod client;
 #[path = "Clock/Mod.rs"]
 pub mod clock;
+#[path = "Confidential/Mod.rs"]
+pub mod confidential;
 #[path = "Conversations/Mod.rs"]
 pub mod conversations;
 #[path = "Crypto/Mod.rs"]

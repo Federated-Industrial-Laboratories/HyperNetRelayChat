@@ -88,15 +88,19 @@ local archive holds at most 4,096 events and 16 MiB of encoded event data, with 
 seven-day content retention window. A selected snapshot contains at most 256
 events. The archive is a bounded local copy, not a complete service backup.
 Conflicting event identities or ordering positions fail without advancing the
-cursor. Preferences and candidate approvals share the encrypted store. Search
-results are bounded transient views and are not placed in a plaintext index.
+cursor. Preferences and candidate approvals share the encrypted store. Community search results are bounded transient views. Encrypted conversations
+use a local index inside the endpoint SQLCipher store; the service receives no
+plaintext index.
 
 Cached views explicitly show stale status until current filtered history is read.
 Resume uses the service's current membership, grant, retention and recipient
 filter checks. An expired or changed access cursor produces an explicit gap;
 resynchronisation discards the invalid cached presentation and starts a current
 history pull. Disappeared or unjoined rooms lose cached events. A transport failure
-keeps drafts and exact uncertain outbox bytes. Reconnect uses capped exponential
+keeps drafts, retained history, its signed cursor and exact uncertain outbox bytes.
+A transient authority/availability refusal cannot fabricate an access-withdrawal
+gap; only explicit denied, expired or resynchronisation outcomes invalidate the
+current cached presentation. Reconnect uses capped exponential
 backoff with jitter, fresh permission, and original operation resolution.
 
 A committed effect clears a draft only when the stored draft still belongs to
@@ -187,6 +191,69 @@ The [deterministic service bot](ServiceBots.md) uses the same current session,
 signed operations and exact outbox. Its separate durable trigger cursor and
 planned reply commit atomically, so transient interface notifications are never
 used as persistent automation progress.
+
+
+## Confidential conversations
+
+`prepare_send` first reads current room metadata. Community text and encrypted
+messages take distinct typed paths before any content is transmitted. Encrypted
+sends verify pinned contacts and the current endpoint roster, then atomically
+persist the MLS sender state, exact ciphertext Action and ordinary outbox. The
+internal `prepare_send_with` also accepts a transaction-local finalizer for the
+bot's cursor/plan. It cannot perform network I/O. Preparing a candidate with an
+approval ID marks its outbox record held: reconnect never submits it automatically.
+`submit_candidate` requires the exact currently approved digest and grant before
+releasing that held record. Explicit abandonment retains an honest unknown outcome.
+
+`CryptoEnrol`, `CryptoPublish`, `CryptoInitialise`, `CryptoCommit`, `CryptoSync`
+and `CryptoInspect` operate through the same current session and guarded store.
+Private groups and confidential direct rooms have explicit invitations; membership
+alone does not import prior keys. Each explicit package publication creates a fresh
+one-use package, bounded to 64 unused local packages. Exact uncertain publications
+are resolved before another is prepared. Successful MLS transitions and their
+verified rosters share one commit; a missing future epoch produces an explicit
+gap. Epoch-ready acknowledgement is sent only for the selected latest epoch and
+an endpoint currently eligible for live content.
+
+The selected room exposes an encryption view, exact roster, pending packages,
+barrier and contact trust status. `TrustContact` accepts an exact displayed anchor
+and its legacy/nonlegacy classification. New registration anchors require explicit
+acceptance too. Public continuity records are replayed cryptographically; a pinned
+anchor and prior head cannot be replaced by a home-only assertion. Historical
+transition evidence permits verification of former participants within current
+history rights. Separate MLS keys are generated for each enrolled endpoint.
+
+`RoomView.content`, `SearchView.content` and `ConversationPage.content` hold local
+plaintext or a precise rejection separately from the unchanged authenticated
+Event. Serialized content maps use the original message ID as a hex text key.
+Encrypted approvals use the same principle, keyed by exact candidate action digest.
+Inspection decrypts a candidate once; approval requires inspectable valid content.
+Matching delivery consumes the saved preview rather than advancing the receive
+ratchet a second time.
+
+Online `history_messages`, `search_messages` and `message_context` apply current
+room/grant/filter rules. Search and context use only already decrypted local copies,
+including permitted past-only grants, without requiring current live admission or
+new history keys. `search_retained` is an explicit offline operation with stale
+status. Results retain the original authenticated event and message identity.
+The local FTS index, plaintext and consumed delivery copy expire with the event.
+Unresolved outbox/approval records have bounded explicit retention until resolution;
+no expiry is reported as successful delivery or authoritative rejection.
+
+
+The private encryption-view cache stores the remote snapshot and each contact as
+separately bounded canonical objects. A full 256-entry filter list can coexist
+with 256 contact views without exceeding the protocol parser's recursive-node
+budget. The aggregate cache record remains bounded to 256 KiB; each contact is
+bounded to 2 KiB. Capacity is checked before dependent contact or crypto effects.
+The public view remains structured data for the interfaces.
+
+CLI history and search return `ConversationPage` with original `events`, separate
+local `content`, cursor and access state. Agent inspection returns `GrantPreview`
+with its grant inspection, exact candidates and decrypted proposal content.
+Preflight permission failures report `OperationDenied` or `OperationExpired`;
+temporary non-admission reports `OperationTemporarilyUnavailable`. These failures
+do not claim that a message was committed or delivered.
 
 A temporary room-inspection or transport failure keeps the retained cursor and
 history, marked stale until a fresh authorised read succeeds. It does not create

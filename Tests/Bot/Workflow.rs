@@ -304,6 +304,68 @@ fn rule_never_responds_to_agent_actors_or_reply_events() {
 }
 
 #[test]
+fn encrypted_rule_requires_matching_verified_event_and_original_human_message() {
+    use crate::crypto::{ApplicationMessage, EncryptedEvent, EncryptionContext};
+    let mut context = EncryptionContext {
+        home: room().home,
+        room: room(),
+        operation_id: OperationId {
+            window: id(30),
+            operation: id(31),
+        },
+        actor: Actor::Direct { acting: acting(20) },
+        operation: Operation::MessageSend,
+        expected: BTreeMap::new(),
+        approval: None,
+        agreement: None,
+        group: id(32),
+        epoch: 1,
+        parent: None,
+        causation: None,
+    };
+    let content = ApplicationMessage {
+        text: " !help ".into(),
+        mentions: vec![],
+    };
+    let event = |context: &EncryptionContext| {
+        let ciphertext = vec![1, 2, 3];
+        Event {
+            home: room().home,
+            room: room(),
+            event: id(33),
+            sequence: 1,
+            timestamp_ms: 1,
+            actor: context.actor.clone(),
+            operation_id: context.operation_id,
+            action_digest: action_digest(&context.action(ciphertext.clone()).unwrap()).unwrap(),
+            kind: context.operation,
+            body: Value::serialized(&EncryptedEvent {
+                context: context.clone(),
+                ciphertext: Blob(ciphertext),
+            })
+            .unwrap(),
+        }
+    };
+    assert!(runtime::encrypted_trigger(&event(&context), &content));
+    let mut substituted = event(&context);
+    substituted.action_digest = id(99);
+    assert!(!runtime::encrypted_trigger(&substituted, &content));
+    context.causation = Some(id(34));
+    assert!(!runtime::encrypted_trigger(&event(&context), &content));
+    context.causation = None;
+    context.parent = Some(id(34));
+    context.operation = Operation::MessageReply;
+    assert!(!runtime::encrypted_trigger(&event(&context), &content));
+    context.parent = None;
+    context.operation = Operation::MessageSend;
+    context.actor = Actor::IndependentAgent {
+        acting: acting(10),
+        operator: account(20),
+    };
+    assert!(!runtime::encrypted_trigger(&event(&context), &content));
+}
+
+#[test]
 fn permanent_identity_failures_do_not_enter_reconnect_backoff() {
     use crate::client::{Error as Client, network::Error as Network};
     assert_eq!(

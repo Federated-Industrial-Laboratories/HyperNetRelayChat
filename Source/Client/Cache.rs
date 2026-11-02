@@ -109,17 +109,40 @@ pub(super) fn room(store: &mut Store, room: RoomId) -> storage::Result<Cached> {
  let (cursor,members,gap)=meta.unwrap_or_default();Ok(Cached{events,cursor:cursor.map(Blob),members:members.map(|v|decode(&v)).transpose()?.unwrap_or_default(),gap})
 })
 }
-/// Availability failure is not evidence that permission or the retained cursor was withdrawn.
 pub(super) fn inspection_failed(
     store: &mut Store,
+    operation: Operation,
     room: RoomId,
     error: &super::Error,
 ) -> storage::Result<bool> {
+    // A history cursor can expire or lose its room revision while access remains
+    // valid. Deleting encrypted events would also erase unrecoverable plaintext.
+    if operation == Operation::CryptoHistory && cursor_context_changed(error) {
+        return Ok(false);
+    }
     if !access_unavailable(error) {
         return Ok(false);
     }
     invalidate(store, room)?;
     Ok(true)
+}
+pub(super) fn cursor_context_changed(error: &super::Error) -> bool {
+    matches!(error,
+        super::Error::Rejected { code: ErrorCode::ResynchronisationRequired, detail }
+        | super::Error::Refused { code: ErrorCode::ResynchronisationRequired, detail, .. }
+        if detail == "CursorContext")
+}
+pub(super) fn restart_cursor(store: &mut Store, room: RoomId) -> storage::Result<()> {
+    store.write(|db| {
+        db.execute(
+            "UPDATE client_rooms SET cursor=NULL WHERE id=?1",
+            [room.to_string()],
+        )?;
+        Ok(Commit::new(
+            (),
+            encode(&("HRC.ClientHistoryRestart", room))?,
+        ))
+    })
 }
 pub(super) fn access_unavailable(error: &super::Error) -> bool {
     matches!(
@@ -294,7 +317,11 @@ pub(super) fn save_filters(
             .collect::<rusqlite::Result<Vec<_>>>()?;
         drop(stmt);
         for event in events {
-            if filtered(filters, &event.actor, false) {
+            if matches!(
+                event.kind,
+                Operation::MessageSend | Operation::MessageReply | Operation::MessageAction
+            ) && filtered(filters, &event.actor, false)
+            {
                 db.execute(
                     "DELETE FROM client_events WHERE id=?1",
                     [event.event.as_hex()],

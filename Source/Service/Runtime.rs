@@ -16,6 +16,8 @@ use std::{
     thread,
     time::Duration,
 };
+#[path = "Devices.rs"]
+mod devices;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -73,6 +75,8 @@ const CAPABILITIES: &[&str] = &[
     "history",
     "search",
     "resume",
+    "confidential-conversations",
+    "endpoint-lifecycle",
 ];
 struct Shared {
     config: Config,
@@ -391,6 +395,9 @@ fn serve(shared: &Shared, stream: &Stream) -> Result<()> {
         Id::from_hex(peer.principal()).map_err(|_| shared.authentication("PrincipalEncoding"))?;
     let end = clock::boot_ms().map_err(|_| Error::Clock)? + 5000;
     let incoming = io::receive(stream, remaining(end)?).map_err(|_| Error::Transport)?;
+    if incoming.kind == FrameKind::DeviceHello {
+        return devices::serve(shared, stream, incoming, principal, end);
+    }
     if incoming.kind != FrameKind::Hello {
         return Err(Error::Frame);
     }
@@ -536,10 +543,21 @@ fn serve(shared: &Shared, stream: &Stream) -> Result<()> {
             &Cancellation::default(),
             None,
         );
+        let (kind, bytes) = if verified.action().operation.is_crypto_transition() {
+            (
+                FrameKind::CryptoResponse,
+                sign_crypto_response(&response, &shared.signer),
+            )
+        } else {
+            (
+                FrameKind::Response,
+                sign_response(&response, &shared.signer),
+            )
+        };
         frame(
             stream,
-            FrameKind::Response,
-            sign_response(&response, &shared.signer).map_err(|_| Error::Frame)?,
+            kind,
+            bytes.map_err(|_| Error::Frame)?,
             Duration::from_secs(5),
         )?;
     }

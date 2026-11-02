@@ -413,3 +413,30 @@ fn forwarding_preserves_a_combined_depth_bound() {
     };
     assert_eq!(encode_federation(&envelope), Err(Error::Limit));
 }
+
+#[test]
+fn crypto_response_keeps_role_binding_and_ordinary_size_admission() {
+    let key = SigningKey::from_bytes(&[42; 32]);
+    let a = action();
+    let response = Response {
+        home: a.home,
+        operation_id: a.operation_id,
+        action_digest: action_digest(&a).unwrap(),
+        outcome: Outcome::Result {
+            body: Value::Bytes(vec![0; 70_000]),
+        },
+    };
+    assert_eq!(sign_response(&response, &key), Err(Error::Limit));
+    let signed = sign_crypto_response(&response, &key).unwrap();
+    assert!(Frame::new(FrameKind::Response, signed.clone()).is_err());
+    assert!(verify_response(&signed, &key.verifying_key()).is_err());
+    let frame = Frame::new(FrameKind::CryptoResponse, signed).unwrap();
+    let decoded = Frame::decode(&frame.encode().unwrap()).unwrap();
+    assert_eq!(
+        verify_crypto_response(&decoded.payload, &key.verifying_key())
+            .unwrap()
+            .value(),
+        &response
+    );
+    assert!(verify_action(&decoded.payload, &key.verifying_key()).is_err());
+}

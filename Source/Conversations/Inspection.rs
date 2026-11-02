@@ -9,6 +9,8 @@ pub struct Inspection {
     pub room_revision: u64,
     pub filter_revision: u64,
     pub moderator: bool,
+    #[serde(default)]
+    pub confidentiality: RoomConfidentiality,
 }
 pub(super) fn read(db: &Connection, action: &Action, now: TimeBounds) -> Domain<Outcome> {
     empty(&action.body)?;
@@ -28,6 +30,7 @@ pub(super) fn read(db: &Connection, action: &Action, now: TimeBounds) -> Domain<
             room_revision: a.revision,
             filter_revision: a.filter_revision,
             moderator: a.moderator,
+            confidentiality: a.confidentiality,
         })?,
     })
 }

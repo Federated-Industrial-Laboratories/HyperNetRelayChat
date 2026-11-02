@@ -55,6 +55,30 @@ authority for reads and effects. A paused, revoked, expired, out-of-scope or
 approval-required grant cannot produce an autonomous reply. The bot does not
 create grants or approve its own actions.
 
+## Encrypted rooms
+
+Confidential rooms use the same bot rules after authenticated local decryption.
+Before starting the process, enrol its independent MLS key, inspect and explicitly
+trust the required account fingerprints, publish its room-bound package, and have
+an authorised room moderator admit that package. Follow the same operations in
+[confidential conversations](ConfidentialConversations.md) for each room. A
+delegated bot publishes and reads using its exact selected grant. The operator
+does not give the bot their private endpoint or recovery keys.
+
+The runtime never accepts an unknown contact fingerprint automatically. A missing
+key, untrusted roster, unavailable Welcome or required membership change prevents
+encrypted participation until the operator completes that step. Current recipient
+filters and history scope apply before rule evaluation. Rejected or unavailable
+ciphertext cannot trigger a reply; authenticated original human messages retain
+the same no-agent, no-reply and no-causation conditions.
+
+Encrypted reply preparation commits the MLS sender state, ordinary exact-byte
+outbox, trigger cursor and bot plan in one transaction. Reconnect submits those
+original bytes rather than encrypting again. Grant withdrawal establishes the
+room's removal barrier through the ordinary service policy, and cannot be bypassed
+by a queued bot plan. Decrypted local archives remain under the profile's encrypted
+storage and retention rules.
+
 ## Durable progress and recovery
 
 The bot maintains its own bounded room cursor in the existing SQLCipher store.

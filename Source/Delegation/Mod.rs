@@ -123,25 +123,25 @@ fn state_number(state: State) -> u8 {
         State::Revoked => 2,
     }
 }
-pub(crate) fn authorize(
-    db: &Transaction<'_>,
-    action: &Action,
+fn current_grant(
+    db: &Connection,
+    actor: &Actor,
+    home_id: ServiceId,
     now: TimeBounds,
-    digest: Id,
-) -> Domain<Permit> {
+) -> Domain<Option<Grant>> {
     let Actor::Delegated {
         acting,
         represented,
         represented_security_generation,
         operator,
         grant: reference,
-    } = &action.actor
+    } = actor
     else {
-        return Ok(Permit::default());
+        return Ok(None);
     };
     let grant = load(db, reference.id)?;
     if grant.reference.id != reference.id
-        || grant.home != action.home
+        || grant.home != home_id
         || grant.owner != *represented
         || grant.owner_security_generation != *represented_security_generation
         || grant.scope.agent != *acting
@@ -162,7 +162,75 @@ pub(crate) fn authorize(
     if !now.permits(grant.scope.not_before_ms, grant.scope.expires_ms) {
         return Err(Fault::Reject(ErrorCode::Expired, "GrantValidity"));
     }
+    let security: Option<u64> = db
+        .query_row(
+            "SELECT security FROM hrc_accounts WHERE id=?1",
+            [represented.to_string()],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if security != Some(*represented_security_generation) {
+        return deny("RepresentedGeneration");
+    }
+    Ok(Some(grant))
+}
+pub(crate) fn read_authority(
+    db: &Connection,
+    actor: &Actor,
+    room: RoomId,
+    now: TimeBounds,
+) -> Domain<Permit> {
+    let Some(grant) = current_grant(db, actor, room.home, now)? else {
+        return Ok(Permit::default());
+    };
+    if !grant.scope.rooms.contains(&room)
+        || !grant.scope.operations.iter().any(|op| {
+            matches!(
+                op,
+                Operation::HistoryPage | Operation::EventsSubscribe | Operation::EventsResume
+            )
+        })
+    {
+        return deny("GrantReadScope");
+    }
+    Ok(Permit {
+        history_from: grant.scope.history_from_ms,
+        history_until: grant.scope.history_until_ms,
+        consume: None,
+    })
+}
+pub(crate) fn authorize(
+    db: &Transaction<'_>,
+    action: &Action,
+    now: TimeBounds,
+    digest: Id,
+) -> Domain<Permit> {
+    let Some(grant) = current_grant(db, &action.actor, action.home, now)? else {
+        return Ok(Permit::default());
+    };
+    let reference = &grant.reference;
     home::check_revision(action, Revision::Grant, grant.reference.generation)?;
+    if matches!(
+        action.operation,
+        Operation::CryptoPublishKeyPackage
+            | Operation::CryptoEpochReady
+            | Operation::CryptoInspect
+            | Operation::CryptoWelcome
+            | Operation::CryptoReport
+            | Operation::CryptoHistory
+            | Operation::RoomInspect
+            | Operation::AccountPublicIdentity
+    ) {
+        let room = if action.operation == Operation::AccountPublicIdentity {
+            unpack::<crate::identity::PublicIdentityRequest>(&action.body)?.room
+        } else {
+            crate::conversations::target(action)?
+        };
+        if action.approval.is_some() {
+            return invalid("UnexpectedApproval");
+        }
+        return read_authority(db, &action.actor, room, now);
+    }
     if action.operation == Operation::ApprovalPrepare
         || (action.operation == Operation::SearchCancel
             && action.target == Target::Service
@@ -262,10 +330,15 @@ fn reference(action: &Action) -> Domain<GrantRef> {
         _ => invalid("GrantTarget"),
     }
 }
-pub(crate) fn operate(db: &Transaction<'_>, action: &Action, now: TimeBounds) -> Domain<Outcome> {
+pub(crate) fn operate(
+    db: &Transaction<'_>,
+    verified: &VerifiedAction,
+    now: TimeBounds,
+) -> Domain<Outcome> {
+    let action = verified.action();
     match action.operation {
         Operation::DelegationList => list(db, action),
-        Operation::DelegationCreate => create(db, action, now),
+        Operation::DelegationCreate => create(db, verified, now),
         Operation::ApprovalPrepare => prepare(db, action, now),
         Operation::ApprovalApprove | Operation::ApprovalReject => decide(db, action, now),
         _ => {
@@ -332,11 +405,16 @@ pub(crate) fn operate(db: &Transaction<'_>, action: &Action, now: TimeBounds) ->
                 "UPDATE hrc_approvals SET state=2 WHERE grant_id=?1 AND state<2",
                 [reference.id.as_hex()],
             )?;
+            crate::confidential::invalidate_accounts(
+                db,
+                &[grant.owner, grant.scope.agent.account],
+            )?;
             home::committed(db, None, result)
         }
     }
 }
-fn create(db: &Transaction<'_>, action: &Action, now: TimeBounds) -> Domain<Outcome> {
+fn create(db: &Transaction<'_>, verified: &VerifiedAction, now: TimeBounds) -> Domain<Outcome> {
+    let action = verified.action();
     if !matches!(action.actor, Actor::Direct { .. })
         || action.target != Target::Account(action.actor.acting().account)
     {
@@ -430,7 +508,20 @@ fn create(db: &Transaction<'_>, action: &Action, now: TimeBounds) -> Domain<Outc
             encoded
         ],
     )?;
-    home::committed(db, None, result)
+    let position = home::next_position(db)?;
+    db.execute(
+        "INSERT INTO hrc_mls_grants VALUES(?1,?2,?3)",
+        params![
+            grant.reference.id.as_hex(),
+            verified.signed_bytes(),
+            position
+        ],
+    )?;
+    Ok(Outcome::Committed {
+        event: None,
+        position,
+        body: result,
+    })
 }
 fn prepare(db: &Transaction<'_>, action: &Action, now: TimeBounds) -> Domain<Outcome> {
     let reference = reference(action)?;

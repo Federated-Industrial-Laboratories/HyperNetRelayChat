@@ -39,6 +39,13 @@ pub fn read_operation(op: Operation) -> bool {
             | Operation::RoomInspect
             | Operation::AccountInspect
             | Operation::AgentList
+            | Operation::AccountDevices
+            | Operation::AccountContinuity
+            | Operation::AccountLifecycleOutcome
+            | Operation::AccountPublicIdentity
+            | Operation::CryptoInspect
+            | Operation::CryptoWelcome
+            | Operation::CryptoHistory
             | Operation::DelegationList
             | Operation::ModerationFilters
             | Operation::ModerationRestrictions
@@ -195,15 +202,32 @@ fn resolve(db: &Connection, action: &Action, now: TimeBounds) -> Domain<Outcome>
 }
 fn dispatch(
     db: &Transaction<'_>,
-    action: &Action,
+    verified: &VerifiedAction,
     now: TimeBounds,
     permit: crate::delegation::Permit,
     signer: &SigningKey,
     cancel: &Cancellation,
     information: &super::ServiceInformation,
 ) -> Domain<Outcome> {
+    let action = verified.action();
     use Operation::*;
     match action.operation {
+        AccountEnrolEndpoint
+        | AccountDisableEndpoint
+        | AccountRotateRecovery
+        | AccountDevices
+        | AccountContinuity
+        | AccountLifecycleOutcome => crate::identity::lifecycle::operate(db, verified, now),
+        AccountPublicIdentity => crate::identity::public::read(db, action, now),
+        CryptoEnrolEndpoint
+        | CryptoPublishKeyPackage
+        | CryptoPropose
+        | CryptoCommit
+        | CryptoEpochReady
+        | CryptoInspect
+        | CryptoWelcome
+        | CryptoRecover
+        | CryptoReport => crate::confidential::operate(db, verified, now, permit),
         ServiceInspect => {
             if action.target != Target::Service {
                 return invalid("ServiceTarget");
@@ -216,16 +240,15 @@ fn dispatch(
         AccountSetNickname | PresenceSet | AccountInspect | AgentList => {
             crate::identity::operate(db, action, now)
         }
-        RoomCreate | RoomJoin | RoomLeave | RoomSetTopic | RoomList | RoomInspect => {
-            crate::conversations::operate(db, action, now)
-        }
+        RoomCreate | DirectCreate | RoomInvite | RoomJoin | RoomLeave | RoomSetTopic | RoomList
+        | RoomInspect => crate::conversations::operate(db, action, now),
         MessageSend | MessageReply | MessageAction | HistoryPage | HistoryContext | SearchQuery
-        | EventsSubscribe | EventsResume | UnreadSet => {
+        | EventsSubscribe | EventsResume | CryptoHistory | UnreadSet => {
             crate::messaging::operate(db, action, now, permit, signer, cancel)
         }
         DelegationCreate | DelegationInspect | DelegationList | DelegationPause
         | DelegationResume | DelegationRevoke | ApprovalPrepare | ApprovalApprove
-        | ApprovalReject => crate::delegation::operate(db, action, now),
+        | ApprovalReject => crate::delegation::operate(db, verified, now),
         ModerationIgnore
         | ModerationMute
         | ModerationSilence
@@ -306,7 +329,7 @@ impl Home {
             }
             if now.upper_ms>=expires{return commit(Outcome::Unknown);}
             let used:u64=db.query_row("SELECT history_bytes FROM hrc_meta WHERE singleton=1",[],|r|r.get(0))?;
-            if used>HISTORY_QUOTA-128*1024&&!read_operation(action.operation){return commit(refusal(ErrorCode::Overloaded,"HistoryQuota"));}
+            if used>HISTORY_QUOTA-CRYPTO_FRAME_BYTES as u64&&!read_operation(action.operation){return commit(refusal(ErrorCode::Overloaded,"HistoryQuota"));}
             let admitted=(||->Domain<crate::delegation::Permit>{
                 expected(db,action)?;
                 if !matches!(action.actor,Actor::Delegated{..})&&action.approval.is_some(){return invalid("UnexpectedApproval");}
@@ -319,10 +342,11 @@ impl Home {
                 Ok(grant_permit)=>{
                     admitted_permit=Some(grant_permit);
                     match budgets::admit(db,action,now.lower_ms){Ok(true)=>{},Ok(false)=>return commit(refusal(ErrorCode::RateLimited,"OperationBudget")),Err(e)=>return Err(sql_fault(e))}
-                    match dispatch(db,action,now,grant_permit,signer,cancel,information) {
-                        Ok(outcome)=>{crate::delegation::consume(db,grant_permit)?;outcome},
+                    db.execute_batch("SAVEPOINT hrc_domain_effects")?;
+                    match dispatch(db,verified,now,grant_permit,signer,cancel,information) {
+                        Ok(outcome)=>{crate::delegation::consume(db,grant_permit)?;db.execute_batch("RELEASE hrc_domain_effects")?;outcome},
                         Err(Fault::Sql(e))=>return Err(e),
-                        Err(Fault::Reject(code,detail))=>Outcome::Rejected{code,detail:detail.into()},
+                        Err(Fault::Reject(code,detail))=>{db.execute_batch("ROLLBACK TO hrc_domain_effects; RELEASE hrc_domain_effects")?;Outcome::Rejected{code,detail:detail.into()}},
                     }
                 },
             };
@@ -338,6 +362,9 @@ impl Home {
                 && !matches!(outcome,Outcome::Rejected{..}) {
                 let current=crate::delegation::load(db,grant.id).map_err(sql_fault)?;
                 if !final_time.permits(current.scope.not_before_ms,current.scope.expires_ms){rollback_reason.set(Some("GrantExpiredAtCommit"));return Err(rusqlite::Error::InvalidQuery);}
+            }
+            if !matches!(outcome,Outcome::Rejected{..}) && !crate::confidential::final_authority(db,action,final_time).map_err(sql_fault)? {
+                rollback_reason.set(Some("EncryptedAuthorityChangedAtCommit"));return Err(rusqlite::Error::InvalidQuery);
             }
             let retained=if matches!(outcome,Outcome::Result{..}){Outcome::Result{body:Value::Null}}else{outcome.clone()};
             if !repeated_read {db.execute("INSERT INTO hrc_operations VALUES(?1,?2,?3,?4,?5,?6,?7)",params![action.operation_id.window.as_hex(),action.operation_id.operation.as_hex(),verified.digest().as_bytes(),verified.bytes(),encode(&retained)?,final_time.lower_ms,read_operation(action.operation)])?;}

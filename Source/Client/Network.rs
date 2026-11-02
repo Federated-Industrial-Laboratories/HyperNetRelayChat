@@ -48,7 +48,8 @@ impl Error {
             Self::Expired => "RetryWindowExpired",
         }
     }
-    pub(crate) fn retryable_session(&self) -> bool {
+    /// A fresh connection may be attempted; this does not authorize replaying an operation.
+    pub fn retryable_session(&self) -> bool {
         self.retryable_setup() || matches!(self, Self::Transport | Self::Clock)
     }
     fn retryable_setup(&self) -> bool {
@@ -273,11 +274,18 @@ impl Session {
             io::send(&self.stream, &frame, Duration::from_secs(5)).map_err(transport_failure)?;
             io::receive(&self.stream, Duration::from_secs(10)).map_err(transport_failure)?
         };
-        if incoming.kind != FrameKind::Response {
-            return Err(Error::Frame);
+        let verified = if action.action().operation.is_crypto_transition() {
+            if incoming.kind != FrameKind::CryptoResponse {
+                return Err(Error::Frame);
+            }
+            verify_crypto_response(&incoming.payload, &self.server_key)
+        } else {
+            if incoming.kind != FrameKind::Response {
+                return Err(Error::Frame);
+            }
+            verify_response(&incoming.payload, &self.server_key)
         }
-        let verified = verify_response(&incoming.payload, &self.server_key)
-            .map_err(|_| Error::Authentication)?;
+        .map_err(|_| Error::Authentication)?;
         let response = verified.value();
         if response.home != action.action().home
             || response.operation_id != action.action().operation_id

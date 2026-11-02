@@ -17,6 +17,8 @@ fn worker() -> (Fixture, Worker, RoomId) {
     cache::save_rooms(
         &mut store,
         &[conversations::Summary {
+            confidentiality: RoomConfidentiality::Community,
+            invited: false,
             room,
             name: "completion".into(),
             topic: String::new(),
@@ -120,6 +122,8 @@ fn committed_send_generic_and_approval_completion_survive_failed_view_refresh() 
         Operation::MessageSend,
         Operation::AccountSetNickname,
         Operation::ApprovalApprove,
+        Operation::CryptoPropose,
+        Operation::CryptoCommit,
     ] {
         let (_fixture, mut worker, room) = worker();
         let mut action = action();
@@ -140,6 +144,19 @@ fn committed_send_generic_and_approval_completion_survive_failed_view_refresh() 
             Operation::ApprovalApprove => Value::serialized(&delegation::Decision {
                 approval: Id::from_bytes([21; 32]),
                 action_digest: Id::from_bytes([22; 32]),
+            })
+            .unwrap(),
+            Operation::CryptoPropose => Value::serialized(&crate::confidential::Initialise {
+                group: Id::from_bytes([24; 32]),
+                group_info: Blob(vec![]),
+            })
+            .unwrap(),
+            Operation::CryptoCommit => Value::serialized(&crate::confidential::CommitEpoch {
+                group: Id::from_bytes([24; 32]),
+                epoch: 0,
+                commit: Blob(vec![]),
+                additions: vec![],
+                removals: vec![],
             })
             .unwrap(),
             _ => action.body,
@@ -758,7 +775,17 @@ fn ordinary_send_owns_only_its_saved_revision_even_when_newer_text_is_identical(
                 .preserve_send_draft(room, &message.text, &message.mentions)
                 .unwrap()
         );
-        super::super::outbox::bind_draft(&mut worker.client.store, &action).unwrap();
+        worker
+            .client
+            .store
+            .write(|tx| {
+                super::super::outbox::bind_draft_transaction(tx, &action, &message)?;
+                Ok(crate::storage::Commit::new(
+                    (),
+                    b"draft send revision".to_vec(),
+                ))
+            })
+            .unwrap();
         if later_save {
             worker.run_command(Queued::new(
                 78,
@@ -809,6 +836,18 @@ fn received_event(local: u8) -> Event {
 }
 fn received_search(room: RoomId, events: Vec<Event>) -> SearchView {
     SearchView {
+        content: events
+            .iter()
+            .map(|event| {
+                (
+                    event.event,
+                    super::super::MessageContent::Decrypted(crate::crypto::ApplicationMessage {
+                        text: "decrypted retained text".into(),
+                        mentions: vec![],
+                    }),
+                )
+            })
+            .collect(),
         room,
         query: messaging::Search {
             terms: vec!["draft".into()],
@@ -845,6 +884,7 @@ fn current_ignore_refilters_live_search_focus_and_queued_notifications_before_la
         };
         let view = worker.snapshot.selected.as_mut().unwrap();
         view.events = vec![ignored.clone(), kept.clone()];
+        view.content = received_search(room, view.events.clone()).content;
         view.focus = focused.then_some(ignored.event);
         worker.snapshot.search = Some(received_search(room, vec![ignored.clone(), kept.clone()]));
         worker.notify(room, &[ignored, kept.clone()]).unwrap();
@@ -860,11 +900,13 @@ fn current_ignore_refilters_live_search_focus_and_queued_notifications_before_la
         let published = Arc::clone(&worker.shared.snapshot.lock().unwrap());
         assert_eq!(published.search.as_ref().unwrap().events.len(), 1);
         assert_eq!(published.notifications.len(), 1);
+        assert_eq!(published.search.as_ref().unwrap().content.len(), 1);
         worker.finish_view(Err(unavailable()));
         worker.publish();
         let view = worker.snapshot.selected.as_ref().unwrap();
         assert!(view.focus.is_none());
         assert_eq!(view.events.len(), usize::from(!focused));
+        assert_eq!(view.content.len(), view.events.len());
         let search = worker.snapshot.search.as_ref().unwrap();
         assert_eq!(search.events[0].event, kept.event);
         assert!(!search.has_more && search.query.cursor.is_none());
@@ -898,6 +940,7 @@ fn denied_focused_history_discards_old_context_but_transient_failure_preserves_i
     let event = received_event(50);
     let view = worker.snapshot.selected.as_mut().unwrap();
     view.events = vec![event.clone()];
+    view.content = received_search(room, view.events.clone()).content;
     view.focus = Some(event.event);
     worker.snapshot.search = Some(received_search(room, vec![event.clone()]));
     worker.notify(room, std::slice::from_ref(&event)).unwrap();
@@ -919,11 +962,87 @@ fn denied_focused_history_discards_old_context_but_transient_failure_preserves_i
     let published = Arc::clone(&worker.shared.snapshot.lock().unwrap());
     let view = published.selected.as_ref().unwrap();
     assert!(view.events.is_empty() && view.focus.is_none() && view.stale && view.gap.is_some());
+    assert!(view.content.is_empty());
     assert!(published.search.is_none() && published.notifications.is_empty());
     assert!(
         cache::room(&mut worker.client.store, room)
             .unwrap()
             .gap
             .is_some()
+    );
+}
+
+#[test]
+fn prepared_send_effect_preserves_controller_draft_order_on_authority_failure() {
+    let (_fixture, mut worker, room) = worker();
+    let message: messaging::Send = action().body.deserialized().unwrap();
+    worker.client.save_draft(room, "newer saved draft").unwrap();
+    let result =
+        worker
+            .client
+            .prepare_preserved_send_with(room, &message, None, false, None, |_, _| Ok(()));
+    assert!(result.is_err());
+    assert_eq!(
+        worker.client.draft(room).unwrap().as_deref(),
+        Some("newer saved draft")
+    );
+    assert!(worker.client.pending().unwrap().is_empty());
+    // The public API still owns preservation for callers without controller queues.
+    assert!(
+        worker
+            .client
+            .prepare_send(room, &message, None, false, None)
+            .is_err()
+    );
+    assert_eq!(
+        worker.client.draft(room).unwrap().as_deref(),
+        Some(message.text.as_str())
+    );
+}
+
+#[test]
+fn abandoned_unknown_membership_effect_blocks_a_replacement_in_its_room() {
+    let (_fixture, mut worker, room) = worker();
+    let mut action = action();
+    action.operation = Operation::CryptoCommit;
+    action.body = Value::serialized(&crate::confidential::CommitEpoch {
+        group: Id::from_bytes([60; 32]),
+        epoch: 0,
+        commit: Blob(vec![1]),
+        additions: vec![],
+        removals: vec![],
+    })
+    .unwrap();
+    assert!(
+        outcome(
+            &mut worker,
+            &action,
+            Outcome::Refused {
+                code: ErrorCode::Unavailable,
+                detail: "CurrentAdmissionUnavailable".into(),
+                retry_after_ms: Some(1000)
+            }
+        )
+        .is_err()
+    );
+    let saved = worker.client.pending().unwrap().remove(0);
+    worker
+        .client
+        .abandon(saved.action.action().operation_id, saved.action.digest())
+        .unwrap();
+    assert!(matches!(
+        worker.client.crypto_commit(room, &[], &[], None),
+        Err(Error::Unknown)
+    ));
+    assert!(matches!(
+        worker.client.crypto_initialise(room, false),
+        Err(Error::Unknown)
+    ));
+    let pending = worker.client.pending().unwrap();
+    assert_eq!(pending.len(), 1);
+    assert!(pending[0].abandoned);
+    assert_eq!(
+        pending[0].action.signed_bytes(),
+        saved.action.signed_bytes()
     );
 }
