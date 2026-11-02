@@ -1202,7 +1202,10 @@ fn workflow(run: &mut Run, r: &Request) -> Result<serde_json::Value> {
     run.step(
         "Agent",
         "CurrentIndependentEndpointBeforeWithdrawal",
-        |_| {
+        |end| {
+            // Human device recovery leaves this independent endpoint idle.
+            net(agent.connect())?;
+            ensure(Instant::now() < end, "IndependentEndpointReadDeadline")?;
             net(agent.read_as::<hrc::conversations::Inspection, _>(
                 Operation::RoomInspect,
                 Target::Room(r.community),
