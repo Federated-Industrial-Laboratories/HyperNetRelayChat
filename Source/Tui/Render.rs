@@ -86,7 +86,9 @@ pub(super) fn draw(model: &Model, scroll: usize) -> io::Result<()> {
             divider,
             columns,
             wide,
-            if model.reply.is_some() {
+            if !model.composer_enabled() {
+                "Composer paused while the room changes or the client closes"
+            } else if model.reply.is_some() {
                 "Reply · Enter sends · Ctrl+J newline · Tab completes"
             } else {
                 "Enter sends · Ctrl+J newline · Tab completes · Ctrl+N/P rooms"

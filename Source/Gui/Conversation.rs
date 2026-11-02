@@ -102,10 +102,7 @@ impl App {
                         ui.weak("action");
                     }
                     if search && ui.small_button("Open context").clicked() {
-                        self.model.dispatch(Command::OpenEvent {
-                            room: event.room,
-                            event: event.event,
-                        });
+                        self.model.open_event(event.room, event.event);
                         self.scroll_event = Some(event.event);
                         self.model.dispatch(Command::CloseSearch);
                     }
@@ -232,7 +229,14 @@ impl App {
             });
         }
         let before = self.model.editor.text().to_owned();
-        let output = editor::show(ui, id, &mut self.model.editor);
+        let mentions_before = self.model.editor.mentions().to_vec();
+        let enabled = self.model.composer_enabled();
+        if !enabled {
+            ui.weak("Composer paused while the room changes or the client closes");
+        }
+        let output = ui
+            .add_enabled_ui(enabled, |ui| editor::show(ui, id, &mut self.model.editor))
+            .inner;
         if self.focus_composer {
             output.response.request_focus();
             self.focus_composer = false;
@@ -243,22 +247,24 @@ impl App {
                     .into(),
             );
         }
-        if before != self.model.editor.text() {
+        if before != self.model.editor.text() || mentions_before != self.model.editor.mentions() {
             self.model.edited();
         }
         let send = ui.input_mut(|input| input.consume_key(egui::Modifiers::CTRL, egui::Key::Enter));
-        self.completion(ui);
-        ui.horizontal_wrapped(|ui| {
-            if ui.button("Send · Ctrl+Enter").clicked() || send {
-                self.model.submit();
-            }
-            ui.weak("Enter inserts a line break · /help lists commands");
-            if !self.model.editor.mentions().is_empty() {
-                ui.weak(format!(
-                    "{} bound mentions",
-                    self.model.editor.mentions().len()
-                ));
-            }
+        ui.add_enabled_ui(enabled, |ui| {
+            self.completion(ui);
+            ui.horizontal_wrapped(|ui| {
+                if ui.button("Send · Ctrl+Enter").clicked() || send {
+                    self.model.submit();
+                }
+                ui.weak("Enter inserts a line break · /help lists commands");
+                if !self.model.editor.mentions().is_empty() {
+                    ui.weak(format!(
+                        "{} bound mentions",
+                        self.model.editor.mentions().len()
+                    ));
+                }
+            });
         });
         for delivery in self
             .model
@@ -277,10 +283,8 @@ impl App {
         }
     }
     fn completion(&mut self, ui: &mut egui::Ui) {
-        let cursor = self.model.editor.cursor();
-        let start = self.model.editor.text()[..cursor]
-            .rfind(char::is_whitespace)
-            .map_or(0, |i| i + 1);
+        let range = self.model.editor.completion_range();
+        let (start, cursor) = (range.start, range.end);
         let prefix = &self.model.editor.text()[start..cursor];
         if let Some(prefix) = prefix.strip_prefix('@') {
             let key = text::lookup(prefix, 1024).unwrap_or_default();

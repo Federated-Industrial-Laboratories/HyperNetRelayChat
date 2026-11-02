@@ -299,7 +299,13 @@ impl App {
                             .on_hover_text(member.account.to_string())
                             .context_menu(|ui| {
                                 ui.label(member.account.to_string());
-                                if ui.button("Mention").clicked() {
+                                if ui
+                                    .add_enabled(
+                                        self.model.composer_enabled(),
+                                        egui::Button::new("Mention"),
+                                    )
+                                    .clicked()
+                                {
                                     let position = self.model.editor.cursor();
                                     if self
                                         .model
