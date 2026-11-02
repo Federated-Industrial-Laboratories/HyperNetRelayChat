@@ -191,6 +191,23 @@ class Conversation:
         return reference, exported
 
     def main(self):
+        load_only = self.config.get('loadOnly', False)
+        assert isinstance(load_only, bool), 'loadOnly must be boolean'
+        load_setting = os.environ.get('HRC_NATIVE_LOAD_ONLY', '0')
+        assert load_setting in ('0', '1'), 'Invalid load workflow selection'
+        if load_only or load_setting == '1':
+            assert not (self.config.get('localClientOnly', False) or
+                        self.config.get('confidentialClientOnly', False) or
+                        os.environ.get('HYPERNET_HRC_LOCAL_CLIENT_ONLY', '0') == '1' or
+                        os.environ.get('HRC_NATIVE_CONFIDENTIAL_ONLY', '0') == '1'), 'Select one independent workflow'
+            binary = self.config.get('loadClientBinary') or os.environ.get('HRC_NATIVE_LOAD_CLIENT')
+            assert binary, 'Load workflow requires its executable'
+            import importlib.util
+            spec = importlib.util.spec_from_file_location('NativeLoad', Path(__file__).with_name('NativeLoad.py'))
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            module.run(self, binary)
+            return
         self.setup()
         room = self.room('Native room')
         only_local = self.config.get('localClientOnly', False)

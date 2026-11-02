@@ -1,0 +1,1080 @@
+// SPDX-License-Identifier: Apache-2.0
+//! Bounded pilot measurements over real authenticated HyperNet application streams.
+use clap::Parser;
+use hrc::{
+    client::{self, Client},
+    conversations, home, messaging, moderation,
+    protocol::*,
+    service::{files, io},
+};
+use serde::{Deserialize, Serialize};
+use serde_json::json;
+use std::{
+    collections::BTreeMap,
+    io::Write,
+    path::PathBuf,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    thread,
+    time::{Duration, Instant},
+};
+
+type Result<T> = std::result::Result<T, String>;
+#[derive(Parser)]
+struct Arguments {
+    #[arg(long)]
+    request: PathBuf,
+    #[arg(long, default_value_t = 360)]
+    maximum_seconds: u64,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct Request {
+    profiles: Vec<PathBuf>,
+}
+struct Endpoint {
+    index: usize,
+    client: Client,
+}
+#[derive(Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Metrics {
+    endpoint: usize,
+    offered: usize,
+    started: usize,
+    committed: usize,
+    committed_in_window: usize,
+    missed: usize,
+    results: BTreeMap<String, usize>,
+    commit_ms: Vec<u64>,
+    schedule_lag_ms: Vec<u64>,
+    signed_action_bytes: usize,
+    decoded_response_bytes: usize,
+    unresolved: bool,
+}
+fn emit(value: serde_json::Value) {
+    println!("{value}");
+    let _ = std::io::stdout().flush();
+}
+fn ensure(ok: bool, code: &str) -> Result<()> {
+    if ok { Ok(()) } else { Err(code.into()) }
+}
+fn net<T>(value: client::Result<T>) -> Result<T> {
+    value.map_err(|e| e.code().into())
+}
+fn millis(duration: Duration) -> u64 {
+    duration.as_millis().try_into().unwrap_or(u64::MAX)
+}
+fn wait_until(at: Instant) {
+    thread::sleep(at.saturating_duration_since(Instant::now()));
+}
+fn delay(error: &client::Error) -> Option<u64> {
+    match error {
+        client::Error::Refused {
+            code: ErrorCode::Unavailable | ErrorCode::RateLimited | ErrorCode::Overloaded,
+            retry_after_ms,
+            ..
+        }
+        | client::Error::Network(client::network::Error::ForwardRefused {
+            code: ErrorCode::Unavailable | ErrorCode::RateLimited | ErrorCode::Overloaded,
+            retry_after_ms,
+            ..
+        }) => Some(retry_after_ms.unwrap_or(1000).min(60_000)),
+        client::Error::Unknown | client::Error::Clock => Some(1000),
+        client::Error::Network(e) if e.retryable_session() => Some(1000),
+        _ => None,
+    }
+}
+fn pause(end: Instant, ms: u64) -> Result<()> {
+    ensure(
+        end.saturating_duration_since(Instant::now()) > Duration::from_millis(ms),
+        "OriginalDeadline",
+    )?;
+    thread::sleep(Duration::from_millis(ms));
+    Ok(())
+}
+fn reconnect(c: &mut Client, end: Instant) -> Result<()> {
+    c.disconnect();
+    loop {
+        ensure(Instant::now() < end, "ConnectionDeadline")?;
+        match c.connect() {
+            Ok(()) => return Ok(()),
+            Err(e) => pause(end, delay(&e).ok_or_else(|| e.code().to_string())?)?,
+        }
+    }
+}
+// Staging alone may retry: the product resolves the original identity and resends only after Absent.
+fn exact(c: &mut Client, action: &Action, signed: &[u8], end: Instant) -> Result<Outcome> {
+    let digest = action_digest(action).map_err(|_| "ActionDigest")?;
+    loop {
+        ensure(Instant::now() < end, "ExactOperationDeadline")?;
+        let pending = !home::is_read_operation(action.operation)
+            && net(c.pending())?.iter().any(|p| {
+                p.action.action().operation_id == action.operation_id
+                    && p.action.digest() == digest
+                    && !p.abandoned
+            });
+        let response = if pending {
+            c.retry_pending(action.operation_id, digest)
+        } else {
+            c.execute_signed(signed)
+        };
+        match response {
+            Ok(r) => {
+                let outcome = if r.operation_id == action.operation_id {
+                    ensure(r.action_digest == digest, "ResponseBinding")?;
+                    r.outcome
+                } else {
+                    let Outcome::Result { body } = r.outcome else {
+                        return Err("ResolutionShape".into());
+                    };
+                    let resolution: home::ResolveResult =
+                        body.deserialized().map_err(|_| "ResolutionShape")?;
+                    ensure(
+                        resolution.operation_id == action.operation_id
+                            && resolution.action_digest == digest,
+                        "ResolutionBinding",
+                    )?;
+                    resolution.outcome
+                };
+                match outcome {
+                    Outcome::Refused {
+                        code:
+                            ErrorCode::Unavailable | ErrorCode::RateLimited | ErrorCode::Overloaded,
+                        retry_after_ms,
+                        ..
+                    } => pause(end, retry_after_ms.unwrap_or(1000).min(60_000))?,
+                    value => return Ok(value),
+                }
+            }
+            Err(e) => {
+                pause(end, delay(&e).ok_or_else(|| e.code().to_string())?)?;
+                reconnect(c, end)?;
+            }
+        }
+    }
+}
+fn operation<T: Serialize>(
+    c: &mut Client,
+    op: Operation,
+    target: Target,
+    body: &T,
+    end: Instant,
+) -> Result<Outcome> {
+    let action = net(c.prepare_as(op, target, body, None))?;
+    let signed = net(c.sign(&action))?;
+    exact(c, &action, &signed, end)
+}
+fn committed(outcome: Outcome) -> Result<(Option<Id>, Value)> {
+    match outcome {
+        Outcome::Committed { event, body, .. } => Ok((event, body)),
+        Outcome::Refused { code, .. } | Outcome::Rejected { code, .. } => {
+            Err(format!("CommitExpected:{code:?}"))
+        }
+        _ => Err("CommitExpected".into()),
+    }
+}
+fn message(text: String) -> messaging::Send {
+    messaging::Send {
+        text,
+        mentions: vec![],
+        parent: None,
+        causation: None,
+    }
+}
+fn send_exact(
+    c: &mut Client,
+    room: RoomId,
+    body: &messaging::Send,
+    end: Instant,
+) -> Result<Outcome> {
+    let prepared = net(c.prepare_send(room, body, None, false, None))?;
+    exact(c, &prepared.action, &prepared.signed, end)
+}
+fn health(c: &mut Client) -> client::Result<Response> {
+    c.call(
+        Operation::ServiceInspect,
+        Target::Service,
+        &Value::Map(vec![]),
+    )
+}
+fn record_result(metrics: &mut Metrics, result: &client::Result<Response>) {
+    let name = match result {
+        Ok(response) => {
+            if let Ok(v) = Value::serialized(response)
+                && let Ok(bytes) = canonical_encode(&v, ORDINARY_FRAME_BYTES)
+            {
+                metrics.decoded_response_bytes += bytes.len();
+            }
+            match &response.outcome {
+                Outcome::Committed { .. } => "Committed".into(),
+                Outcome::Result { .. } => "Result".into(),
+                Outcome::Rejected { code, detail } => format!("Rejected:{code:?}:{detail}"),
+                Outcome::Refused { code, detail, .. } => format!("Refused:{code:?}:{detail}"),
+                Outcome::Absent => "Absent".into(),
+                Outcome::Unknown => "Unknown".into(),
+            }
+        }
+        Err(error) => error.code().into(),
+    };
+    // Error details are stable protocol categories, never message text or credentials.
+    *metrics.results.entry(name).or_default() += 1;
+}
+fn pending_unknown(c: &mut Client) -> bool {
+    c.pending()
+        .map_or(true, |p| p.iter().any(|p| !p.abandoned && !p.held))
+}
+fn normal_send(
+    c: &mut Client,
+    room: RoomId,
+    text: String,
+    m: &mut Metrics,
+) -> client::Result<Response> {
+    let prepared = c.prepare_send(room, &message(text), None, false, None)?;
+    m.signed_action_bytes += prepared.signed.len();
+    let response = c.execute_signed(&prepared.signed);
+    if matches!(
+        response,
+        Ok(Response {
+            outcome: Outcome::Refused { .. },
+            ..
+        })
+    ) {
+        // This offered message failed admission. Retain its immutable outcome; never retry it as another offer.
+        c.abandon(
+            prepared.action.operation_id,
+            action_digest(&prepared.action).map_err(|_| client::Error::Input)?,
+        )?;
+    }
+    response
+}
+fn percentile(values: &[u64], percent: usize) -> Option<u64> {
+    if values.is_empty() {
+        return None;
+    }
+    let mut values = values.to_vec();
+    values.sort_unstable();
+    Some(values[(values.len() * percent).div_ceil(100).saturating_sub(1)])
+}
+fn normal(
+    mut endpoint: Endpoint,
+    room: RoomId,
+    start: Instant,
+    seconds: u64,
+    phase: &str,
+) -> (Endpoint, Metrics) {
+    let mut metrics = Metrics {
+        endpoint: endpoint.index,
+        offered: seconds as usize,
+        ..Metrics::default()
+    };
+    let end = start + Duration::from_secs(seconds);
+    for index in 0..seconds {
+        let scheduled =
+            start + Duration::from_secs(index) + Duration::from_millis(endpoint.index as u64 * 200);
+        if metrics.unresolved || Instant::now() >= scheduled + Duration::from_secs(1) {
+            metrics.missed += 1;
+            continue;
+        }
+        wait_until(scheduled);
+        metrics.started += 1;
+        metrics
+            .schedule_lag_ms
+            .push(millis(Instant::now().saturating_duration_since(scheduled)));
+        let result = normal_send(
+            &mut endpoint.client,
+            room,
+            format!("{phase} endpoint{} offer{index} λ", endpoint.index),
+            &mut metrics,
+        );
+        if matches!(
+            result,
+            Ok(Response {
+                outcome: Outcome::Committed { .. },
+                ..
+            })
+        ) {
+            metrics.committed += 1;
+            metrics.committed_in_window += usize::from(Instant::now() <= end);
+            metrics
+                .commit_ms
+                .push(millis(Instant::now().saturating_duration_since(scheduled)));
+        }
+        record_result(&mut metrics, &result);
+        if result.is_err() && pending_unknown(&mut endpoint.client) {
+            metrics.unresolved = true;
+        }
+    }
+    wait_until(end);
+    (endpoint, metrics)
+}
+fn idle(mut endpoint: Endpoint, start: Instant, seconds: u64) -> (Endpoint, Metrics) {
+    let mut m = Metrics {
+        endpoint: endpoint.index,
+        ..Metrics::default()
+    };
+    for offset in (0..seconds).step_by(8) {
+        wait_until(
+            start + Duration::from_secs(offset) + Duration::from_millis(endpoint.index as u64 * 50),
+        );
+        let result = health(&mut endpoint.client);
+        record_result(&mut m, &result);
+    }
+    wait_until(start + Duration::from_secs(seconds));
+    (endpoint, m)
+}
+fn query() -> messaging::Search {
+    messaging::Search {
+        terms: (0..16).map(|i| format!("term{i}")).collect(),
+        sender: None,
+        represented: None,
+        from_ms: None,
+        until_ms: None,
+        cursor: None,
+        limit: 50,
+    }
+}
+fn hostile(endpoint: Endpoint, room: RoomId, start: Instant, seconds: u64) -> (Endpoint, Metrics) {
+    let mut m = Metrics {
+        endpoint: endpoint.index,
+        ..Metrics::default()
+    };
+    let flood = endpoint.index == 5;
+    let period = if flood { 100 } else { 500 };
+    let offers = seconds * 1000 / period;
+    m.offered = offers as usize;
+    for index in 0..offers {
+        let scheduled = start + Duration::from_millis(index * period);
+        if m.unresolved || Instant::now() >= scheduled + Duration::from_millis(period) {
+            m.missed += 1;
+            continue;
+        }
+        wait_until(scheduled);
+        m.started += 1;
+        let action = if flood {
+            endpoint.client.prepare_as(
+                Operation::MessageSend,
+                Target::Room(room),
+                &message(format!("flood offer{index}")),
+                None,
+            )
+        } else {
+            endpoint
+                .client
+                .prepare_as(Operation::SearchQuery, Target::Room(room), &query(), None)
+        };
+        let result = action.and_then(|action| {
+            let signed = endpoint.client.sign(&action)?;
+            m.signed_action_bytes += signed.len();
+            // Deliberate hostile protocol offers do not enter an automatic client outbox/retry loop.
+            let key = VerifyingKey::from_bytes(
+                endpoint.client.profile.registration.endpoint_key.as_bytes(),
+            )
+            .map_err(|_| client::Error::Input)?;
+            Ok(endpoint
+                .client
+                .session()?
+                .submit(&signed, &key)?
+                .value()
+                .clone())
+        });
+        if matches!(
+            result,
+            Ok(Response {
+                outcome: Outcome::Committed { .. },
+                ..
+            })
+        ) {
+            m.committed += 1;
+        }
+        m.unresolved = result.is_err();
+        record_result(&mut m, &result);
+    }
+    wait_until(start + Duration::from_secs(seconds));
+    (endpoint, m)
+}
+fn slow_reader(
+    mut endpoint: Endpoint,
+    room: RoomId,
+    start: Instant,
+    seconds: u64,
+) -> (Endpoint, Metrics) {
+    let mut m = Metrics {
+        endpoint: endpoint.index,
+        ..Metrics::default()
+    };
+    wait_until(start);
+    let run = || -> Result<serde_json::Value> {
+        let stream = net(endpoint.client.session())?.stream_handle();
+        let key = VerifyingKey::from_bytes(endpoint.client.profile.server.signing_key.as_bytes())
+            .map_err(|_| "ServerKey")?;
+        let mut expected = BTreeMap::new();
+        let mut input = 0;
+        for _ in 0..16 {
+            let action = net(endpoint.client.prepare_as(
+                Operation::HistoryPage,
+                Target::Room(room),
+                &messaging::Page {
+                    cursor: None,
+                    limit: 50,
+                },
+                None,
+            ))?;
+            let signed = net(endpoint.client.sign(&action))?;
+            let frame = Frame::new(FrameKind::Action, signed).map_err(|_| "Frame")?;
+            input += frame.encode().map_err(|_| "Frame")?.len();
+            expected.insert(
+                (action.operation_id.window, action.operation_id.operation),
+                action_digest(&action).map_err(|_| "Digest")?,
+            );
+            io::send(&stream, &frame, Duration::from_secs(2)).map_err(|_| "SlowReaderWrite")?;
+        }
+        let sent = Instant::now();
+        thread::sleep(Duration::from_secs(12));
+        let deadline =
+            (start + Duration::from_secs(seconds)).min(Instant::now() + Duration::from_secs(8));
+        let mut output = 0;
+        let mut responses = 0;
+        let mut ended = None;
+        while !expected.is_empty() && Instant::now() < deadline {
+            match stream.wait_readable(Duration::from_millis(200)) {
+                Ok(false) => continue,
+                Ok(true) => (),
+                Err(hrc::hypernet::Error::Closed) => {
+                    ended = Some("PeerClosed");
+                    break;
+                }
+                Err(_) => return Err("SlowReaderAuthorityOrTransport".into()),
+            }
+            // Read only after readability. Each complete response is signature- and request-bound.
+            let frame = match io::receive(&stream, Duration::from_secs(2)) {
+                Ok(f) => f,
+                Err(_) => {
+                    ended = Some("TransportOrFrameDeadline");
+                    break;
+                }
+            };
+            ensure(frame.kind == FrameKind::Response, "SlowReaderFrame")?;
+            output += frame.encode().map_err(|_| "Frame")?.len();
+            let response =
+                verify_response(&frame.payload, &key).map_err(|_| "SlowReaderSignature")?;
+            let response = response.value();
+            ensure(
+                expected.remove(&(
+                    response.operation_id.window,
+                    response.operation_id.operation,
+                )) == Some(response.action_digest),
+                "SlowReaderResponseBinding",
+            )?;
+            responses += 1;
+        }
+        ensure(
+            output <= 16 * (ORDINARY_FRAME_BYTES + 4),
+            "ResponseAmplificationBound",
+        )?;
+        Ok(
+            json!({"case":"NativeLoadSlowReader","requests":16,"verifiedResponses":responses,"drainEnded":ended,
+            "inputFrameBytes":input,"completeOutputFrameBytes":output,"unobservedPartialOutputPossible":ended.is_some(),
+            "holdMs":12000,"drainElapsedMs":millis(sent.elapsed())-12000,"internalQueueOccupancyMeasured":false}),
+        )
+    }();
+    match run {
+        Ok(value) => emit(value),
+        Err(code) => {
+            *m.results.entry(code).or_default() += 1;
+            m.unresolved = true;
+        }
+    }
+    endpoint.client.disconnect();
+    // Keep this hostile stream closed; a fresh connection belongs to the recovery measurement.
+    wait_until(start + Duration::from_secs(seconds));
+    (endpoint, m)
+}
+fn moderator(
+    mut endpoint: Endpoint,
+    room: RoomId,
+    subject: AccountId,
+    start: Instant,
+    seconds: u64,
+) -> (Endpoint, Metrics) {
+    let mut m = Metrics {
+        endpoint: endpoint.index,
+        ..Metrics::default()
+    };
+    for (offset, enabled) in [(8, true), (22, false)] {
+        wait_until(start + Duration::from_secs(offset));
+        let began = Instant::now();
+        let result = endpoint.client.call(
+            Operation::ModerationSilence,
+            Target::Room(room),
+            &moderation::Restriction {
+                subject,
+                enabled,
+                duration_ms: 30000,
+                reason: "Native load qualification".into(),
+            },
+        );
+        emit(
+            json!({"case":"NativeLoadModeration","enabled":enabled,"elapsedMs":millis(began.elapsed()),
+            "committed":matches!(result, Ok(Response {outcome:Outcome::Committed {..},..}))}),
+        );
+        if matches!(
+            result,
+            Ok(Response {
+                outcome: Outcome::Committed { .. },
+                ..
+            })
+        ) {
+            m.committed += 1;
+            m.commit_ms.push(millis(began.elapsed()));
+        }
+        record_result(&mut m, &result);
+    }
+    let keepalive = health(&mut endpoint.client);
+    record_result(&mut m, &keepalive);
+    wait_until(start + Duration::from_secs(seconds));
+    (endpoint, m)
+}
+fn run_phase(
+    endpoints: Vec<Endpoint>,
+    room: RoomId,
+    seconds: u64,
+    overload: bool,
+) -> (Vec<Endpoint>, bool) {
+    let phase = if overload { "overload" } else { "baseline" };
+    let start = Instant::now() + Duration::from_secs(1);
+    let subject = endpoints[5].client.profile.registration.account;
+    emit(
+        json!({"case":"NativeLoadPhaseStarted","phase":phase,"seconds":seconds,"offeredNormalPerSecond":5}),
+    );
+    let pairs = thread::scope(|scope| {
+        let handles: Vec<_> = endpoints
+            .into_iter()
+            .map(|e| {
+                scope.spawn(move || match e.index {
+                    0..=4 => normal(e, room, start, seconds, phase),
+                    5 | 6 if overload => hostile(e, room, start, seconds),
+                    7 if overload => slow_reader(e, room, start, seconds),
+                    10 if overload => moderator(e, room, subject, start, seconds),
+                    _ => idle(e, start, seconds),
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().expect("bounded load worker panicked"))
+            .collect::<Vec<_>>()
+    });
+    let normal: Vec<_> = pairs.iter().take(5).map(|(_, m)| m).collect();
+    let latencies: Vec<_> = normal
+        .iter()
+        .flat_map(|m| m.commit_ms.iter().copied())
+        .collect();
+    let offered: usize = normal.iter().map(|m| m.offered).sum();
+    let committed: usize = normal.iter().map(|m| m.committed).sum();
+    let in_window: usize = normal.iter().map(|m| m.committed_in_window).sum();
+    let missed: usize = normal.iter().map(|m| m.missed).sum();
+    let started: usize = normal.iter().map(|m| m.started).sum();
+    let rejected: usize = normal
+        .iter()
+        .flat_map(|m| &m.results)
+        .filter(|(code, _)| {
+            code.starts_with("Rejected:")
+                || code.starts_with("Refused:")
+                || code.starts_with("Operation")
+        })
+        .map(|(_, count)| count)
+        .sum();
+    let p95 = percentile(&latencies, 95);
+    let moderator = &pairs[10].1;
+    let attacks_exercised = !overload
+        || (pairs[5].1.started > 8
+            && pairs[6].1.started > 1
+            && pairs[5]
+                .1
+                .results
+                .keys()
+                .any(|r| r == "Rejected:Denied:RoomSilenced")
+            && pairs[5]
+                .1
+                .results
+                .keys()
+                .any(|r| r.contains("RateLimited") || r.contains("Overloaded"))
+            && !pairs[7].1.unresolved);
+    let passed = rate_pass(seconds, offered, in_window, missed, p95)
+        && attacks_exercised
+        && (!overload
+            || (moderator.committed == 2 && moderator.commit_ms.iter().all(|ms| *ms < 1000)));
+    emit(
+        json!({"case":"NativeLoadPhaseResult","phase":phase,"passed":passed,"offered":offered,"committed":committed,
+        "committedWithinMeasurementWindow":in_window,"missedOffers":missed,"commitsPerSecond":in_window as f64 / seconds as f64,
+        "rejectedAttempts":rejected,"rejectedFractionOfStarted":if started==0 {None} else {Some(rejected as f64/started as f64)},
+        "uncommittedFractionOfOffered":(offered-committed) as f64/offered as f64,
+        "p95CommitMs":p95,"p50CommitMs":percentile(&latencies,50),"maximumCommitMs":latencies.iter().max(),"attacksExercised":attacks_exercised,
+        "latencyIncludesScheduledWaitAndClientPreflight":true,"endpointMetrics":pairs.iter().map(|(_,m)|m).collect::<Vec<_>>(),
+        "byteAccounting":"signed actions and decoded response CBOR only; excludes preflight, framing, signatures on responses and HyperNet overhead"}),
+    );
+    (pairs.into_iter().map(|(e, _)| e).collect(), passed)
+}
+fn rate_pass(
+    seconds: u64,
+    offered: usize,
+    in_window: usize,
+    missed: usize,
+    p95: Option<u64>,
+) -> bool {
+    offered == seconds as usize * 5
+        && in_window == offered
+        && missed == 0
+        && p95.is_some_and(|ms| ms < 500)
+}
+fn check_filter(c: &mut Client, room: RoomId, subject: AccountId, end: Instant) -> Result<()> {
+    let outcome = operation(
+        c,
+        Operation::HistoryPage,
+        Target::Room(room),
+        &messaging::Page {
+            cursor: None,
+            limit: 50,
+        },
+        end,
+    )?;
+    let Outcome::Result { body } = outcome else {
+        return Err("FilteredHistoryUnavailable".into());
+    };
+    let page: messaging::PageResult = body.deserialized().map_err(|_| "HistoryShape")?;
+    ensure(
+        page.events
+            .iter()
+            .all(|e| e.actor.acting().account != subject),
+        "IgnoredHistoryLeak",
+    )?;
+    let mut search = query();
+    search.terms = vec!["loadmarker".into()];
+    search.sender = Some(subject);
+    let outcome = operation(c, Operation::SearchQuery, Target::Room(room), &search, end)?;
+    let Outcome::Result { body } = outcome else {
+        return Err("FilteredSearchUnavailable".into());
+    };
+    let page: messaging::PageResult = body.deserialized().map_err(|_| "SearchShape")?;
+    ensure(page.events.is_empty(), "IgnoredSearchLeak")
+}
+fn recovery(endpoints: &mut [Endpoint], room: RoomId, overall: Instant) -> Result<bool> {
+    emit(json!({"case":"NativeLoadRecoveryStarted","phase":"recovery"}));
+    let began = Instant::now();
+    let deadline = overall.min(began + Duration::from_secs(30));
+    let mut results = Vec::new();
+    for endpoint in endpoints.iter_mut().take(5) {
+        let c = &mut endpoint.client;
+        let result = (|| {
+            if health(c).is_err() {
+                reconnect(c, deadline)?;
+            }
+            let outcome = operation(
+                c,
+                Operation::ServiceInspect,
+                Target::Service,
+                &Value::Map(vec![]),
+                deadline,
+            )?;
+            ensure(
+                matches!(outcome, Outcome::Result { .. }),
+                "RecoveryAuthorityUnavailable",
+            )?;
+            // The same exact pending operation is resolved before any new effect can be created.
+            for pending in net(c.pending())?
+                .into_iter()
+                .filter(|p| !p.abandoned && !p.held)
+            {
+                let action = pending.action.action().clone();
+                let signed = pending.action.signed_bytes().to_vec();
+                let outcome = exact(c, &action, &signed, deadline)?;
+                ensure(
+                    matches!(
+                        outcome,
+                        Outcome::Committed { .. } | Outcome::Rejected { .. }
+                    ),
+                    "RecoveryUncertainOutcome",
+                )?;
+            }
+            committed(send_exact(
+                c,
+                room,
+                &message("recovered λ".into()),
+                deadline,
+            )?)?;
+            Ok::<_, String>(())
+        })();
+        results
+            .push(json!({"endpoint":endpoint.index,"passed":result.is_ok(),"error":result.err()}));
+        if Instant::now() >= deadline {
+            break;
+        }
+    }
+    let elapsed = millis(began.elapsed());
+    let passed =
+        results.len() == 5 && results.iter().all(|r| r["passed"] == true) && elapsed < 30_000;
+    emit(
+        json!({"case":"NativeLoadRecoveryResult","passed":passed,"elapsedMs":elapsed,"limitMs":30000,
+        "clockStartsAtAttackStop":true,"endpointResults":results}),
+    );
+    Ok(passed)
+}
+fn malformed(c: &mut Client, oversized: bool, end: Instant) -> Result<()> {
+    reconnect(c, end)?;
+    let stream = net(c.session())?.stream_handle();
+    let bytes = if oversized {
+        vec![255, 255, 255, 255, FrameKind::Action as u8]
+    } else {
+        vec![0, 0, 0, 2, FrameKind::Action as u8, 255]
+    };
+    stream
+        .send_all(&bytes, Duration::from_secs(2))
+        .map_err(|_| "InvalidInputSend")?;
+    let began = Instant::now();
+    let mut output = 0;
+    let mut closed = false;
+    while began.elapsed() < Duration::from_secs(5) {
+        match stream.wait_readable(Duration::from_millis(200)) {
+            Ok(false) => continue,
+            Err(hrc::hypernet::Error::Closed) => {
+                closed = true;
+                break;
+            }
+            Err(_) => return Err("MalformedTransportUnavailable".into()),
+            Ok(true) => {
+                match stream.recv_exact(&mut [0; 1], Duration::from_secs(1)) {
+                    Err(hrc::hypernet::Error::Closed) => {
+                        closed = true;
+                        break;
+                    }
+                    Err(_) => return Err("MalformedReadDeadlineOrAuthority".into()),
+                    Ok(()) => output += 1,
+                }
+                ensure(output <= 64, "UnexpectedMalformedOutput")?;
+            }
+        }
+    }
+    c.disconnect();
+    emit(
+        json!({"case":"NativeLoadMalformed","oversized":oversized,"closed":closed,"elapsedMs":millis(began.elapsed()),
+        "inputFrameBytes":bytes.len(),"observedOutputBytes":output}),
+    );
+    ensure(closed, "MalformedStreamNotClosed")
+}
+fn loops(endpoints: &mut [Endpoint], room: RoomId, end: Instant) -> Result<()> {
+    for i in [0, 8, 9] {
+        if health(&mut endpoints[i].client).is_err() {
+            reconnect(&mut endpoints[i].client, end)?;
+        }
+    }
+    let root = committed(send_exact(
+        &mut endpoints[0].client,
+        room,
+        &message("agent root".into()),
+        end,
+    )?)?
+    .0
+    .ok_or("RootEvent")?;
+    let reply = |cause| messaging::Send {
+        text: "bounded agent reply".into(),
+        mentions: vec![],
+        parent: Some(cause),
+        causation: Some(cause),
+    };
+    let first = committed(send_exact(
+        &mut endpoints[8].client,
+        room,
+        &reply(root),
+        end,
+    )?)?
+    .0
+    .ok_or("AgentEvent")?;
+    let repeated = send_exact(&mut endpoints[8].client, room, &reply(root), end)?;
+    ensure(
+        matches!(repeated, Outcome::Rejected {code:ErrorCode::Denied, ref detail} if detail == "AgentTriggerRepeated"),
+        "AgentDuplicateTrigger",
+    )?;
+    let mut cause = first;
+    for actor in [9, 8, 9] {
+        cause = committed(send_exact(
+            &mut endpoints[actor].client,
+            room,
+            &reply(cause),
+            end,
+        )?)?
+        .0
+        .ok_or("AgentEvent")?;
+    }
+    let rejected = send_exact(&mut endpoints[8].client, room, &reply(cause), end)?;
+    ensure(
+        matches!(rejected, Outcome::Rejected {code:ErrorCode::Denied, ref detail} if detail == "AgentDepth"),
+        "AgentDepthBound",
+    )?;
+    emit(
+        json!({"case":"NativeLoadAgentChain","passed":true,"maximumCommittedDepth":4,"repeatedTriggerRejected":true,
+        "defaultBotResponseSuppressionRetested":false}),
+    );
+    Ok(())
+}
+fn churn(endpoints: &mut [Endpoint], room: RoomId, overall: Instant) -> Result<()> {
+    let end = overall.min(Instant::now() + Duration::from_secs(45));
+    let mut observations = Vec::new();
+    let mut passed = true;
+    for attempt in 0..4 {
+        if Instant::now() >= end {
+            passed = false;
+            break;
+        }
+        let c = &mut endpoints[7].client;
+        c.disconnect();
+        let began = Instant::now();
+        // Each is one offered connection, without an additional helper retry loop.
+        let result = c.connect();
+        let tolerated = result.is_ok() || result.as_ref().err().is_some_and(|e| delay(e).is_some());
+        let connection_ms = millis(began.elapsed());
+        c.disconnect();
+        let began = Instant::now();
+        let send = normal_send(
+            &mut endpoints[0].client,
+            room,
+            format!("unaffected churn{attempt}"),
+            &mut Metrics::default(),
+        );
+        let committed = matches!(
+            send,
+            Ok(Response {
+                outcome: Outcome::Committed { .. },
+                ..
+            })
+        );
+        observations.push(json!({"attempt":attempt,"connected":result.is_ok(),"connectionMs":connection_ms,
+            "refusal":result.err().map(|e| e.code()),"unaffectedCommitted":committed,"unaffectedCommitMs":millis(began.elapsed())}));
+        passed &= tolerated && committed;
+        thread::sleep(Duration::from_millis(500));
+    }
+    passed &= observations.len() == 4 && Instant::now() < end;
+    emit(
+        json!({"case":"NativeLoadConnectionChurn","passed":passed,"offeredConnections":4,
+        "observations":observations,"concurrentConnectionsFromChurnEndpoint":1}),
+    );
+    ensure(passed, "ConnectionChurnUnavailable")
+}
+fn run(args: &Arguments) -> Result<bool> {
+    ensure(
+        args.maximum_seconds > 0 && args.maximum_seconds <= 360,
+        "HelperDeadlineBound",
+    )?;
+    let request: Request =
+        serde_json::from_slice(&files::read(&args.request, 16384).map_err(|_| "RequestFile")?)
+            .map_err(|_| "RequestShape")?;
+    ensure(
+        request.profiles.len() == 12,
+        "TwelveExplicitProfilesRequired",
+    )?;
+    let end = Instant::now() + Duration::from_secs(args.maximum_seconds);
+    emit(json!({"case":"NativeLoadStarted","phase":"setup","maximumSeconds":args.maximum_seconds}));
+    let mut endpoints = Vec::new();
+    for (index, path) in request.profiles.iter().enumerate() {
+        emit(json!({"case":"NativeLoadSetupStep","endpoint":index,"operation":"OpenProfile"}));
+        let mut client = net(Client::open_offline(path))?;
+        reconnect(
+            &mut client,
+            end.min(Instant::now() + Duration::from_secs(45)),
+        )?;
+        endpoints.push(Endpoint { index, client });
+        for endpoint in &mut endpoints {
+            let _ = health(&mut endpoint.client);
+        }
+    }
+    ensure(
+        endpoints
+            .iter()
+            .map(|e| e.client.profile.registration.account)
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+            == 12,
+        "DistinctAccounts",
+    )?;
+    ensure(
+        endpoints
+            .iter()
+            .map(|e| e.client.profile.registration.endpoint_key)
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+            == 12,
+        "DistinctEndpointKeys",
+    )?;
+    for endpoint in &endpoints {
+        let registration = &endpoint.client.profile.registration;
+        let expected_agent = matches!(endpoint.index, 8 | 9);
+        ensure(
+            matches!(registration.classification, AccountClass::Agent { .. }) == expected_agent,
+            "PilotAccountClass",
+        )?;
+        if let AccountClass::Agent { operator } = registration.classification {
+            ensure(
+                operator
+                    == endpoints[endpoint.index + 2]
+                        .client
+                        .profile
+                        .registration
+                        .account,
+                "PilotOperatorBinding",
+            )?;
+        }
+    }
+    let create = operation(
+        &mut endpoints[10].client,
+        Operation::RoomCreate,
+        Target::Service,
+        &conversations::Create {
+            name: "Native pilot load".into(),
+            confidentiality: RoomConfidentiality::Community,
+        },
+        end,
+    )?;
+    let body: messaging::Committed = committed(create)?
+        .1
+        .deserialized()
+        .map_err(|_| "CreatedRoom")?;
+    let room = body.room.ok_or("CreatedRoom")?;
+    for endpoint in &mut endpoints {
+        if endpoint.index != 10 {
+            emit(
+                json!({"case":"NativeLoadSetupStep","endpoint":endpoint.index,"operation":"JoinRoom"}),
+            );
+            committed(operation(
+                &mut endpoint.client,
+                Operation::RoomJoin,
+                Target::Room(room),
+                &Value::Map(vec![]),
+                end,
+            )?)?;
+        }
+    }
+    let subject = endpoints[5].client.profile.registration.account;
+    let marker = committed(send_exact(
+        &mut endpoints[5].client,
+        room,
+        &message("loadmarker visible only to non-ignoring recipients".into()),
+        end,
+    )?)?
+    .0
+    .ok_or("LoadMarkerEvent")?;
+    let mut marker_query = query();
+    marker_query.terms = vec!["loadmarker".into()];
+    marker_query.sender = Some(subject);
+    let result = operation(
+        &mut endpoints[10].client,
+        Operation::SearchQuery,
+        Target::Room(room),
+        &marker_query,
+        end,
+    )?;
+    let Outcome::Result { body } = result else {
+        return Err("MarkerSearchUnavailable".into());
+    };
+    let page: messaging::PageResult = body.deserialized().map_err(|_| "MarkerSearchShape")?;
+    ensure(
+        page.events.iter().any(|e| e.event == marker),
+        "UnfilteredMarkerMissing",
+    )?;
+    let recipient = endpoints[9].client.profile.registration.account;
+    committed(operation(
+        &mut endpoints[9].client,
+        Operation::ModerationIgnore,
+        Target::Account(recipient),
+        &moderation::Filter {
+            subject,
+            enabled: true,
+        },
+        end,
+    )?)?;
+    check_filter(&mut endpoints[9].client, room, subject, end)?;
+    for endpoint in &mut endpoints {
+        ensure(
+            matches!(
+                net(health(&mut endpoint.client))?.outcome,
+                Outcome::Result { .. }
+            ),
+            "PilotSessionNotCurrent",
+        )?;
+    }
+    emit(
+        json!({"case":"NativeLoadPilotReady","phase":"baseline","authenticatedStreams":12,"room":room}),
+    );
+    let (endpoints_after, baseline) = run_phase(endpoints, room, 30, false);
+    let (mut endpoints, overload) = run_phase(endpoints_after, room, 45, true);
+    let recovered = recovery(&mut endpoints, room, end)?;
+    // Targeted invalid traffic cannot alter the already measured pilot offered rate.
+    let mut checks = Vec::new();
+    let filtered = (|| {
+        if health(&mut endpoints[9].client).is_err() {
+            reconnect(&mut endpoints[9].client, end)?;
+        }
+        check_filter(&mut endpoints[9].client, room, subject, end)
+    })();
+    checks.push(json!({"case":"ignore","passed":filtered.is_ok(),"error":filtered.err()}));
+    for oversized in [false, true] {
+        let result = malformed(&mut endpoints[7].client, oversized, end);
+        checks.push(json!({"case":if oversized {"oversized"} else {"malformed"},"passed":result.is_ok(),"error":result.err()}));
+    }
+    let churn = churn(&mut endpoints, room, end);
+    checks.push(json!({"case":"connectionChurn","passed":churn.is_ok(),"error":churn.err()}));
+    let chain = loops(&mut endpoints, room, end);
+    checks.push(json!({"case":"agentChain","passed":chain.is_ok(),"error":chain.err()}));
+    let passed = baseline && overload && recovered && checks.iter().all(|v| v["passed"] == true);
+    for endpoint in &mut endpoints {
+        endpoint.client.disconnect();
+    }
+    emit(
+        json!({"case":"NativeLoadSummary","phase":"complete","passed":passed,"baselinePassed":baseline,
+        "overloadPassed":overload,"recoveryPassed":recovered,"boundaryChecks":checks,
+        "rssGateEvaluatedByParent":true,"simultaneousFederationQualified":false,"internalQueueOccupancyMeasured":false}),
+    );
+    Ok(passed)
+}
+fn main() {
+    let args = Arguments::parse();
+    let finished = Arc::new(AtomicBool::new(false));
+    let watcher = finished.clone();
+    let maximum = args.maximum_seconds.min(360);
+    thread::spawn(move || {
+        let end = Instant::now() + Duration::from_secs(maximum);
+        while !watcher.load(Ordering::Acquire) {
+            if Instant::now() >= end {
+                emit(json!({"case":"NativeLoadDeadline","passed":false}));
+                std::process::exit(124);
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+    });
+    let result = run(&args);
+    finished.store(true, Ordering::Release);
+    match result {
+        Ok(true) => (),
+        Ok(false) => std::process::exit(1),
+        Err(code) => {
+            emit(json!({"case":"NativeLoadFailure","passed":false,"code":code}));
+            std::process::exit(1);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn offered_load_cannot_pass_with_missing_or_slow_commits() {
+        assert!(rate_pass(30, 150, 150, 0, Some(499)));
+        assert!(!rate_pass(30, 149, 149, 0, Some(1)));
+        assert!(!rate_pass(30, 150, 149, 0, Some(1)));
+        assert!(!rate_pass(30, 150, 150, 1, Some(1)));
+        assert!(!rate_pass(30, 150, 150, 0, Some(500)));
+        assert!(!rate_pass(30, 150, 150, 0, None));
+        assert_eq!(percentile(&(1..=100).collect::<Vec<_>>(), 95), Some(95));
+    }
+}

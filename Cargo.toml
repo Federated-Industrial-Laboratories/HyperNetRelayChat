@@ -26,6 +26,10 @@ path = "Tests/Integration/NativeConfidential.rs"
 name = "native-federation-client"
 path = "Tests/Integration/NativeFederation.rs"
 
+[[example]]
+name = "native-load-client"
+path = "Tests/Integration/NativeLoad.rs"
+
 [dependencies]
 clap = { version = "4.6.7", features = ["derive"] }
 serde = { version = "1.0.229", features = ["derive"] }

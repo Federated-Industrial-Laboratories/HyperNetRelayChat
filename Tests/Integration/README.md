@@ -1,5 +1,81 @@
 # Native conversation qualification
 
+`NativeLoad.py` and the `native-load-client` example provide the separate bounded
+pilot/load workflow. Select `configuration.loadOnly=true` or
+`HRC_NATIVE_LOAD_ONLY=1`, and supply `configuration.loadClientBinary` or
+`HRC_NATIVE_LOAD_CLIENT`. It uses the existing real Alice/Bob/Agent companion
+prerequisites. This selection is exclusive with the local/confidential-only
+workflows and does not rerun or claim their functional evidence.
+
+The shipped CLI creates twelve distinct HRC accounts, endpoint keys and profiles:
+eight interactive users, two independently identified agents, and two operator
+users. The agents have explicit operator bindings. Ten human profiles share the
+Bob outgoing HyperNet application; two agents share the Agent application. Alice's
+application receives the twelve service streams. These are two distinct client
+HyperNet principals, not twelve independently administered devices. One operator
+owns and moderates the test room; the second holds a separate authenticated
+stream. The two transition slots and two federation slots remain unoccupied.
+Simultaneous federation capacity requires separate evidence.
+
+The Rust helper has an original 360-second deadline inside the unchanged
+900-second outer fixture, with time retained for process cleanup. It measures a
+30-second baseline and a 45-second overload period. Five independent clients
+offer one send each second, staggered by 200 milliseconds. An occupied client
+records missed scheduled offers instead of slowing the offered schedule. Every
+normal offered message must commit within the measurement window; missed,
+refused, unknown or late outcomes fail the throughput gate. The reported p95
+includes scheduled waiting, client preflight, durable local outbox and the
+authenticated committed response, and must remain below 500 milliseconds.
+The helper cannot pass by reducing offered load or ignoring rejections.
+
+During overload, another endpoint offers up to ten signed protocol sends per
+second and a different endpoint offers two bounded sixteen-term searches per
+second. Each hostile stream has at most one operation in flight; offers missed
+because of its response time are counted. The normal five-client load continues.
+A slow reader sends sixteen authenticated history requests, withholds reads for
+twelve seconds and then drains only bounded, request-bound signed responses.
+HRC uses authenticated pull delivery; this measures an unread response stream,
+not an unimplemented push fan-out queue. The moderator silences and unsilences
+the flood actor during the phase; both commits must take less than one second.
+A pass requires the flood to exercise actual rate/overload refusal and the
+active silence restriction, as well as the unaffected-client targets.
+
+Recipient ignore is enabled before the flood and rechecked through history and
+indexed search, with an unfiltered search proving the retained marker exists.
+Four subsequent connection openings and closures test bounded churn while an
+unaffected endpoint commits messages. Typed temporary admission refusals are
+recorded; the helper does not infer a particular connection rate policy from them.
+Additional authenticated streams receive a malformed CBOR frame
+and an oversized length header; observed closure must be distinguishable from a
+local timeout or authority failure. Two real agent identities exercise repeated
+causal-trigger rejection and the maximum four-effect depth. Default bot
+response suppression, notifications, Unicode editing, confidential conversation
+and federation behavior retain their separately identified functional evidence;
+the load helper does not claim to repeat them.
+
+Normal sends use the shared durable Client path. Staging or recovery may retry
+only the exact saved operation identifier and digest, through product resolution
+and matching certified absence. Offered load does not automatically replay:
+verified admission refusals are retained and explicitly abandoned, while unknown
+effects stop that producer until recovery. Deliberately hostile protocol offers
+use the authenticated Session submission API without a durable retry loop.
+Recovery resolves uncertain normal sends before creating any new effect, then
+checks fresh normal commits. Its thirty-second measurement starts at attack stop,
+including any wait for authority/transport health; a slow prerequisite does not
+silently move that clock.
+
+The parent samples only the HRC service's `/proc` RSS and thread count every
+200 milliseconds. Peak RSS must remain at or below 512 MiB; HyperNet and helper
+processes are excluded and thread count is reported without an invented limit.
+Each phase emits bounded JSON metrics before evaluating its result. Failures,
+partial output, output caps and the final service shutdown remain inspectable.
+Signed request sizes and decoded response sizes exclude hidden preflight traffic,
+response COSE overhead and HyperNet transport overhead. The slow-reader and
+invalid-frame cases separately report directly observed frame or byte counts.
+Internal queue occupancy, link saturation and total network amplification are
+not observable here and are explicitly unqualified. No product limits change
+when a measured threshold fails.
+
 `NativeConversation.py` drives the shipped HRC CLI against three independently
 admitted HyperNet principals: two humans and an agent. The fixture provisions
 real Core/Suite application service consent, service-scoped grants, retained
