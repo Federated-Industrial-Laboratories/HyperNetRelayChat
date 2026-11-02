@@ -120,6 +120,29 @@ fn unavailable() -> Error {
 }
 
 #[test]
+fn durable_delivery_is_visible_before_a_trailing_refresh_can_complete() {
+    let (_fixture, mut worker, _) = worker();
+    let action = action();
+    outcome(&mut worker, &action, committed()).unwrap();
+    worker.clear_matching_draft(&action).unwrap();
+    assert!(worker.shared.snapshot.lock().unwrap().deliveries.is_empty());
+
+    // No session is available: the refresh cannot produce a new remote view.
+    // Its failure has not yet reached finish_view or command completion.
+    assert!(matches!(worker.refresh(), Err(Error::Offline)));
+    let published = Arc::clone(&worker.shared.snapshot.lock().unwrap());
+    let delivery = published.deliveries.last().unwrap();
+    assert_eq!(delivery.request_id, Some(77));
+    assert_eq!(delivery.operation_id, action.operation_id);
+    assert_eq!(delivery.action_digest, action_digest(&action).unwrap());
+    assert!(matches!(delivery.outcome, Some(Outcome::Committed { .. })));
+    assert!(published.selected.as_ref().unwrap().stale);
+    assert!(published.inspection.stale);
+    assert!(published.completions.is_empty());
+    assert!(worker.client.pending().unwrap().is_empty());
+}
+
+#[test]
 fn committed_send_generic_and_approval_completion_survive_failed_view_refresh() {
     for operation in [
         Operation::MessageSend,

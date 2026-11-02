@@ -75,6 +75,8 @@ Local persistence errors remain visible on their original completions.
 Effect completion succeeds only after every requested effect and its required
 local persistence succeeds. A later room, grant or inspection refresh can fail
 without changing that confirmed outcome or replaying the effect. The original
+durable delivery is published before a full view refresh starts its reads, with
+room and inspection state marked stale until that refresh succeeds. The command
 completion and exact committed delivery remain successful; the affected views,
 inspection and privacy become stale. `ViewRefreshFailed` reports the separate
 view failure without attributing it to the effect request, and normal connection
