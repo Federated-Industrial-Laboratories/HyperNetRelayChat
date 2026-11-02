@@ -89,7 +89,19 @@ impl Client {
     }
     pub(super) fn effects_ready(&mut self) -> Result<()> {
         if self.pending()?.iter().any(|p| !p.abandoned && !p.held) {
-            self.resolve_pending()?;
+            for response in self.resolve_pending()? {
+                let outcome = match response.outcome {
+                    Outcome::Result { body } => {
+                        body.deserialized::<home::ResolveResult>()
+                            .map_err(|_| Error::Input)?
+                            .outcome
+                    }
+                    outcome => outcome,
+                };
+                if !matches!(outcome, Outcome::Committed { .. }) {
+                    return Err(Error::from_outcome(outcome));
+                }
+            }
             if self.pending()?.iter().any(|p| !p.abandoned && !p.held) {
                 return Err(Error::Unknown);
             }
@@ -368,11 +380,7 @@ impl Client {
                 },
             )
             .map_err(failure)?;
-        let response = self.execute_signed(&signed.ok_or(Error::Storage)?)?;
-        if matches!(response.outcome, Outcome::Committed { .. }) {
-            self.crypto_sync(room, None)?;
-        }
-        Ok(response)
+        self.execute_signed(&signed.ok_or(Error::Storage)?)
     }
     pub fn crypto_commit(
         &mut self,
@@ -477,11 +485,7 @@ impl Client {
             .map_err(failure)?;
         // Terminal rejection cleanup is joined to outbox recording, including
         // outcomes learned through exact resolution after a disconnect.
-        let response = self.execute_signed(&signed.ok_or(Error::Storage)?)?;
-        if matches!(response.outcome, Outcome::Committed { .. }) {
-            self.crypto_sync(room, grant)?;
-        }
-        Ok(response)
+        self.execute_signed(&signed.ok_or(Error::Storage)?)
     }
     fn set_room_revision(
         &mut self,

@@ -248,7 +248,7 @@ impl Client {
             let already: bool = self
                 .store
                 .read(Duration::from_secs(1), |db| {
-                    let id = format!("ready:{group}:{}:{commit}", view.remote.epoch);
+                    let id = archive::ready_key(group, view.remote.epoch, commit);
                     db.query_row(
                         "SELECT EXISTS(SELECT 1 FROM client_preferences WHERE id=?1)",
                         [id],
@@ -273,12 +273,6 @@ impl Client {
                 if !matches!(response.outcome, Outcome::Committed { .. }) {
                     return Err(Error::from_outcome(response.outcome));
                 }
-                cache::save_preferences(
-                    &mut self.store,
-                    &format!("ready:{group}:{}:{commit}", local.epoch),
-                    &true,
-                )
-                .map_err(|_| Error::Storage)?;
                 view = self.crypto_inspect(room, grant)?;
             }
         }

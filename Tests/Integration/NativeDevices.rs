@@ -169,13 +169,9 @@ pub(super) fn workflow(
                 .contains(&original_endpoint),
         "RecoveryBarrierMissing",
     )?;
-    run.step("Alice", "RemoveRecoveredOldEndpoint", |_| {
-        completed(net(alice.crypto_commit(
-            room,
-            &[],
-            &[original_endpoint],
-            None,
-        ))?)
+    run.step("Alice", "RemoveRecoveredOldEndpoint", |end| {
+        let response = net(alice.crypto_commit(room, &[], &[original_endpoint], None))?;
+        membership_ready(alice, room, response, end)
     })?;
     run.step("Bob", "EnrolRecoveredMlsKey", |_| {
         completed(net(recovered.crypto_enrol())?)
@@ -193,14 +189,15 @@ pub(super) fn workflow(
         .find(|p| p.member.actor.acting().endpoint == pending.request.endpoint)
         .ok_or("RecoveredPackageMissing")?
         .digest;
-    run.step("Alice", "AdmitRecoveredFutureEndpoint", |_| {
-        completed(net(alice.crypto_commit(room, &[package], &[], None))?)
+    run.step("Alice", "AdmitRecoveredFutureEndpoint", |end| {
+        let response = net(alice.crypto_commit(room, &[package], &[], None))?;
+        membership_ready(alice, room, response, end)
     })?;
     run.step("Bob", "TrustRecoveredRoster", |_| {
         pin(&mut recovered, room, None)
     })?;
-    run.step("Bob", "RecoveredWelcomeReady", |_| {
-        net(recovered.crypto_sync(room, None))
+    run.step("Bob", "RecoveredWelcomeReady", |end| {
+        synchronise(&mut recovered, room, None, end)
     })?;
     let old = run.step("Bob", "RecoveredHistoryIsFutureOnly", |_| {
         history(&mut recovered, room, None)
