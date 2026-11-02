@@ -17,6 +17,15 @@ owns and moderates the test room; the second holds a separate authenticated
 stream. The two transition slots and two federation slots remain unoccupied.
 Simultaneous federation capacity requires separate evidence.
 
+The isolated HyperNet fixture selects sixteen concurrent connections in both its
+relay and application route profiles, with matching signed admission and memory
+consent. This accommodates the twelve HRC streams and retained fixture transport.
+The generic eight-connection route defaults cannot run this topology. Finite
+voucher connection allowance and the companion's sixteen-stream ceiling are
+separate limits; neither overrides a lower route profile. These are explicit
+fixture policy settings, not changes to HyperNet's capacity implementation or
+HRC's performance thresholds.
+
 After room setup, all eight interactive Client instances release their streams
 and SQLCipher Store ownership. The production Controller then opens each of those
 same profiles, connects and selects the room. The helper waits for all eight
