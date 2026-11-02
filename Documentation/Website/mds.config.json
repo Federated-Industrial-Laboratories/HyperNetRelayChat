@@ -8,7 +8,7 @@
     "version": "0.1.0-dev.1",
     "channel": "preview",
     "homeUrl": "/docs/",
-    "footer": "Federated Industrial Laboratories | Development source 011cb1a",
+    "footer": "Federated Industrial Laboratories | Development source cd53430",
     "indexable": false,
     "origin": "https://hypernet.federatedindustrial.com"
   },
@@ -22,7 +22,7 @@
     "type": "snapshot",
     "root": "content",
     "manifest": "source.json",
-    "revision": "011cb1a514c358366ffb93d384a6ff1dccd6fbe2"
+    "revision": "cd534304be077fedcf68dd113c554754a1ad9ae7"
   },
   "navigation": [
     {

@@ -85,6 +85,12 @@ Normal sends use the actual Controller command and durable Client path. Staging 
 only the exact saved operation identifier and digest, through product resolution
 and matching certified absence. The helper never redispatches an offered send;
 the production Controller retains and resolves its original uncertain effects.
+During setup, a temporary refusal of an outcome-resolution query keeps the
+original effect pending and uses the original setup deadline. A resolver rejection
+or unknown result fails setup with a separate bounded diagnostic; it cannot be
+reported as the original effect's completion. Only the production client can
+resubmit the original bytes after a verified absence result.
+
 Deliberately hostile protocol offers
 use the authenticated Session submission API without a durable retry loop.
 Recovery waits for the original offered effects to resolve, then submits one new

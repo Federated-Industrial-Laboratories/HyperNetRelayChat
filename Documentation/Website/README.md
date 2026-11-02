@@ -7,7 +7,7 @@ is still in progress; these files do not establish a supported or published rele
 ## Source and publication scope
 
 The configuration pins HRC `0.1.0-dev.1` documentation to
-`011cb1a514c358366ffb93d384a6ff1dccd6fbe2`. It exports only the 21 maintained
+`cd534304be077fedcf68dd113c554754a1ad9ae7`. It exports only the 21 maintained
 Markdown manuals directly under `Documentation/`, the root README, Apache-2.0
 license and third-party adaptation notices: 24 pages. The README is the manual
 home. Website build instructions and generated snapshots are not product manuals.

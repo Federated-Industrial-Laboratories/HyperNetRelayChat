@@ -106,9 +106,65 @@ fn reconnect(c: &mut Client, end: Instant) -> Result<()> {
         }
     }
 }
+enum ExactReply {
+    Outcome(Outcome),
+    RetryResolution {
+        milliseconds: u64,
+        code: ErrorCode,
+        reason: String,
+    },
+}
+fn bounded_reason(detail: &str) -> String {
+    detail
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+        .take(80)
+        .collect()
+}
+fn exact_reply(id: OperationId, digest: Id, response: Response) -> Result<ExactReply> {
+    if response.operation_id == id {
+        ensure(response.action_digest == digest, "ResponseBinding")?;
+        return Ok(ExactReply::Outcome(response.outcome));
+    }
+    match response.outcome {
+        Outcome::Result { body } => {
+            let resolution: home::ResolveResult =
+                body.deserialized().map_err(|_| "ResolutionShape")?;
+            ensure(
+                resolution.operation_id == id && resolution.action_digest == digest,
+                "ResolutionBinding",
+            )?;
+            Ok(ExactReply::Outcome(resolution.outcome))
+        }
+        Outcome::Refused {
+            code: code @ (ErrorCode::Unavailable | ErrorCode::RateLimited | ErrorCode::Overloaded),
+            detail,
+            retry_after_ms,
+        } => Ok(ExactReply::RetryResolution {
+            milliseconds: retry_after_ms.unwrap_or(1000).min(60_000),
+            code,
+            reason: bounded_reason(&detail),
+        }),
+        Outcome::Refused {
+            code,
+            detail,
+            retry_after_ms,
+        } => Err(format!(
+            "ResolutionRefused:{code:?}:{}:retryMs={retry_after_ms:?}",
+            bounded_reason(&detail)
+        )),
+        Outcome::Rejected { code, detail } => Err(format!(
+            "ResolutionRejected:{code:?}:{}",
+            bounded_reason(&detail)
+        )),
+        Outcome::Unknown => Err("ResolutionUnknown".into()),
+        _ => Err("ResolutionShape".into()),
+    }
+}
 // Staging alone may retry: the product resolves the original identity and resends only after Absent.
 fn exact(c: &mut Client, action: &Action, signed: &[u8], end: Instant) -> Result<Outcome> {
     let digest = action_digest(action).map_err(|_| "ActionDigest")?;
+    let mut resolution_observations = 0;
     loop {
         ensure(Instant::now() < end, "ExactOperationDeadline")?;
         let pending = !home::is_read_operation(action.operation)
@@ -124,21 +180,22 @@ fn exact(c: &mut Client, action: &Action, signed: &[u8], end: Instant) -> Result
         };
         match response {
             Ok(r) => {
-                let outcome = if r.operation_id == action.operation_id {
-                    ensure(r.action_digest == digest, "ResponseBinding")?;
-                    r.outcome
-                } else {
-                    let Outcome::Result { body } = r.outcome else {
-                        return Err("ResolutionShape".into());
-                    };
-                    let resolution: home::ResolveResult =
-                        body.deserialized().map_err(|_| "ResolutionShape")?;
-                    ensure(
-                        resolution.operation_id == action.operation_id
-                            && resolution.action_digest == digest,
-                        "ResolutionBinding",
-                    )?;
-                    resolution.outcome
+                let outcome = match exact_reply(action.operation_id, digest, r)? {
+                    ExactReply::Outcome(outcome) => outcome,
+                    ExactReply::RetryResolution {
+                        milliseconds,
+                        code,
+                        reason,
+                    } => {
+                        if resolution_observations < 8 {
+                            emit(json!({"case":"NativeLoadSetupResolutionRefused",
+                                "operation":action.operation,"code":code,"reason":reason,
+                                "retryMs":milliseconds,"originalEffectStillPending":true}));
+                            resolution_observations += 1;
+                        }
+                        pause(end, milliseconds)?;
+                        continue;
+                    }
                 };
                 match outcome {
                     Outcome::Refused {
@@ -1405,6 +1462,110 @@ mod tests {
         apply_delivery(&mut substituted, &delivery, room);
         assert_eq!(substituted.status, "DeliveryBindingFailed");
         assert!(substituted.committed_at.is_none());
+    }
+    #[test]
+    fn resolver_refusals_remain_separate_from_the_original_effect_outcome() {
+        let id = |n| Id::from_bytes([n; 32]);
+        let original = OperationId {
+            window: id(1),
+            operation: id(2),
+        };
+        let digest = id(3);
+        let response = |outcome| Response {
+            home: ServiceId {
+                network: NetworkId {
+                    network: id(4),
+                    incarnation: id(5),
+                },
+                service: id(6),
+            },
+            operation_id: OperationId {
+                window: id(1),
+                operation: id(7),
+            },
+            action_digest: id(8),
+            outcome,
+        };
+        for code in [
+            ErrorCode::Unavailable,
+            ErrorCode::RateLimited,
+            ErrorCode::Overloaded,
+        ] {
+            assert!(matches!(
+                exact_reply(
+                    original,
+                    digest,
+                    response(Outcome::Refused {
+                        code,
+                        detail: "CurrentAuthorityUnavailable".into(),
+                        retry_after_ms: Some(17),
+                    })
+                )
+                .unwrap(),
+                ExactReply::RetryResolution {
+                    milliseconds: 17,
+                    ..
+                }
+            ));
+        }
+        for code in [ErrorCode::Denied, ErrorCode::Expired] {
+            assert!(
+                matches!(exact_reply(original, digest, response(Outcome::Refused {
+                code, detail: "CurrentBinding".into(), retry_after_ms: None,
+            })), Err(error) if error.starts_with("ResolutionRefused:"))
+            );
+            assert!(
+                matches!(exact_reply(original, digest, response(Outcome::Rejected {
+                code, detail: "CurrentBinding".into(),
+            })), Err(error) if error.starts_with("ResolutionRejected:"))
+            );
+        }
+        assert!(
+            matches!(exact_reply(original, digest, response(Outcome::Unknown)),
+            Err(error) if error == "ResolutionUnknown")
+        );
+        let mut resolved = home::ResolveResult {
+            operation_id: original,
+            action_digest: digest,
+            outcome: Outcome::Committed {
+                event: Some(id(9)),
+                position: 1,
+                body: Value::Null,
+            },
+        };
+        let resolved_response = |value: &home::ResolveResult| {
+            response(Outcome::Result {
+                body: Value::serialized(value).unwrap(),
+            })
+        };
+        assert!(matches!(
+            exact_reply(original, digest, resolved_response(&resolved)).unwrap(),
+            ExactReply::Outcome(Outcome::Committed { .. })
+        ));
+        resolved.operation_id.operation = id(10);
+        assert!(
+            matches!(exact_reply(original, digest, resolved_response(&resolved)),
+            Err(error) if error == "ResolutionBinding")
+        );
+        resolved.operation_id = original;
+        resolved.action_digest = id(11);
+        assert!(
+            matches!(exact_reply(original, digest, resolved_response(&resolved)),
+            Err(error) if error == "ResolutionBinding")
+        );
+        let mut direct = response(Outcome::Rejected {
+            code: ErrorCode::Denied,
+            detail: "Membership".into(),
+        });
+        direct.operation_id = original;
+        direct.action_digest = digest;
+        assert!(matches!(
+            exact_reply(original, digest, direct).unwrap(),
+            ExactReply::Outcome(Outcome::Rejected {
+                code: ErrorCode::Denied,
+                ..
+            })
+        ));
     }
     #[test]
     fn earlier_refusals_cannot_hide_an_attack_stream_that_stopped_early() {
