@@ -176,7 +176,9 @@ pub(super) fn workflow(
         let response = net(alice.crypto_commit(room, &[], &[original_endpoint], None))?;
         membership_ready(alice, room, response, end)
     })?;
-    run.step("Bob", "EnrolRecoveredMlsKey", |_| {
+    run.step("Bob", "EnrolRecoveredMlsKey", |end| {
+        net(recovered.connect())?;
+        ensure(Instant::now() < end, "RecoveredEndpointReturnDeadline")?;
         completed(net(recovered.crypto_enrol())?)
     })?;
     run.step("Bob", "PublishRecoveredFuturePackage", |_| {

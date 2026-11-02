@@ -299,6 +299,11 @@ After the old leaf is removed, the recovered endpoint explicitly requests and
 receives future-message admission. Earlier ciphertext remains available under
 room policy, but its plaintext is unavailable; a new message must decrypt.
 Device retries retain the same signed request and original step deadline.
+Participants that return after another participant's workflow open a fresh session
+before their next read or effect preparation. These connections require current
+HyperNet permission within the original step deadline. A revoked delegated read
+is checked on the independent endpoint's fresh session so a closed idle stream
+cannot stand in for the required permission refusal.
 
 Each scenario operation has a 45-second watchdog. The total defaults to 600
 seconds, bounded by the driver's remaining conversation budget; the parent adds
