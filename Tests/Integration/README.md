@@ -184,6 +184,11 @@ before their next read or effect preparation. These connections require current
 HyperNet permission within the original step deadline. A revoked delegated read
 is checked on the independent endpoint's fresh session so a closed idle stream
 cannot stand in for the required permission refusal.
+Current inspection, history, online search and encrypted synchronisation share
+bounded recovery for typed transient failures within the original step deadline.
+Session recovery uses the production client; synchronisation retains the client's
+exact readiness outbox operation. Contact trust is written once after a successful
+current inspection. Retained search remains offline.
 
 Each scenario operation has a 45-second watchdog. The total defaults to 600
 seconds, bounded by the driver's remaining conversation budget; the parent adds
@@ -272,6 +277,11 @@ connection limits remain unchanged.
 The Rust helper has a 45-second per-step watchdog and a bounded overall budget,
 with two-second operation pacing. Exact retries retain the original ID, digest,
 signed bytes and deadline and respect supplied retry guidance. High-level crypto
-failures are not blindly repeated. The Python owner has its own fixture deadline
-and exact process cleanup. Successful compilation is not a native qualification
-result; the first two-network run remains required before release.
+failures are not blindly repeated. Current inspection, history, online search and
+encrypted synchronisation recover typed transient failures within the original
+step deadline, using the production client for session and exact readiness outbox
+recovery. Contact trust writes follow a successful inspection once; retained
+search remains offline. Recipient readiness polling shares that same deadline.
+The Python owner has its own fixture deadline and exact process cleanup.
+Successful compilation is not a native qualification result; the first two-network
+run remains required before release.

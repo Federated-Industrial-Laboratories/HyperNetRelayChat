@@ -110,8 +110,8 @@ pub(super) fn workflow(
     let mut new_device = run.step("Bob", "ConnectEnrolledDevice", |_| {
         net(Client::open(&enrol))
     })?;
-    let view = run.step("Bob", "EnrolledDeviceHasNoOldKeys", |_| {
-        net(new_device.crypto_inspect(room, None))
+    let view = run.step("Bob", "EnrolledDeviceHasNoOldKeys", |end| {
+        current_read(&mut new_device, end, |c| c.crypto_inspect(room, None))
     })?;
     ensure(view.local.is_none(), "EnrolmentCopiedEncryptionState")?;
     new_device.disconnect();
@@ -162,7 +162,7 @@ pub(super) fn workflow(
         // Observe recovery through a fresh session after the device administration.
         net(alice.connect())?;
         ensure(Instant::now() < end, "RecoveryObservationDeadline")?;
-        net(alice.crypto_inspect(room, None))
+        current_read(alice, end, |c| c.crypto_inspect(room, None))
     })?;
     ensure(
         barrier.remote.send_barrier
@@ -184,8 +184,8 @@ pub(super) fn workflow(
     run.step("Bob", "PublishRecoveredFuturePackage", |_| {
         completed(net(recovered.crypto_publish(room, None))?)
     })?;
-    let roster = run.step("Alice", "VerifyRecoveredContinuity", |_| {
-        pin(alice, room, None)
+    let roster = run.step("Alice", "VerifyRecoveredContinuity", |end| {
+        pin(alice, room, None, end)
     })?;
     let package = roster
         .remote
@@ -198,14 +198,14 @@ pub(super) fn workflow(
         let response = net(alice.crypto_commit(room, &[package], &[], None))?;
         membership_ready(alice, room, response, end)
     })?;
-    run.step("Bob", "TrustRecoveredRoster", |_| {
-        pin(&mut recovered, room, None)
+    run.step("Bob", "TrustRecoveredRoster", |end| {
+        pin(&mut recovered, room, None, end)
     })?;
     run.step("Bob", "RecoveredWelcomeReady", |end| {
         synchronise(&mut recovered, room, None, end)
     })?;
-    let old = run.step("Bob", "RecoveredHistoryIsFutureOnly", |_| {
-        history(&mut recovered, room, None)
+    let old = run.step("Bob", "RecoveredHistoryIsFutureOnly", |end| {
+        history(&mut recovered, room, None, end)
     })?;
     ensure(
         old.events.iter().any(|e| e.event == old_event)
@@ -217,8 +217,8 @@ pub(super) fn workflow(
     )?;
     let message = message("native after owner-key recovery", vec![]);
     let (event, _) = send(run, "Alice", alice, room, &message, None)?;
-    let page = run.step("Bob", "ReadAfterOwnerKeyRecovery", |_| {
-        history(&mut recovered, room, None)
+    let page = run.step("Bob", "ReadAfterOwnerKeyRecovery", |end| {
+        history(&mut recovered, room, None, end)
     })?;
     ensure(text(&page, event, &message), "RecoveredFutureDecryption")?;
     recovered.disconnect();
