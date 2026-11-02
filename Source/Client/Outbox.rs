@@ -507,6 +507,30 @@ fn settle_crypto(
     action: &Action,
     outcome: &Outcome,
 ) -> rusqlite::Result<()> {
+    if action.operation == Operation::CryptoCommit && matches!(outcome, Outcome::Rejected { .. }) {
+        let Target::Room(room) = action.target else {
+            return Ok(());
+        };
+        let Ok(commit) = action
+            .body
+            .deserialized::<crate::confidential::CommitEpoch>()
+        else {
+            return Ok(());
+        };
+        crate::crypto::reject_transition_in(
+            tx,
+            room,
+            commit.group,
+            commit.epoch,
+            digest(&commit.commit.0),
+            Some((
+                action.operation_id,
+                action_digest(action).map_err(|_| rusqlite::Error::InvalidQuery)?,
+            )),
+        )
+        .map_err(|_| rusqlite::Error::InvalidQuery)?;
+        return Ok(());
+    }
     if crate::crypto::EncryptionContext::from_action(action).is_err() {
         return Ok(());
     }
