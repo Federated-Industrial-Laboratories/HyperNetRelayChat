@@ -100,6 +100,16 @@ impl Editor {
     pub fn cursor(&self) -> usize {
         self.state.cursor
     }
+    /// The token before the cursor, bounded by a complete Unicode whitespace character.
+    pub fn completion_range(&self) -> Range<usize> {
+        let cursor = self.cursor();
+        let start = self.text()[..cursor]
+            .char_indices()
+            .rev()
+            .find(|(_, character)| character.is_whitespace())
+            .map_or(0, |(index, character)| index + character.len_utf8());
+        start..cursor
+    }
     pub fn anchor(&self) -> usize {
         self.state.anchor
     }

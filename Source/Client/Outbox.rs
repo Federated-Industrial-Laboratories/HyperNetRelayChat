@@ -29,7 +29,7 @@ pub fn initialize(store: &mut Store) -> Result<()> {
         tx.execute_batch("CREATE TABLE IF NOT EXISTS client_outbox(window TEXT NOT NULL,operation TEXT NOT NULL,digest BLOB NOT NULL,action BLOB NOT NULL,response BLOB,terminal INTEGER NOT NULL DEFAULT 0,created INTEGER NOT NULL,expires INTEGER NOT NULL,abandoned INTEGER NOT NULL DEFAULT 0,held INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(window,operation));
             CREATE TABLE IF NOT EXISTS client_clock(singleton INTEGER PRIMARY KEY CHECK(singleton=1),floor INTEGER NOT NULL);
             INSERT OR IGNORE INTO client_clock VALUES(1,0);
-            CREATE TABLE IF NOT EXISTS client_drafts(room TEXT PRIMARY KEY,text TEXT NOT NULL,updated INTEGER NOT NULL,mentions BLOB NOT NULL DEFAULT X'80');")?;
+            CREATE TABLE IF NOT EXISTS client_drafts(room TEXT PRIMARY KEY,text TEXT NOT NULL,updated INTEGER NOT NULL,mentions BLOB NOT NULL DEFAULT X'80',sending BLOB);")?;
         Ok(Commit::new((),b"client outbox schema 1".to_vec()))
     })?;
     Ok(())
@@ -194,11 +194,62 @@ pub fn save_draft_mentions(
             let exists:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM client_drafts WHERE room=?1)",[room.to_string()],|r|r.get(0))?;
             let count:u64=tx.query_row("SELECT count(*) FROM client_drafts",[],|r|r.get(0))?;
             if !exists&&count>=64{return Err(rusqlite::Error::InvalidQuery);}
-            tx.execute("INSERT INTO client_drafts(room,text,updated,mentions) VALUES(?1,?2,?3,?4) ON CONFLICT(room) DO UPDATE SET text=excluded.text,updated=excluded.updated,mentions=excluded.mentions",params![room.to_string(),text,updated,encoded])?;
+            // Every save starts a new draft revision, including identical text.
+            tx.execute("INSERT INTO client_drafts(room,text,updated,mentions) VALUES(?1,?2,?3,?4) ON CONFLICT(room) DO UPDATE SET text=excluded.text,updated=excluded.updated,mentions=excluded.mentions,sending=NULL",params![room.to_string(),text,updated,encoded])?;
         }
         Ok(Commit::new((),digest(&[text.as_bytes(),&encoded].concat()).as_bytes().to_vec()))
     })?;
     Ok(())
+}
+fn draft_operation(action: &Action) -> Result<Vec<u8>> {
+    canonical_encode(
+        &Value::serialized(&(
+            action.operation_id,
+            action_digest(action).map_err(|_| Error::Invalid)?,
+        ))
+        .map_err(|_| Error::Invalid)?,
+        1024,
+    )
+    .map_err(|_| Error::Invalid)
+}
+/// Bind known plaintext to the exact (possibly encrypted) action in the same
+/// transaction as the outbox and ratchet. Later saves invalidate this revision.
+pub(super) fn bind_draft_transaction(
+    tx: &rusqlite::Transaction<'_>,
+    action: &Action,
+    message: &crate::messaging::Send,
+) -> rusqlite::Result<()> {
+    let Target::Room(room) = action.target else {
+        return Err(rusqlite::Error::InvalidQuery);
+    };
+    let mentions = canonical_encode(
+        &Value::serialized(&message.mentions).map_err(|_| rusqlite::Error::InvalidQuery)?,
+        8192,
+    )
+    .map_err(|_| rusqlite::Error::InvalidQuery)?;
+    let binding = draft_operation(action).map_err(|_| rusqlite::Error::InvalidQuery)?;
+    let changed = tx.execute(
+        "UPDATE client_drafts SET sending=?1 WHERE room=?2 AND text=?3 AND mentions=?4",
+        params![binding, room.to_string(), message.text, mentions],
+    )?;
+    if changed != 1 {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    Ok(())
+}
+/// A verified committed outcome can consume only the revision bound to that operation.
+pub(super) fn clear_sent_draft(store: &mut Store, action: &Action) -> Result<bool> {
+    let Target::Room(room) = action.target else {
+        return Err(Error::Invalid);
+    };
+    let binding = draft_operation(action)?;
+    Ok(store.write(|tx| {
+        let changed = tx.execute(
+            "DELETE FROM client_drafts WHERE room=?1 AND sending=?2",
+            params![room.to_string(), binding],
+        )?;
+        Ok(Commit::new(changed == 1, binding))
+    })?)
 }
 pub fn draft(store: &mut Store, room: RoomId) -> Result<Option<String>> {
     Ok(store.read(Duration::from_secs(1), |db| {
@@ -316,6 +367,7 @@ pub(super) fn migrate(store: &mut Store) -> storage::Result<()> {
         ))
     })?;
     let old_drafts = drafts == ["room", "text", "updated"];
+    let unbound_drafts = old_drafts || drafts == ["room", "text", "updated", "mentions"];
     let base = [
         "window",
         "operation",
@@ -330,12 +382,12 @@ pub(super) fn migrate(store: &mut Store) -> storage::Result<()> {
     let with_abandoned = [base.as_slice(), &["abandoned"]].concat();
     let with_held = [with_abandoned.as_slice(), &["held"]].concat();
     let missing_held = old_outbox || outbox == with_abandoned;
-    if (!old_drafts && drafts != ["room", "text", "updated", "mentions"])
+    if (!unbound_drafts && drafts != ["room", "text", "updated", "mentions", "sending"])
         || (!missing_held && outbox != with_held)
     {
         return Err(storage::Error::InvalidInput);
     }
-    if !old_drafts && !missing_held {
+    if !unbound_drafts && !missing_held {
         return Ok(());
     }
     store.write(|db| {
@@ -343,6 +395,9 @@ pub(super) fn migrate(store: &mut Store) -> storage::Result<()> {
             db.execute_batch(
                 "ALTER TABLE client_drafts ADD COLUMN mentions BLOB NOT NULL DEFAULT X'80'",
             )?;
+        }
+        if unbound_drafts {
+            db.execute_batch("ALTER TABLE client_drafts ADD COLUMN sending BLOB")?;
         }
         if old_outbox {
             db.execute_batch(
@@ -354,7 +409,10 @@ pub(super) fn migrate(store: &mut Store) -> storage::Result<()> {
                 "ALTER TABLE client_outbox ADD COLUMN held INTEGER NOT NULL DEFAULT 0",
             )?;
         }
-        Ok(Commit::new((), b"HRC.ClientLocalState.Schema.3".to_vec()))
+        Ok(Commit::new(
+            (),
+            b"HRC.ClientLocalState.Schema.3.DraftBinding.1".to_vec(),
+        ))
     })
 }
 /// Stop resubmitting this exact operation without claiming that it was rejected or retracting it.

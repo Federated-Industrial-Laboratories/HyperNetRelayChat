@@ -472,6 +472,22 @@ impl Client {
         finalize: impl FnOnce(&rusqlite::Transaction<'_>, &VerifiedAction) -> rusqlite::Result<()>,
     ) -> Result<PreparedSend> {
         self.save_draft_mentions(room, &message.text, &message.mentions)?;
+        self.prepare_preserved_send_with(room, message, grant, is_action, approval, |tx, action| {
+            outbox::bind_draft_transaction(tx, action.action(), message)?;
+            finalize(tx, action)
+        })
+    }
+    /// The controller already applied command/draft ordering. Preserve that decision
+    /// while atomically preparing the exact outbox bytes and any MLS ratchet change.
+    pub(super) fn prepare_preserved_send_with(
+        &mut self,
+        room: RoomId,
+        message: &messaging::Send,
+        grant: Option<&delegation::Grant>,
+        is_action: bool,
+        approval: Option<Id>,
+        finalize: impl FnOnce(&rusqlite::Transaction<'_>, &VerifiedAction) -> rusqlite::Result<()>,
+    ) -> Result<PreparedSend> {
         self.effects_ready()?;
         let inspection: conversations::Inspection = self.read_as(
             Operation::RoomInspect,

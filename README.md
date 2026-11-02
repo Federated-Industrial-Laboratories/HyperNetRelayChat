@@ -28,7 +28,7 @@ interfaces and integration gaps. The
 [protocol and permission proposal](Documentation/ProtocolPermissions.md) defines
 operation contracts, state transitions, worked traces and decisions still open.
 The [integration profile](Documentation/IntegrationProfile.md) specifies the
-released 0.10.0 companion boundary, directional privacy evidence and bounded
+released Core 0.10.1 and Suite 0.10.0 companion boundary, directional privacy evidence and bounded
 federation authority model. The Rust adapter uses that version-2 interface. The
 [state and recovery specification](Documentation/StateAndRecovery.md) selects
 transactional storage, persistent MLS conversations, exact-content approval and
