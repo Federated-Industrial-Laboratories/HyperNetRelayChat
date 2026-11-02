@@ -39,6 +39,8 @@ new authority, extends no operation window and cannot replace uncertain effects.
 No conversation operation is prepared or replayed by session setup. Preparation
 failure diagnostics contain only the static adapter category and boot-time
 start, finish and original deadline, without identities or credential data.
+They stop after 128 lines per process. Unavailable diagnostic output does not
+change the connection outcome.
 
 A temporary refusal of an authenticated view read retries that exact read on the
 same session, at most five attempts within its original ten-second budget. Retry
