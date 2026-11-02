@@ -258,6 +258,29 @@ fn health(c: &mut Client) -> client::Result<Response> {
         &Value::Map(vec![]),
     )
 }
+fn pilot_support_current(endpoint: usize, result: Result<Outcome>) -> Result<()> {
+    let detail = match result {
+        Ok(Outcome::Result { .. }) => return Ok(()),
+        Ok(Outcome::Refused {
+            code,
+            detail,
+            retry_after_ms,
+        }) => format!(
+            "Refused:{code:?}:{}:retryMs={retry_after_ms:?}",
+            bounded_reason(&detail)
+        ),
+        Ok(Outcome::Rejected { code, detail }) => {
+            format!("Rejected:{code:?}:{}", bounded_reason(&detail))
+        }
+        Ok(Outcome::Unknown) => "Unknown".into(),
+        Ok(Outcome::Absent) => "Absent".into(),
+        Ok(Outcome::Committed { .. }) => "UnexpectedCommitted".into(),
+        Err(error) => error,
+    };
+    Err(format!(
+        "PilotSessionNotCurrent:endpoint={endpoint}:{detail}"
+    ))
+}
 fn record_result(metrics: &mut Metrics, result: &client::Result<Response>) {
     let name = match result {
         Ok(response) => {
@@ -1312,15 +1335,6 @@ fn run(args: &Arguments) -> Result<bool> {
         end,
     )?)?;
     check_filter(&mut endpoints[7].client, room, subject, end)?;
-    for endpoint in &mut endpoints {
-        ensure(
-            matches!(
-                net(health(&mut endpoint.client))?.outcome,
-                Outcome::Result { .. }
-            ),
-            "PilotSessionNotCurrent",
-        )?;
-    }
     let mut supporting = endpoints.split_off(8);
     for mut endpoint in endpoints {
         endpoint.client.disconnect();
@@ -1328,6 +1342,31 @@ fn run(args: &Arguments) -> Result<bool> {
     }
     // SQLCipher owners and their streams are released before Controller::open acquires the same profiles.
     let controllers = open_controllers(&request.profiles, room, &mut supporting, end)?;
+    for endpoint in &mut supporting {
+        emit(
+            json!({"case":"NativeLoadSetupStep","endpoint":endpoint.index,"operation":"ServiceInspect"}),
+        );
+        let result = operation(
+            &mut endpoint.client,
+            Operation::ServiceInspect,
+            Target::Service,
+            &Value::Map(vec![]),
+            end,
+        );
+        pilot_support_current(endpoint.index, result)?;
+    }
+    ensure(Instant::now() < end, "PilotEntryDeadline")?;
+    for ui in &controllers {
+        let view = ui.controller.snapshot();
+        if !current(&view, room) {
+            emit(
+                json!({"case":"NativeLoadControllerReadiness","passed":false,"endpoint":ui.index,
+                "connection":format!("{:?}",view.connection),"selectedCurrent":false,
+                "status":view.status.as_ref().map(|s|bounded_reason(&s.code))}),
+            );
+            return Err(format!("PilotControllerNotCurrent:endpoint={}", ui.index));
+        }
+    }
     emit(
         json!({"case":"NativeLoadPilotReady","phase":"baseline","authenticatedStreams":12,
         "productionControllers":8,"backgroundRefreshEnabled":true,"room":room}),
@@ -1403,6 +1442,46 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn pilot_entry_requires_a_current_support_result_and_retains_failure_context() {
+        assert!(pilot_support_current(8, Ok(Outcome::Result { body: Value::Null })).is_ok());
+        for (outcome, expected) in [
+            (
+                Outcome::Refused {
+                    code: ErrorCode::Unavailable,
+                    detail: "TransportAuthorityExpired".into(),
+                    retry_after_ms: Some(1000),
+                },
+                "Refused:Unavailable:TransportAuthorityExpired:retryMs=Some(1000)",
+            ),
+            (
+                Outcome::Rejected {
+                    code: ErrorCode::Denied,
+                    detail: "CurrentAuthority\n".into(),
+                },
+                "Rejected:Denied:CurrentAuthority",
+            ),
+            (Outcome::Unknown, "Unknown"),
+            (Outcome::Absent, "Absent"),
+            (
+                Outcome::Committed {
+                    event: None,
+                    position: 1,
+                    body: Value::Null,
+                },
+                "UnexpectedCommitted",
+            ),
+        ] {
+            assert_eq!(
+                pilot_support_current(11, Ok(outcome)).unwrap_err(),
+                format!("PilotSessionNotCurrent:endpoint=11:{expected}")
+            );
+        }
+        assert_eq!(
+            pilot_support_current(9, Err("OriginalDeadline".into())).unwrap_err(),
+            "PilotSessionNotCurrent:endpoint=9:OriginalDeadline"
+        );
+    }
     #[test]
     fn a_commit_must_bind_the_original_controller_request_and_digest() {
         let id = |n| Id::from_bytes([n; 32]);
