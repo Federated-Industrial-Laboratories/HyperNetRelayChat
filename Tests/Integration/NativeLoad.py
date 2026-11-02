@@ -62,6 +62,7 @@ def run(workflow, executable):
     remaining = workflow.deadline - time.monotonic()
     assert remaining > 390, 'Insufficient original workflow budget for bounded load helper and cleanup'
     workflow.record(dict(case='NativeLoadTopology', interactiveEndpoints=8, agentEndpoints=2,
+        plannedProductionControllers=8, controllerBackgroundRefresh=True,
         operatorEndpoints=2, measuredModerators=1, distinctHrcAccounts=12,
         distinctClientHyperNetPrincipals=2, sharedClientApplications=True,
         receivingApplicationStreams=12, outgoingStreamsByApplication={'Bob': 10, 'Agent': 2},

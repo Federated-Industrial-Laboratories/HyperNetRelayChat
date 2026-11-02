@@ -2,7 +2,7 @@
 //! Bounded pilot measurements over real authenticated HyperNet application streams.
 use clap::Parser;
 use hrc::{
-    client::{self, Client},
+    client::{self, Client, Command, ConnectionState, Controller, Snapshot},
     conversations, home, messaging, moderation,
     protocol::*,
     service::{files, io},
@@ -10,7 +10,7 @@ use hrc::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     io::Write,
     path::PathBuf,
     sync::{
@@ -53,6 +53,7 @@ struct Metrics {
     signed_action_bytes: usize,
     decoded_response_bytes: usize,
     unresolved: bool,
+    controller_offers_seen_refused: usize,
 }
 fn emit(value: serde_json::Value) {
     println!("{value}");
@@ -222,10 +223,6 @@ fn record_result(metrics: &mut Metrics, result: &client::Result<Response>) {
     // Error details are stable protocol categories, never message text or credentials.
     *metrics.results.entry(name).or_default() += 1;
 }
-fn pending_unknown(c: &mut Client) -> bool {
-    c.pending()
-        .map_or(true, |p| p.iter().any(|p| !p.abandoned && !p.held))
-}
 fn normal_send(
     c: &mut Client,
     room: RoomId,
@@ -258,57 +255,281 @@ fn percentile(values: &[u64], percent: usize) -> Option<u64> {
     values.sort_unstable();
     Some(values[(values.len() * percent).div_ceil(100).saturating_sub(1)])
 }
-fn normal(
-    mut endpoint: Endpoint,
+struct Offer {
+    request: u64,
+    scheduled: Instant,
+    identity: Option<(OperationId, Id)>,
+    event: Option<Id>,
+    committed_at: Option<Instant>,
+    terminal: bool,
+    seen_refused: bool,
+    status: String,
+}
+struct Interactive {
+    index: usize,
+    controller: Controller,
+    offers: Vec<Offer>,
+}
+fn current(view: &Snapshot, room: RoomId) -> bool {
+    view.connection == ConnectionState::Online
+        && !view.inspection.stale
+        && view.privacy.is_some()
+        && view
+            .selected
+            .as_ref()
+            .is_some_and(|v| v.summary.room == room && !v.stale && v.gap.is_none())
+}
+fn apply_delivery(offer: &mut Offer, d: &client::Delivery, room: RoomId) -> bool {
+    if d.request_id != Some(offer.request)
+        && !offer.identity.is_some_and(|(id, _)| id == d.operation_id)
+    {
+        return false;
+    }
+    let identity = (d.operation_id, d.action_digest);
+    if d.operation != Operation::MessageSend
+        || d.room != Some(room)
+        || offer.identity.is_some_and(|saved| saved != identity)
+    {
+        offer.terminal = true;
+        offer.status = "DeliveryBindingFailed".into();
+        return true;
+    }
+    offer.identity = Some(identity);
+    match &d.outcome {
+        Some(Outcome::Committed {
+            event: Some(event), ..
+        }) => {
+            offer.event = Some(*event);
+            offer.committed_at = Some(Instant::now());
+            offer.terminal = true;
+            offer.status = "Committed".into();
+        }
+        Some(Outcome::Rejected { code, detail }) => {
+            offer.terminal = true;
+            offer.status = format!("Rejected:{code:?}:{detail}");
+        }
+        Some(Outcome::Refused { code, detail, .. }) => {
+            offer.seen_refused = true;
+            offer.status = format!("Refused:{code:?}:{detail}")
+        }
+        _ => offer.status = "OutcomeUnknown".into(),
+    }
+    true
+}
+fn observe(ui: &mut Interactive, room: RoomId) -> Arc<Snapshot> {
+    let view = ui.controller.snapshot();
+    for offer in ui.offers.iter_mut().filter(|o| !o.terminal) {
+        let delivery = view.deliveries.iter().find(|d| {
+            d.request_id == Some(offer.request)
+                || offer.identity.is_some_and(|(id, _)| id == d.operation_id)
+        });
+        if let Some(d) = delivery {
+            apply_delivery(offer, d, room);
+        } else if let Some(completion) = view
+            .completions
+            .iter()
+            .find(|c| c.request_id == offer.request)
+        {
+            // A failed command without a saved delivery did not produce a retryable effect.
+            offer.terminal = true;
+            offer.status = completion
+                .error
+                .as_ref()
+                .map_or("CompletionWithoutDelivery", |e| e.code.as_str())
+                .into();
+        }
+    }
+    view
+}
+fn dispatch_offer(
+    ui: &mut Interactive,
     room: RoomId,
+    scheduled: Instant,
+    text: String,
+) -> std::result::Result<(), client::DispatchError> {
+    let request = ui.controller.dispatch(Command::Send {
+        room,
+        text,
+        mentions: vec![],
+        parent: None,
+        causation: None,
+        action: false,
+        grant: None,
+    })?;
+    ui.offers.push(Offer {
+        request,
+        scheduled,
+        identity: None,
+        event: None,
+        committed_at: None,
+        terminal: false,
+        seen_refused: false,
+        status: "Queued".into(),
+    });
+    Ok(())
+}
+fn open_controllers(
+    paths: &[PathBuf],
+    room: RoomId,
+    supporting: &mut [Endpoint],
+    overall: Instant,
+) -> Result<Vec<Interactive>> {
+    let end = overall.min(Instant::now() + Duration::from_secs(45));
+    let mut controllers = Vec::new();
+    for (index, path) in paths.iter().take(8).enumerate() {
+        let controller = net(Controller::open(path))?;
+        controller
+            .dispatch(Command::Connect)
+            .map_err(|_| "ControllerConnectDispatch")?;
+        controllers.push(Interactive {
+            index,
+            controller,
+            offers: vec![],
+        });
+    }
+    let mut selected = [false; 8];
+    let mut last_health = Instant::now();
+    loop {
+        let mut ready = 0;
+        for ui in &controllers {
+            let v = ui.controller.snapshot();
+            if !selected[ui.index]
+                && v.connection == ConnectionState::Online
+                && !v.inspection.stale
+                && v.privacy.is_some()
+            {
+                ui.controller
+                    .dispatch(Command::SelectRoom(room))
+                    .map_err(|_| "ControllerSelectDispatch")?;
+                selected[ui.index] = true;
+            }
+            ready += usize::from(current(&v, room));
+        }
+        if ready == 8 {
+            return Ok(controllers);
+        }
+        if Instant::now() >= end {
+            emit(
+                json!({"case":"NativeLoadControllerReadiness","passed":false,"states":controllers.iter().map(|u| {
+                let v=u.controller.snapshot(); json!({"endpoint":u.index,"connection":format!("{:?}",v.connection),
+                    "selectedCurrent":current(&v,room),"status":v.status.as_ref().map(|s|&s.code)})
+            }).collect::<Vec<_>>()}),
+            );
+            return Err("EightControllerReadinessDeadline".into());
+        }
+        if last_health.elapsed() >= Duration::from_secs(8) {
+            for e in supporting.iter_mut() {
+                let _ = health(&mut e.client);
+            }
+            last_health = Instant::now();
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+fn interactive(
+    mut ui: Interactive,
+    room: RoomId,
+    ignored: AccountId,
     start: Instant,
     seconds: u64,
     phase: &str,
-) -> (Endpoint, Metrics) {
-    let mut metrics = Metrics {
-        endpoint: endpoint.index,
-        offered: seconds as usize,
+) -> (Interactive, Metrics) {
+    let expected = if ui.index < 5 { seconds as usize } else { 0 };
+    let mut m = Metrics {
+        endpoint: ui.index,
+        offered: expected,
         ..Metrics::default()
     };
     let end = start + Duration::from_secs(seconds);
-    for index in 0..seconds {
-        let scheduled =
-            start + Duration::from_secs(index) + Duration::from_millis(endpoint.index as u64 * 200);
-        if metrics.unresolved || Instant::now() >= scheduled + Duration::from_secs(1) {
-            metrics.missed += 1;
-            continue;
+    let first_offer = ui.offers.len();
+    let initial = ui.controller.snapshot();
+    let first_sequence = initial
+        .selected
+        .as_ref()
+        .and_then(|v| v.events.iter().map(|e| e.sequence).max())
+        .unwrap_or(0);
+    let mut received = BTreeSet::new();
+    let mut ignored_leak = false;
+    let mut next = 0;
+    let mut state_ms = BTreeMap::<String, u64>::new();
+    let mut revisions = BTreeSet::new();
+    let mut previous = start;
+    wait_until(start);
+    while Instant::now() < end {
+        let now = Instant::now();
+        let view = observe(&mut ui, room);
+        let state = match (&view.connection, current(&view, room)) {
+            (_, true) => "OnlineCurrent",
+            (ConnectionState::Online, false) => "OnlineStale",
+            (ConnectionState::Backoff { .. }, _) => "Backoff",
+            (ConnectionState::Offline, _) => "Offline",
+            (ConnectionState::Connecting, _) => "Connecting",
+            (ConnectionState::Resolving, _) => "Resolving",
+        };
+        *state_ms.entry(state.into()).or_default() +=
+            millis(now.saturating_duration_since(previous));
+        previous = now;
+        revisions.insert(view.revision);
+        if current(&view, room)
+            && let Some(selected) = &view.selected
+        {
+            for e in &selected.events {
+                ignored_leak |= ui.index == 7 && e.actor.acting().account == ignored;
+                if e.sequence > first_sequence
+                    && e.kind == Operation::MessageSend
+                    && e.actor.acting().account != view.account
+                {
+                    received.insert(e.event);
+                }
+            }
         }
-        wait_until(scheduled);
-        metrics.started += 1;
-        metrics
-            .schedule_lag_ms
-            .push(millis(Instant::now().saturating_duration_since(scheduled)));
-        let result = normal_send(
-            &mut endpoint.client,
-            room,
-            format!("{phase} endpoint{} offer{index} λ", endpoint.index),
-            &mut metrics,
-        );
-        if matches!(
-            result,
-            Ok(Response {
-                outcome: Outcome::Committed { .. },
-                ..
-            })
-        ) {
-            metrics.committed += 1;
-            metrics.committed_in_window += usize::from(Instant::now() <= end);
-            metrics
-                .commit_ms
-                .push(millis(Instant::now().saturating_duration_since(scheduled)));
+        while next < expected {
+            let scheduled = start
+                + Duration::from_secs(next as u64)
+                + Duration::from_millis(ui.index as u64 * 200);
+            if now < scheduled {
+                break;
+            }
+            if now >= scheduled + Duration::from_secs(1) {
+                m.missed += 1;
+            } else {
+                m.started += 1;
+                m.schedule_lag_ms
+                    .push(millis(now.saturating_duration_since(scheduled)));
+                if let Err(e) = dispatch_offer(
+                    &mut ui,
+                    room,
+                    scheduled,
+                    format!("{phase} endpoint{} offer{next} λ", ui.index),
+                ) {
+                    *m.results.entry(format!("Dispatch:{e:?}")).or_default() += 1;
+                }
+            }
+            next += 1;
         }
-        record_result(&mut metrics, &result);
-        if result.is_err() && pending_unknown(&mut endpoint.client) {
-            metrics.unresolved = true;
+        thread::sleep(Duration::from_millis(10));
+    }
+    m.missed += expected - next;
+    let view = observe(&mut ui, room);
+    for offer in &ui.offers[first_offer..] {
+        *m.results.entry(offer.status.clone()).or_default() += 1;
+        m.unresolved |= !offer.terminal;
+        m.controller_offers_seen_refused += usize::from(offer.seen_refused);
+        if let Some(at) = offer.committed_at {
+            m.committed += 1;
+            m.committed_in_window += usize::from(at <= end);
+            m.commit_ms
+                .push(millis(at.saturating_duration_since(offer.scheduled)));
         }
     }
-    wait_until(end);
-    (endpoint, metrics)
+    let fresh = !received.is_empty() && current(&view, room) && !ignored_leak;
+    m.unresolved |= !fresh;
+    emit(
+        json!({"case":"NativeLoadControllerObservation","phase":phase,"endpoint":ui.index,
+        "freshRemoteEvents":received.len(),"ignoredEventLeak":ignored_leak,"currentAtEnd":current(&view,room),"observedSnapshotRevisions":revisions.len(),
+        "stateDurationMs":state_ms,"status":view.status.as_ref().map(|s|&s.code),"freshnessPassed":fresh}),
+    );
+    (ui, m)
 }
 fn idle(mut endpoint: Endpoint, start: Instant, seconds: u64) -> (Endpoint, Metrics) {
     let mut m = Metrics {
@@ -341,7 +562,7 @@ fn hostile(endpoint: Endpoint, room: RoomId, start: Instant, seconds: u64) -> (E
         endpoint: endpoint.index,
         ..Metrics::default()
     };
-    let flood = endpoint.index == 5;
+    let flood = endpoint.index == 8;
     let period = if flood { 100 } else { 500 };
     let offers = seconds * 1000 / period;
     m.offered = offers as usize;
@@ -538,36 +759,54 @@ fn moderator(
     (endpoint, m)
 }
 fn run_phase(
+    controllers: Vec<Interactive>,
     endpoints: Vec<Endpoint>,
     room: RoomId,
     seconds: u64,
     overload: bool,
-) -> (Vec<Endpoint>, bool) {
+) -> (Vec<Interactive>, Vec<Endpoint>, bool) {
     let phase = if overload { "overload" } else { "baseline" };
     let start = Instant::now() + Duration::from_secs(1);
-    let subject = endpoints[5].client.profile.registration.account;
+    let subject = endpoints
+        .iter()
+        .find(|e| e.index == 8)
+        .expect("agent flood endpoint")
+        .client
+        .profile
+        .registration
+        .account;
     emit(
-        json!({"case":"NativeLoadPhaseStarted","phase":phase,"seconds":seconds,"offeredNormalPerSecond":5}),
+        json!({"case":"NativeLoadPhaseStarted","phase":phase,"seconds":seconds,"offeredNormalPerSecond":5,
+        "productionControllers":8,"backgroundRefreshEnabled":true}),
     );
-    let pairs = thread::scope(|scope| {
+    let (ui_pairs, pairs) = thread::scope(|scope| {
+        let ui_handles: Vec<_> = controllers
+            .into_iter()
+            .map(|u| scope.spawn(move || interactive(u, room, subject, start, seconds, phase)))
+            .collect();
         let handles: Vec<_> = endpoints
             .into_iter()
             .map(|e| {
                 scope.spawn(move || match e.index {
-                    0..=4 => normal(e, room, start, seconds, phase),
-                    5 | 6 if overload => hostile(e, room, start, seconds),
-                    7 if overload => slow_reader(e, room, start, seconds),
+                    8 | 9 if overload => hostile(e, room, start, seconds),
+                    11 if overload => slow_reader(e, room, start, seconds),
                     10 if overload => moderator(e, room, subject, start, seconds),
                     _ => idle(e, start, seconds),
                 })
             })
             .collect();
-        handles
-            .into_iter()
-            .map(|h| h.join().expect("bounded load worker panicked"))
-            .collect::<Vec<_>>()
+        (
+            ui_handles
+                .into_iter()
+                .map(|h| h.join().expect("bounded Controller observer panicked"))
+                .collect::<Vec<_>>(),
+            handles
+                .into_iter()
+                .map(|h| h.join().expect("bounded load worker panicked"))
+                .collect::<Vec<_>>(),
+        )
     });
-    let normal: Vec<_> = pairs.iter().take(5).map(|(_, m)| m).collect();
+    let normal: Vec<_> = ui_pairs.iter().take(5).map(|(_, m)| m).collect();
     let latencies: Vec<_> = normal
         .iter()
         .flat_map(|m| m.commit_ms.iter().copied())
@@ -584,39 +823,56 @@ fn run_phase(
             code.starts_with("Rejected:")
                 || code.starts_with("Refused:")
                 || code.starts_with("Operation")
+                || code.starts_with("Dispatch:")
         })
         .map(|(_, count)| count)
         .sum();
     let p95 = percentile(&latencies, 95);
-    let moderator = &pairs[10].1;
+    let distinct_events: BTreeSet<_> = ui_pairs
+        .iter()
+        .take(5)
+        .flat_map(|(u, _)| u.offers.iter())
+        .filter(|o| o.scheduled >= start && o.scheduled < start + Duration::from_secs(seconds))
+        .filter_map(|o| o.event)
+        .collect();
+    let moderator = &pairs[2].1;
     let attacks_exercised = !overload
-        || (pairs[5].1.started > 8
-            && pairs[6].1.started > 1
-            && pairs[5]
+        || (pairs[0].1.started > 8
+            && pairs[1].1.started > 1
+            && pairs[0]
                 .1
                 .results
                 .keys()
                 .any(|r| r == "Rejected:Denied:RoomSilenced")
-            && pairs[5]
+            && pairs[0]
                 .1
                 .results
                 .keys()
                 .any(|r| r.contains("RateLimited") || r.contains("Overloaded"))
-            && !pairs[7].1.unresolved);
+            && !pairs[3].1.unresolved);
+    let controllers_current = ui_pairs.iter().all(|(_, m)| !m.unresolved);
     let passed = rate_pass(seconds, offered, in_window, missed, p95)
         && attacks_exercised
+        && distinct_events.len() == committed
+        && controllers_current
         && (!overload
             || (moderator.committed == 2 && moderator.commit_ms.iter().all(|ms| *ms < 1000)));
     emit(
         json!({"case":"NativeLoadPhaseResult","phase":phase,"passed":passed,"offered":offered,"committed":committed,
-        "committedWithinMeasurementWindow":in_window,"missedOffers":missed,"commitsPerSecond":in_window as f64 / seconds as f64,
-        "rejectedAttempts":rejected,"rejectedFractionOfStarted":if started==0 {None} else {Some(rejected as f64/started as f64)},
+        "committedWithinMeasurementWindow":in_window,"distinctCommittedEvents":distinct_events.len(),"missedOffers":missed,"commitsPerSecond":in_window as f64/seconds as f64,
+        "offersCurrentlyRejectedOrRefused":rejected,"fractionStartedOffersRejectedOrRefused":if started==0 {None} else {Some(rejected as f64/started as f64)},
         "uncommittedFractionOfOffered":(offered-committed) as f64/offered as f64,
-        "p95CommitMs":p95,"p50CommitMs":percentile(&latencies,50),"maximumCommitMs":latencies.iter().max(),"attacksExercised":attacks_exercised,
-        "latencyIncludesScheduledWaitAndClientPreflight":true,"endpointMetrics":pairs.iter().map(|(_,m)|m).collect::<Vec<_>>(),
-        "byteAccounting":"signed actions and decoded response CBOR only; excludes preflight, framing, signatures on responses and HyperNet overhead"}),
+        "p95CommitMs":p95,"p50CommitMs":percentile(&latencies,50),"maximumCommitMs":latencies.iter().max(),
+        "attacksExercised":attacks_exercised,"allEightControllersCurrentAndResolved":controllers_current,
+        "latencyIncludesScheduledWaitAndControllerWork":true,"controllerMetrics":ui_pairs.iter().map(|(_,m)|m).collect::<Vec<_>>(),
+        "supportingEndpointMetrics":pairs.iter().map(|(_,m)|m).collect::<Vec<_>>(),
+        "byteAccounting":"Controller bytes are unobserved; supporting sessions count signed actions and decoded response CBOR only"}),
     );
-    (pairs.into_iter().map(|(e, _)| e).collect(), passed)
+    (
+        ui_pairs.into_iter().map(|(u, _)| u).collect(),
+        pairs.into_iter().map(|(e, _)| e).collect(),
+        passed,
+    )
 }
 fn rate_pass(
     seconds: u64,
@@ -661,64 +917,72 @@ fn check_filter(c: &mut Client, room: RoomId, subject: AccountId, end: Instant) 
     let page: messaging::PageResult = body.deserialized().map_err(|_| "SearchShape")?;
     ensure(page.events.is_empty(), "IgnoredSearchLeak")
 }
-fn recovery(endpoints: &mut [Endpoint], room: RoomId, overall: Instant) -> Result<bool> {
+fn recovery(
+    controllers: &mut [Interactive],
+    supporting: &mut [Endpoint],
+    room: RoomId,
+    overall: Instant,
+) -> Result<bool> {
     emit(json!({"case":"NativeLoadRecoveryStarted","phase":"recovery"}));
     let began = Instant::now();
     let deadline = overall.min(began + Duration::from_secs(30));
-    let mut results = Vec::new();
-    for endpoint in endpoints.iter_mut().take(5) {
-        let c = &mut endpoint.client;
-        let result = (|| {
-            if health(c).is_err() {
-                reconnect(c, deadline)?;
+    let mut probes = [None; 5];
+    let mut last_health = Instant::now();
+    let mut received = [false; 8];
+    loop {
+        let mut all_current = true;
+        for ui in controllers.iter_mut() {
+            let view = observe(ui, room);
+            let ready = current(&view, room) && ui.offers.iter().all(|o| o.terminal);
+            all_current &= ready;
+            if ui.index < 5 && probes[ui.index].is_none() && ready {
+                let scheduled = Instant::now();
+                dispatch_offer(ui, room, scheduled, format!("recovery marker{}", ui.index))
+                    .map_err(|_| "RecoveryDispatch")?;
+                probes[ui.index] = Some(ui.offers.len() - 1);
             }
-            let outcome = operation(
-                c,
-                Operation::ServiceInspect,
-                Target::Service,
-                &Value::Map(vec![]),
-                deadline,
-            )?;
-            ensure(
-                matches!(outcome, Outcome::Result { .. }),
-                "RecoveryAuthorityUnavailable",
-            )?;
-            // The same exact pending operation is resolved before any new effect can be created.
-            for pending in net(c.pending())?
-                .into_iter()
-                .filter(|p| !p.abandoned && !p.held)
-            {
-                let action = pending.action.action().clone();
-                let signed = pending.action.signed_bytes().to_vec();
-                let outcome = exact(c, &action, &signed, deadline)?;
-                ensure(
-                    matches!(
-                        outcome,
-                        Outcome::Committed { .. } | Outcome::Rejected { .. }
-                    ),
-                    "RecoveryUncertainOutcome",
-                )?;
-            }
-            committed(send_exact(
-                c,
-                room,
-                &message("recovered λ".into()),
-                deadline,
-            )?)?;
-            Ok::<_, String>(())
-        })();
-        results
-            .push(json!({"endpoint":endpoint.index,"passed":result.is_ok(),"error":result.err()}));
+        }
+        let markers: BTreeSet<_> = controllers
+            .iter()
+            .take(5)
+            .filter_map(|u| probes[u.index].and_then(|i| u.offers[i].event))
+            .collect();
+        for ui in controllers.iter() {
+            let v = ui.controller.snapshot();
+            received[ui.index] = current(&v, room)
+                && v.selected.as_ref().is_some_and(|r| {
+                    r.events.iter().any(|e| {
+                        markers.contains(&e.event) && e.actor.acting().account != v.account
+                    })
+                });
+        }
+        if markers.len() == 5 && all_current && received.iter().all(|v| *v) {
+            break;
+        }
         if Instant::now() >= deadline {
             break;
         }
+        if last_health.elapsed() >= Duration::from_secs(8) {
+            for e in supporting.iter_mut().filter(|e| e.index != 11) {
+                let _ = health(&mut e.client);
+            }
+            last_health = Instant::now();
+        }
+        thread::sleep(Duration::from_millis(10));
     }
+    let results:Vec<_> = controllers.iter_mut().map(|ui| {
+        let view = observe(ui,room);
+        let unresolved = ui.offers.iter().filter(|o|!o.terminal).count();
+        let probe = if ui.index<5 {probes[ui.index].is_some_and(|i|ui.offers[i].committed_at.is_some())} else {true};
+        json!({"endpoint":ui.index,"passed":current(&view,room) && unresolved==0 && probe && received[ui.index],
+            "current":current(&view,room),"unresolvedOffers":unresolved,"freshRemoteRecoveryMarker":received[ui.index],
+            "status":view.status.as_ref().map(|s|&s.code)})
+    }).collect();
     let elapsed = millis(began.elapsed());
-    let passed =
-        results.len() == 5 && results.iter().all(|r| r["passed"] == true) && elapsed < 30_000;
+    let passed = results.iter().all(|r| r["passed"] == true) && elapsed < 30000;
     emit(
         json!({"case":"NativeLoadRecoveryResult","passed":passed,"elapsedMs":elapsed,"limitMs":30000,
-        "clockStartsAtAttackStop":true,"endpointResults":results}),
+        "clockStartsAtAttackStop":true,"productControllerResolvesOriginalEffects":true,"helperEffectResubmissions":0,"endpointResults":results}),
     );
     Ok(passed)
 }
@@ -828,7 +1092,7 @@ fn churn(endpoints: &mut [Endpoint], room: RoomId, overall: Instant) -> Result<(
             passed = false;
             break;
         }
-        let c = &mut endpoints[7].client;
+        let c = &mut endpoints[11].client;
         c.disconnect();
         let began = Instant::now();
         // Each is one offered connection, without an additional helper retry loop.
@@ -955,9 +1219,9 @@ fn run(args: &Arguments) -> Result<bool> {
             )?)?;
         }
     }
-    let subject = endpoints[5].client.profile.registration.account;
+    let subject = endpoints[8].client.profile.registration.account;
     let marker = committed(send_exact(
-        &mut endpoints[5].client,
+        &mut endpoints[8].client,
         room,
         &message("loadmarker visible only to non-ignoring recipients".into()),
         end,
@@ -982,9 +1246,9 @@ fn run(args: &Arguments) -> Result<bool> {
         page.events.iter().any(|e| e.event == marker),
         "UnfilteredMarkerMissing",
     )?;
-    let recipient = endpoints[9].client.profile.registration.account;
+    let recipient = endpoints[7].client.profile.registration.account;
     committed(operation(
-        &mut endpoints[9].client,
+        &mut endpoints[7].client,
         Operation::ModerationIgnore,
         Target::Account(recipient),
         &moderation::Filter {
@@ -993,7 +1257,7 @@ fn run(args: &Arguments) -> Result<bool> {
         },
         end,
     )?)?;
-    check_filter(&mut endpoints[9].client, room, subject, end)?;
+    check_filter(&mut endpoints[7].client, room, subject, end)?;
     for endpoint in &mut endpoints {
         ensure(
             matches!(
@@ -1003,23 +1267,41 @@ fn run(args: &Arguments) -> Result<bool> {
             "PilotSessionNotCurrent",
         )?;
     }
+    let mut supporting = endpoints.split_off(8);
+    for mut endpoint in endpoints {
+        endpoint.client.disconnect();
+        drop(endpoint);
+    }
+    // SQLCipher owners and their streams are released before Controller::open acquires the same profiles.
+    let controllers = open_controllers(&request.profiles, room, &mut supporting, end)?;
     emit(
-        json!({"case":"NativeLoadPilotReady","phase":"baseline","authenticatedStreams":12,"room":room}),
+        json!({"case":"NativeLoadPilotReady","phase":"baseline","authenticatedStreams":12,
+        "productionControllers":8,"backgroundRefreshEnabled":true,"room":room}),
     );
-    let (endpoints_after, baseline) = run_phase(endpoints, room, 30, false);
-    let (mut endpoints, overload) = run_phase(endpoints_after, room, 45, true);
-    let recovered = recovery(&mut endpoints, room, end)?;
+    let (controllers, supporting, baseline) = run_phase(controllers, supporting, room, 30, false);
+    let (mut controllers, mut supporting, overload) =
+        run_phase(controllers, supporting, room, 45, true);
+    let recovered = recovery(&mut controllers, &mut supporting, room, end)?;
+    for mut ui in controllers {
+        ui.controller.shutdown();
+        drop(ui);
+    }
+    let mut endpoints = Vec::new();
+    for (index, path) in request.profiles.iter().take(8).enumerate() {
+        endpoints.push(Endpoint {
+            index,
+            client: net(Client::open_offline(path))?,
+        });
+    }
+    endpoints.extend(supporting);
+    reconnect(&mut endpoints[0].client, end)?;
+    reconnect(&mut endpoints[7].client, end)?;
     // Targeted invalid traffic cannot alter the already measured pilot offered rate.
     let mut checks = Vec::new();
-    let filtered = (|| {
-        if health(&mut endpoints[9].client).is_err() {
-            reconnect(&mut endpoints[9].client, end)?;
-        }
-        check_filter(&mut endpoints[9].client, room, subject, end)
-    })();
+    let filtered = check_filter(&mut endpoints[7].client, room, subject, end);
     checks.push(json!({"case":"ignore","passed":filtered.is_ok(),"error":filtered.err()}));
     for oversized in [false, true] {
-        let result = malformed(&mut endpoints[7].client, oversized, end);
+        let result = malformed(&mut endpoints[11].client, oversized, end);
         checks.push(json!({"case":if oversized {"oversized"} else {"malformed"},"passed":result.is_ok(),"error":result.err()}));
     }
     let churn = churn(&mut endpoints, room, end);
@@ -1033,7 +1315,7 @@ fn run(args: &Arguments) -> Result<bool> {
     emit(
         json!({"case":"NativeLoadSummary","phase":"complete","passed":passed,"baselinePassed":baseline,
         "overloadPassed":overload,"recoveryPassed":recovered,"boundaryChecks":checks,
-        "rssGateEvaluatedByParent":true,"simultaneousFederationQualified":false,"internalQueueOccupancyMeasured":false}),
+        "productionControllers":8,"backgroundRefreshEnabled":true,"rssGateEvaluatedByParent":true,"simultaneousFederationQualified":false,"internalQueueOccupancyMeasured":false}),
     );
     Ok(passed)
 }
@@ -1067,6 +1349,66 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn a_commit_must_bind_the_original_controller_request_and_digest() {
+        let id = |n| Id::from_bytes([n; 32]);
+        let room = RoomId {
+            home: ServiceId {
+                network: NetworkId {
+                    network: id(1),
+                    incarnation: id(2),
+                },
+                service: id(3),
+            },
+            local: id(4),
+        };
+        let offer = || Offer {
+            request: 7,
+            scheduled: Instant::now(),
+            identity: None,
+            event: None,
+            committed_at: None,
+            terminal: false,
+            seen_refused: false,
+            status: "Queued".into(),
+        };
+        let mut delivery = client::Delivery {
+            abandoned: false,
+            held: false,
+            request_id: Some(8),
+            operation: Operation::MessageSend,
+            operation_id: OperationId {
+                window: id(5),
+                operation: id(6),
+            },
+            action_digest: id(7),
+            room: Some(room),
+            outcome: Some(Outcome::Committed {
+                event: Some(id(8)),
+                position: 1,
+                body: Value::Map(vec![]),
+            }),
+        };
+        let mut wrong_request = offer();
+        assert!(!apply_delivery(&mut wrong_request, &delivery, room));
+        assert!(wrong_request.committed_at.is_none());
+        delivery.request_id = Some(7);
+        let mut good = offer();
+        assert!(apply_delivery(&mut good, &delivery, room));
+        assert!(good.committed_at.is_some());
+        let mut substituted = offer();
+        delivery.outcome = None;
+        apply_delivery(&mut substituted, &delivery, room);
+        delivery.action_digest = id(9);
+        delivery.outcome = Some(Outcome::Committed {
+            event: Some(id(8)),
+            position: 1,
+            body: Value::Map(vec![]),
+        });
+        apply_delivery(&mut substituted, &delivery, room);
+        assert_eq!(substituted.status, "DeliveryBindingFailed");
+        assert!(substituted.committed_at.is_none());
+    }
     #[test]
     fn offered_load_cannot_pass_with_missing_or_slow_commits() {
         assert!(rate_pass(30, 150, 150, 0, Some(499)));
