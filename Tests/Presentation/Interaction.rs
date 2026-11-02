@@ -223,9 +223,23 @@ fn an_older_save_acknowledgement_does_not_acknowledge_a_new_identical_revision()
         editor.select_all();
         editor.insert("same text")
     });
-    until(&mut model, |m| {
-        m.snapshot.completions.iter().any(|c| c.request_id == first)
-    });
+    // Ticking while waiting could autosave the newer revision after the debounce
+    // and acknowledge both saves. Consume only the original save's completion.
+    let end = Instant::now() + Duration::from_secs(5);
+    loop {
+        model.snapshot = model.controller.snapshot();
+        if model
+            .snapshot
+            .completions
+            .iter()
+            .any(|c| c.request_id == first)
+        {
+            break;
+        }
+        assert!(Instant::now() < end, "original draft save did not complete");
+        thread::sleep(Duration::from_millis(5));
+    }
+    model.update();
     assert!(!model.draft_saved());
     model.save();
     assert!(model.save_pending.as_ref().unwrap().0 > first);
