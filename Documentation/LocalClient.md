@@ -30,9 +30,12 @@ deadline returns the refusal without another attempt. These attempts share the
 same three-attempt ceiling. Explicit HyperNet Refused, federation denial or
 expiry, invalid protocol/frame/version, private-path or ownership failures are terminal;
 Controller and bot reconnect classification preserves that distinction.
-An authenticated temporary origin-forwarding refusal leaves its current session
-synchronized. The Controller marks the view stale and honors its existing
-backoff, then resolves exact pending operations and refreshes through that session.
+An authenticated Unavailable, RateLimited or Overloaded refusal from the service
+or origin forwarder leaves its current session synchronized. After a bounded
+read retry is exhausted, the Controller also retains that session, marks the view
+stale and honors its existing backoff. It resolves exact pending operations and
+refreshes through that session before reporting Online. Retaining the connection
+does not treat a refused operation as successful or preserve expired authority.
 Genuine transport failures still require reconnection; invalid frames and
 identities remain terminal. Disconnect stays available during the wait. Session reuse supplies no
 new authority, extends no operation window and cannot replace uncertain effects.

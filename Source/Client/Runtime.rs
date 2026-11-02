@@ -81,12 +81,15 @@ impl Error {
             _ => Self::Unknown,
         }
     }
-    /// A verified temporary origin refusal leaves the existing session synchronized.
+    /// A verified temporary service or forwarding refusal leaves the session synchronized.
     /// This permits bounded recovery, not stale authority or a replacement operation.
     pub fn can_reuse_session(&self) -> bool {
         matches!(
             self,
-            Self::Network(network::Error::ForwardRefused {
+            Self::Refused {
+                code: ErrorCode::Unavailable | ErrorCode::RateLimited | ErrorCode::Overloaded,
+                ..
+            } | Self::Network(network::Error::ForwardRefused {
                 code: ErrorCode::Unavailable | ErrorCode::RateLimited | ErrorCode::Overloaded,
                 ..
             })
