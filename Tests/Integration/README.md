@@ -187,6 +187,11 @@ before their next read or effect preparation. These connections require current
 HyperNet permission within the original step deadline. A revoked delegated read
 is checked on the independent endpoint's fresh session so a closed idle stream
 cannot stand in for the required permission refusal.
+Current inspection, history, online search and encrypted synchronisation share
+bounded recovery for typed transient failures within the original step deadline.
+Session recovery uses the production client; synchronisation retains the client's
+exact readiness outbox operation. Contact trust is written once after a successful
+current inspection. Retained search remains offline.
 
 Each scenario operation has a 45-second watchdog. The total defaults to 600
 seconds, bounded by the driver's remaining conversation budget; the parent adds
