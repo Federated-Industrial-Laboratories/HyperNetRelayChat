@@ -23,8 +23,12 @@ Session setup allows at most three attempts within one original 30-second
 deadline. Each HyperNet preparation wait is at most 10 seconds; each HRC
 handshake is at most five seconds within that same deadline. Incomplete HRC
 handshakes and typed HyperNet Timeout, Unavailable, Closed, Capacity, Busy or
-NotActive preparation failures can obtain a fresh stream. Explicit Refused,
-invalid protocol/frame/version, private-path or ownership failures are terminal;
+NotActive preparation failures can obtain a fresh stream. An authenticated
+federation Unavailable, RateLimited or Overloaded response can also retry setup.
+Its retry guidance is a minimum wait; guidance outside the remaining original
+deadline returns the refusal without another attempt. These attempts share the
+same three-attempt ceiling. Explicit HyperNet Refused, federation denial or
+expiry, invalid protocol/frame/version, private-path or ownership failures are terminal;
 Controller and bot reconnect classification preserves that distinction.
 No conversation operation is prepared or replayed by session setup. Preparation
 failure diagnostics contain only the static adapter category and boot-time

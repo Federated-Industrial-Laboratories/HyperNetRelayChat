@@ -68,6 +68,13 @@ impl Error {
         matches!(self, Self::Handshake)
             || matches!(
                 self,
+                Self::ForwardRefused {
+                    code: ErrorCode::Unavailable | ErrorCode::RateLimited | ErrorCode::Overloaded,
+                    ..
+                }
+            )
+            || matches!(
+                self,
                 Self::Companion(error) | Self::Connect(error)
                     if matches!(error, HyperNet::Timeout | HyperNet::Unavailable
                         | HyperNet::Closed | HyperNet::Capacity | HyperNet::Busy
@@ -613,11 +620,16 @@ fn establish<T>(end: u64, mut attempt: impl FnMut(u64) -> Result<T>) -> Result<T
             Err(error) if error.retryable_setup() && number < 2 => {
                 let mut jitter = [0u8; 1];
                 getrandom::fill(&mut jitter).map_err(|_| Error::Authentication)?;
-                let delay = Duration::from_millis(200 + number * 200 + u64::from(jitter[0]));
+                let backoff = 200 + number * 200 + u64::from(jitter[0]);
+                let advised = match &error {
+                    Error::ForwardRefused { retry_after_ms, .. } => retry_after_ms.unwrap_or(1000),
+                    _ => 0,
+                };
+                let delay = Duration::from_millis(backoff.max(advised));
                 let Ok(left) = remaining(end) else {
                     return Err(error);
                 };
-                if left < delay + Duration::from_millis(100) {
+                if delay > left.saturating_sub(Duration::from_millis(100)) {
                     return Err(error);
                 }
                 std::thread::sleep(delay);
