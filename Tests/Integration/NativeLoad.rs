@@ -832,20 +832,7 @@ fn run_phase(
         .filter_map(|o| o.event)
         .collect();
     let moderator = &pairs[2].1;
-    let attacks_exercised = !overload
-        || (pairs[0].1.started > 8
-            && pairs[1].1.started > 1
-            && pairs[0]
-                .1
-                .results
-                .keys()
-                .any(|r| r == "Rejected:Denied:RoomSilenced")
-            && pairs[0]
-                .1
-                .results
-                .keys()
-                .any(|r| r.contains("RateLimited") || r.contains("Overloaded"))
-            && !pairs[3].1.unresolved);
+    let attacks_exercised = !overload || attacks_pass(&pairs[0].1, &pairs[1].1, &pairs[3].1);
     let controllers_current = ui_pairs.iter().all(|(_, m)| !m.unresolved);
     let passed = rate_pass(seconds, offered, in_window, missed, p95)
         && attacks_exercised
@@ -869,6 +856,20 @@ fn run_phase(
         pairs.into_iter().map(|(e, _)| e).collect(),
         passed,
     )
+}
+fn attacks_pass(flood: &Metrics, queries: &Metrics, slow: &Metrics) -> bool {
+    // A disconnected hostile stream stops its remaining schedule. Earlier
+    // refusals cannot establish sustained pressure for the whole phase.
+    !flood.unresolved
+        && !queries.unresolved
+        && !slow.unresolved
+        && flood.started > 8
+        && queries.started > 1
+        && flood.results.contains_key("Rejected:Denied:RoomSilenced")
+        && flood
+            .results
+            .keys()
+            .any(|r| r.contains("RateLimited") || r.contains("Overloaded"))
 }
 fn rate_pass(
     seconds: u64,
@@ -1404,6 +1405,33 @@ mod tests {
         apply_delivery(&mut substituted, &delivery, room);
         assert_eq!(substituted.status, "DeliveryBindingFailed");
         assert!(substituted.committed_at.is_none());
+    }
+    #[test]
+    fn earlier_refusals_cannot_hide_an_attack_stream_that_stopped_early() {
+        let mut flood = Metrics {
+            started: 9,
+            results: BTreeMap::from([
+                ("Rejected:Denied:RoomSilenced".into(), 1),
+                ("Refused:RateLimited".into(), 1),
+            ]),
+            ..Metrics::default()
+        };
+        let mut queries = Metrics {
+            started: 2,
+            ..Metrics::default()
+        };
+        let mut slow = Metrics::default();
+        assert!(attacks_pass(&flood, &queries, &slow));
+        flood.unresolved = true;
+        flood.missed = 441;
+        assert!(!attacks_pass(&flood, &queries, &slow));
+        flood.unresolved = false;
+        queries.unresolved = true;
+        queries.missed = 88;
+        assert!(!attacks_pass(&flood, &queries, &slow));
+        queries.unresolved = false;
+        slow.unresolved = true;
+        assert!(!attacks_pass(&flood, &queries, &slow));
     }
     #[test]
     fn offered_load_cannot_pass_with_missing_or_slow_commits() {

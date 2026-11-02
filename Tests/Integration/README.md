@@ -52,7 +52,11 @@ HRC uses authenticated pull delivery; this measures an unread response stream,
 not an unimplemented push fan-out queue. The moderator silences and unsilences
 the flood actor during the phase; both commits must take less than one second.
 A pass requires the flood to exercise actual rate/overload refusal and the
-active silence restriction, as well as the unaffected-client targets.
+active silence restriction, as well as the unaffected-client targets. A transport
+or local failure that stops either hostile schedule invalidates that overload
+measurement, even if earlier offers received the required refusals. Disconnecting
+an abusive stream may be a legitimate service response; the helper cannot use the
+remaining interval without that pressure to claim sustained-load qualification.
 
 Recipient ignore is enabled before the flood and rechecked through history and
 indexed search, with an unfiltered search proving the retained marker exists.
