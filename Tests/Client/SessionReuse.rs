@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Temporary forwarding recovery preserves exact work and the reserved stream-close handle.
+//! Temporary refusal recovery preserves exact work and the reserved stream-close handle.
 use super::*;
 use std::{
     fs,
@@ -15,16 +15,25 @@ fn temporary_forwarding(code: ErrorCode) -> Error {
     })
 }
 
+fn temporary_service(code: ErrorCode) -> Error {
+    Error::from_outcome(Outcome::Refused {
+        code,
+        detail: "TransportAuthorityExpired".into(),
+        retry_after_ms: Some(12_000),
+    })
+}
+
 #[test]
-fn only_authenticated_temporary_forwarding_refusals_preserve_the_session() {
+fn only_authenticated_temporary_refusals_preserve_the_session() {
     for code in [
         ErrorCode::Unavailable,
         ErrorCode::RateLimited,
         ErrorCode::Overloaded,
     ] {
-        let error = temporary_forwarding(code);
-        assert!(error.can_reuse_session());
-        assert_eq!(error.retry_delay_ms(), Some(12_000));
+        for error in [temporary_forwarding(code), temporary_service(code)] {
+            assert!(error.can_reuse_session());
+            assert_eq!(error.retry_delay_ms(), Some(12_000));
+        }
     }
     for code in [
         ErrorCode::Denied,
@@ -33,6 +42,7 @@ fn only_authenticated_temporary_forwarding_refusals_preserve_the_session() {
         ErrorCode::InvalidInput,
     ] {
         assert!(!temporary_forwarding(code).can_reuse_session());
+        assert!(!temporary_service(code).can_reuse_session());
     }
     use super::super::super::network::Error as Network;
     for error in [
@@ -43,7 +53,10 @@ fn only_authenticated_temporary_forwarding_refusals_preserve_the_session() {
         Error::Network(Network::QueryCancelled),
         Error::Clock,
         Error::Unknown,
-        unavailable(),
+        Error::Rejected {
+            code: ErrorCode::Unavailable,
+            detail: "TerminalOutcome".into(),
+        },
     ] {
         assert!(!error.can_reuse_session(), "{}", error.code());
     }
@@ -122,6 +135,15 @@ fn retained_handle(root: &Path) -> (crate::hypernet::Companion, Arc<crate::hyper
 
 #[test]
 fn forwarding_backoff_retains_pending_bytes_stale_views_and_reserved_disconnect() {
+    retained_recovery(temporary_forwarding(ErrorCode::Overloaded));
+}
+
+#[test]
+fn service_backoff_retains_pending_bytes_stale_views_and_reserved_disconnect() {
+    retained_recovery(temporary_service(ErrorCode::Unavailable));
+}
+
+fn retained_recovery(error: Error) {
     let (fixture, mut worker, room) = worker();
     let (_companion, stream) = retained_handle(&fixture.root);
     *worker.shared.stream.lock().unwrap() = Some(Arc::clone(&stream));
@@ -139,7 +161,7 @@ fn forwarding_backoff_retains_pending_bytes_stale_views_and_reserved_disconnect(
     assert_eq!(before.len(), 1);
     let original_bytes = before[0].action.signed_bytes().to_vec();
     worker.caught_up.insert(room);
-    worker.error(temporary_forwarding(ErrorCode::Overloaded));
+    worker.error(error);
     assert!(Arc::ptr_eq(
         worker.shared.stream.lock().unwrap().as_ref().unwrap(),
         &stream
@@ -196,9 +218,10 @@ fn forwarding_backoff_retains_pending_bytes_stale_views_and_reserved_disconnect(
 }
 
 #[test]
-fn permanent_forwarding_or_broken_transport_discards_the_reserved_handle() {
+fn permanent_refusal_or_broken_transport_discards_the_reserved_handle() {
     for error in [
         temporary_forwarding(ErrorCode::Denied),
+        temporary_service(ErrorCode::Denied),
         Error::Network(super::super::super::network::Error::Transport),
         Error::Network(super::super::super::network::Error::Authentication),
     ] {
