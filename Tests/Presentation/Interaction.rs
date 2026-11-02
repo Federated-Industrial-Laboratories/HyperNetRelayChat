@@ -88,6 +88,8 @@ impl Fixture {
                 sequence: 0,
                 joined: true,
                 unread: 0,
+                confidentiality: Default::default(),
+                invited: false,
             };
             let encoded =
                 canonical_encode(&Value::serialized(&summary).unwrap(), CRYPTO_FRAME_BYTES)
@@ -137,6 +139,7 @@ fn committed(model: &mut Model, request: u64, room: RoomId) {
         .deliveries
         .push(Delivery {
             abandoned: false,
+            held: false,
             request_id: Some(request),
             operation: Operation::MessageSend,
             operation_id: OperationId {
