@@ -515,6 +515,9 @@ impl Worker {
         self.snapshot.connection = ConnectionState::Offline;
         self.caught_up.clear();
         *self.shared.stream.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        // Reserved disconnect can leave an idle worker with no later command or
+        // poll to publish the closed connection and invalidated live state.
+        self.publish();
     }
     fn error(&mut self, e: Error) {
         self.snapshot.status = Some(Status {
