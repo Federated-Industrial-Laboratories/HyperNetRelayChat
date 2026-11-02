@@ -84,6 +84,12 @@ Owner-signed scope constrains encrypted agent admission even if a home supplies
 misleading roster metadata. Current grant state and ordering remain the home's
 policy responsibility.
 
+Inspection shows pending packages and their contact fingerprints without accepting
+them. Synchronisation, sends and removals require trust in the current roster.
+An unrelated untrusted package does not block those operations. Adding selected
+packages requires explicit trust in every next-roster account, represented owner
+and agent operator, plus endpoint and delegation verification.
+
 The CBOR representation of each roster member is one byte string containing a
 canonical `{actor, credential, registration, delegation}` record. Its decoded
 record is limited to 32KiB and the existing depth, collection and node bounds.

@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Authenticated encrypted-room commands share the existing client, writer and exact-byte outbox.
 use super::{
-    Client, CryptoView, Error, Result, archive, cache, outbox, trust::TrustState,
+    Client, CryptoView, Error, Result, archive, cache, outbox,
+    trust::{ContactTrust, TrustState},
     trust_store::trust_required,
 };
 use crate::{
@@ -425,6 +426,7 @@ impl Client {
                 detail: "RequiredEndpointRemoval".into(),
             });
         }
+        require_member_trust(&next, &view.contacts)?;
         let next = self.trusted_roster(room, &next, true)?;
         let device = self.crypto_device()?;
         let change = if !additions.is_empty() {
@@ -694,13 +696,11 @@ fn persist_membership_action(
     Ok(bytes)
 }
 pub(super) fn require_trust(view: &CryptoView) -> Result<()> {
+    require_member_trust(&view.remote.members, &view.contacts)
+}
+fn require_member_trust(members: &[domain::Member], contacts: &[ContactTrust]) -> Result<()> {
     let mut required = BTreeSet::new();
-    for member in view
-        .remote
-        .members
-        .iter()
-        .chain(view.remote.packages.iter().map(|p| &p.member))
-    {
+    for member in members {
         required.insert(member.actor.acting().account);
         required.insert(member.actor.represented());
         if let Actor::IndependentAgent { operator, .. } | Actor::Delegated { operator, .. } =
@@ -710,8 +710,7 @@ pub(super) fn require_trust(view: &CryptoView) -> Result<()> {
         }
     }
     if required.iter().any(|account| {
-        !view
-            .contacts
+        !contacts
             .iter()
             .any(|c| c.account == *account && c.state == TrustState::Trusted)
     }) {
@@ -720,3 +719,7 @@ pub(super) fn require_trust(view: &CryptoView) -> Result<()> {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "../../Tests/Client/EncryptedTrust.rs"]
+mod trust_tests;
