@@ -11,7 +11,7 @@ use std::{
     collections::BTreeMap,
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -83,6 +83,26 @@ impl Error {
     }
 }
 pub type Result<T> = std::result::Result<T, Error>;
+// Automatic reconnects must not produce an unbounded diagnostic transcript.
+static PREPARATION_DIAGNOSTICS: AtomicUsize = AtomicUsize::new(128);
+fn preparation_failure(error: &crate::hypernet::Error, started: u64, deadline: u64) {
+    if PREPARATION_DIAGNOSTICS
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| {
+            remaining.checked_sub(1)
+        })
+        .is_err()
+    {
+        return;
+    }
+    use std::io::Write;
+    let _ = writeln!(
+        std::io::stderr().lock(),
+        "{}",
+        serde_json::json!({"event":"ConnectionPreparationFailed", "code":error.code(),
+            "startedBootMs":started, "finishedBootMs":clock::boot_ms().ok(),
+            "setupDeadlineBootMs":deadline})
+    );
+}
 pub struct Session {
     companion: Companion,
     stream: Arc<Stream>,
@@ -111,12 +131,7 @@ impl Session {
                 remaining(overall_end)?.min(Duration::from_secs(10)),
             )
             .map_err(|error| {
-                eprintln!(
-                    "{}",
-                    serde_json::json!({"event":"ConnectionPreparationFailed", "code":error.code(),
-                        "startedBootMs":started, "finishedBootMs":clock::boot_ms().ok(),
-                        "setupDeadlineBootMs":overall_end})
-                );
+                preparation_failure(&error, started, overall_end);
                 Error::Connect(error)
             })?;
         let Peer::Outgoing(_) = stream.peer() else {
