@@ -5,6 +5,7 @@ import argparse
 import hashlib
 import io
 import json
+import mmap
 import os
 from pathlib import Path
 import re
@@ -19,18 +20,66 @@ def command(*args):
     return subprocess.check_output(args, cwd=ROOT, text=True).strip()
 
 
+def build_remaps():
+    home = Path.home().absolute()
+    cargo = Path(os.environ.get("CARGO_HOME", home / ".cargo")).absolute()
+    locations = [(home, "/build"), (cargo, "/cargo")]
+    if os.environ.get("CARGO_TARGET_DIR"):
+        locations.append((Path(os.environ["CARGO_TARGET_DIR"]).absolute(), "/target"))
+    locations.append((ROOT, "/source"))
+    remaps = []
+    for path, replacement in locations:
+        for spelling in (path, path.resolve()):
+            if spelling == Path(spelling.anchor) or "\x1f" in str(spelling):
+                raise SystemExit("Build path cannot be represented safely")
+            pair = (str(spelling), replacement)
+            if pair not in remaps:
+                remaps.append(pair)
+    return remaps
+
+
+def build_rustflags():
+    # Cargo gives encoded flags precedence over its whitespace-separated form.
+    previous = os.environ.get("CARGO_ENCODED_RUSTFLAGS")
+    if previous is None:
+        previous = "\x1f".join(os.environ.get("RUSTFLAGS", "").split())
+    flags = ["--remap-path-prefix=" + source + "=" + target
+             for source, target in build_remaps()]
+    return (previous + "\x1f" if previous else "") + "\x1f".join(flags)
+
+
+def verify_build_paths(binary):
+    prefixes = {os.fsencode(source) for source, _ in build_remaps()}
+    with binary.open("rb") as source:
+        if not os.fstat(source.fileno()).st_size:
+            raise SystemExit("Package binary is empty")
+        with mmap.mmap(source.fileno(), 0, access=mmap.ACCESS_READ) as contents:
+            if any(contents.find(prefix) >= 0 for prefix in prefixes):
+                raise SystemExit("Binary retains private build paths; rebuild with package path remapping")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--binary", type=Path, required=True)
-    parser.add_argument("--sqlcipher-source", type=Path, required=True)
-    parser.add_argument("--output", type=Path, required=True,
+    parser.add_argument("--build-rustflags", action="store_true",
+                        help="Print encoded flags for capture in CARGO_ENCODED_RUSTFLAGS")
+    parser.add_argument("--binary", type=Path)
+    parser.add_argument("--sqlcipher-source", type=Path)
+    parser.add_argument("--output", type=Path,
                         help="New .tar.gz path; existing output is refused")
     args = parser.parse_args()
+    if args.build_rustflags:
+        if any((args.binary, args.sqlcipher_source, args.output)):
+            parser.error("Build flags do not accept package arguments")
+        print(build_rustflags(), end="")
+        return
+    if not all((args.binary, args.sqlcipher_source, args.output)):
+        parser.error("Packaging requires --binary, --sqlcipher-source and --output")
     binary = args.binary.resolve(strict=True)
     sqlcipher = args.sqlcipher_source.resolve(strict=True)
     output = args.output.absolute()
     if output.suffixes[-2:] != [".tar", ".gz"] or output.exists():
         raise ValueError("Select a new .tar.gz output")
+    verify_build_paths(binary)
     if command("git", "status", "--porcelain"):
         raise ValueError("Commit source changes before packaging")
     package = tomllib.loads((ROOT / "Cargo.toml").read_text())["package"]

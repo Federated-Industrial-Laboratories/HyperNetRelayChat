@@ -26,6 +26,8 @@ jobs:
         run: |
           bash Tools/Native.sh
           source Tools/Environment.sh
+          CARGO_ENCODED_RUSTFLAGS="$(python3 Tools/Package.py --build-rustflags)"
+          export CARGO_ENCODED_RUSTFLAGS
           cargo build --locked --release --bin hrc
           cargo metadata --locked --format-version 1 --filter-platform x86_64-unknown-linux-gnu > /dev/null
       - name: Assemble package and inventory

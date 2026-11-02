@@ -1,6 +1,12 @@
 # Package notice inputs
 
 `Tools/Package.py` assembles a trusted, already built Linux binary and its manuals.
+Use its `--build-rustflags` output as `CARGO_ENCODED_RUSTFLAGS` for release builds,
+as shown in the installation guide. The packager refuses binaries containing the
+current home, Cargo-cache, checkout or explicit `CARGO_TARGET_DIR` paths before
+executing them or creating an archive. This check covers known build locations;
+it does not establish the provenance or privacy of a binary produced in another
+environment.
 It includes the notices from the locally resolved locked crate sources, plus the
 pinned files here when an upstream crate omits its repository's licence texts.
 The source inventory includes archive checksums from `Cargo.lock`. The MPL-2.0

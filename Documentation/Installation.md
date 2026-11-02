@@ -77,6 +77,8 @@ binutils in addition to the build tools.
 ```sh
 bash Tools/Native.sh
 source Tools/Environment.sh
+CARGO_ENCODED_RUSTFLAGS="$(python3 Tools/Package.py --build-rustflags)"
+export CARGO_ENCODED_RUSTFLAGS
 cargo build --locked --release --bin hrc
 cargo metadata --locked --format-version 1 --filter-platform x86_64-unknown-linux-gnu > /dev/null
 python3 Tools/Package.py --binary target/release/hrc \
@@ -90,3 +92,18 @@ checks the binary version/architecture, and collects the locked dependency notic
 offline. It neither starts the binary's network workflows nor changes an installed
 copy. It does not establish reproducibility by itself; retain the build and
 qualification evidence for the exact package being distributed.
+
+The encoded build flags retain existing `CARGO_ENCODED_RUSTFLAGS`, or `RUSTFLAGS`
+when the encoded variable is absent, and append path remapping for the current
+home, Cargo cache, checkout and explicit `CARGO_TARGET_DIR`. They support paths
+containing spaces. Cargo's environment flags override flags from Cargo
+configuration; put any required
+configuration flags in the selected environment variable before this command.
+Capture the flags as shown, without printing them in build logs.
+
+Before executing the binary or creating an archive, the packager refuses any
+remaining occurrence of these known build paths. Build and package in the same
+environment. This is a check for the current build locations, not proof that an
+arbitrary binary built elsewhere contains no private information. Native compiler
+output or embedded application data can require separate remapping; inspect a
+refusal and rebuild rather than removing the check.
