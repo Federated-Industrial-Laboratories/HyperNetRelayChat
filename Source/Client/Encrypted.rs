@@ -96,6 +96,20 @@ impl Client {
         }
         Ok(())
     }
+    fn membership_effects_ready(&mut self, room: RoomId) -> Result<()> {
+        self.effects_ready()?;
+        if self.pending()?.iter().any(|pending| {
+            pending.abandoned
+                && pending.action.action().target == Target::Room(room)
+                && matches!(
+                    pending.action.action().operation,
+                    Operation::CryptoCommit | Operation::CryptoPropose | Operation::CryptoRecover
+                )
+        }) {
+            return Err(Error::Unknown);
+        }
+        Ok(())
+    }
 
     pub fn prepare_as<T: serde::Serialize>(
         &self,
@@ -309,7 +323,7 @@ impl Client {
         self.execute(&action)
     }
     pub fn crypto_initialise(&mut self, room: RoomId, recover: bool) -> Result<Response> {
-        self.effects_ready()?;
+        self.membership_effects_ready(room)?;
         let view = self.crypto_inspect(room, None)?;
         require_trust(&view)?;
         if !recover && view.remote.group.is_some() {
@@ -319,15 +333,6 @@ impl Client {
         let own = self.own_member(room)?;
         let roster = self.trusted_roster(room, std::slice::from_ref(&own), true)?;
         let group = Id::random().map_err(|_| Error::Input)?;
-        let info = device
-            .create_group_with(
-                &mut self.store,
-                group,
-                &roster,
-                view.remote.sequence,
-                |tx, _| super::encrypted_history::epoch_in(tx, group, 0, &[own]),
-            )
-            .map_err(failure)?;
         let mut action = self.prepare_as(
             if recover {
                 Operation::CryptoRecover
@@ -337,12 +342,33 @@ impl Client {
             Target::Room(room),
             &domain::Initialise {
                 group,
-                group_info: Blob(info),
+                group_info: Blob(Vec::new()),
             },
             None,
         )?;
         self.set_room_revision(&mut action, room, None)?;
-        let response = self.execute(&action)?;
+        let window = self.session()?.ready.window.clone();
+        let now = self.profile.clock.sample().map_err(|_| Error::Clock)?;
+        let key = &self.key;
+        let mut signed = None;
+        device
+            .create_group_with(
+                &mut self.store,
+                group,
+                &roster,
+                view.remote.sequence,
+                |tx, info| {
+                    action.body = Value::serialized(&domain::Initialise {
+                        group,
+                        group_info: Blob(info.to_vec()),
+                    })
+                    .map_err(|_| crypto::Error::Invalid)?;
+                    signed = Some(persist_membership_action(tx, &action, key, &window, now)?);
+                    super::encrypted_history::epoch_in(tx, group, 0, &[own])
+                },
+            )
+            .map_err(failure)?;
+        let response = self.execute_signed(&signed.ok_or(Error::Storage)?)?;
         if matches!(response.outcome, Outcome::Committed { .. }) {
             self.crypto_sync(room, None)?;
         }
@@ -355,7 +381,7 @@ impl Client {
         removals: &[Id],
         grant: Option<&delegation::Grant>,
     ) -> Result<Response> {
-        self.effects_ready()?;
+        self.membership_effects_ready(room)?;
         if additions.len() > 64
             || removals.len() > 64
             || (!additions.is_empty() && !removals.is_empty())
@@ -400,35 +426,58 @@ impl Client {
         } else {
             crypto::Change::Update
         };
-        let pending = device
-            .prepare_transition(
-                &mut self.store,
-                group,
-                view.remote.epoch,
-                &current,
-                &next,
-                change,
-            )
-            .map_err(failure)?;
         let mut action = self.prepare_as(
             Operation::CryptoCommit,
             Target::Room(room),
             &domain::CommitEpoch {
                 group,
-                epoch: pending.epoch,
-                commit: Blob(pending.commit.clone()),
+                epoch: view.remote.epoch,
+                commit: Blob(Vec::new()),
                 additions: additions.to_vec(),
                 removals: removals.to_vec(),
             },
             grant,
         )?;
+        // Finish all current reads and action/window preparation before the MLS
+        // write. A refused inspection must not strand an unbound local candidate.
         self.set_room_revision(&mut action, room, grant)?;
-        let response = self.execute(&action)?;
-        if matches!(response.outcome, Outcome::Rejected { .. }) {
-            device
-                .reject_transition(&mut self.store, group, digest(&pending.commit))
-                .map_err(failure)?;
-        }
+        let window = self.session()?.ready.window.clone();
+        let now = self.profile.clock.sample().map_err(|_| Error::Clock)?;
+        let key = &self.key;
+        let mut signed = None;
+        device
+            .prepare_transition_with(
+                &mut self.store,
+                crypto::TransitionPreparation {
+                    group,
+                    epoch: view.remote.epoch,
+                    current: &current,
+                    next: &next,
+                    change,
+                },
+                |tx, pending| {
+                    action.body = Value::serialized(&domain::CommitEpoch {
+                        group,
+                        epoch: pending.epoch,
+                        commit: Blob(pending.commit.clone()),
+                        additions: additions.to_vec(),
+                        removals: removals.to_vec(),
+                    })
+                    .map_err(|_| crypto::Error::Invalid)?;
+                    signed = Some(persist_membership_action(tx, &action, key, &window, now)?);
+                    crypto::bind_transition_in(
+                        tx,
+                        pending,
+                        action.operation_id,
+                        action_digest(&action)?,
+                    )?;
+                    Ok(())
+                },
+            )
+            .map_err(failure)?;
+        // Terminal rejection cleanup is joined to outbox recording, including
+        // outcomes learned through exact resolution after a disconnect.
+        let response = self.execute_signed(&signed.ok_or(Error::Storage)?)?;
         if matches!(response.outcome, Outcome::Committed { .. }) {
             self.crypto_sync(room, grant)?;
         }
@@ -627,6 +676,18 @@ impl Client {
         let prepared = self.prepare_send(room, message, grant, is_action, None)?;
         self.execute_signed(&prepared.signed)
     }
+}
+fn persist_membership_action(
+    tx: &rusqlite::Transaction<'_>,
+    action: &Action,
+    key: &SigningKey,
+    window: &RetryWindow,
+    now: crate::clock::TimeBounds,
+) -> crypto::Result<Vec<u8>> {
+    let bytes = sign_action(action, key)?;
+    let verified = verify_action(&bytes, &key.verifying_key())?;
+    outbox::prepare_transaction(tx, &verified, window, now)?;
+    Ok(bytes)
 }
 pub(super) fn require_trust(view: &CryptoView) -> Result<()> {
     let mut required = BTreeSet::new();
