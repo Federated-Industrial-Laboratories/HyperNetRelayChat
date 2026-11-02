@@ -771,6 +771,9 @@ fn run(args: Arguments) -> Result<serde_json::Value> {
         },
         end,
     );
+    bob.command.set("Disconnect");
+    bob.phase.set("ReservedControl");
+    bob.request.set(None);
     bob.disconnect();
     wait(&bob, "disconnect", end, |v| {
         v.connection == ConnectionState::Offline
