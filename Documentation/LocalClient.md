@@ -99,9 +99,11 @@ history pull. Disappeared or unjoined rooms lose cached events. A transport fail
 keeps drafts and exact uncertain outbox bytes. Reconnect uses capped exponential
 backoff with jitter, fresh permission, and original operation resolution.
 
-A committed effect clears its submitted draft only after the service's durable
-response has been recorded. Rejected and unknown effects retain the draft. An
-approval candidate persists its exact signed bytes before exposure. The owner's
+A committed effect clears a draft only when the stored draft still belongs to
+that exact operation ID and action digest. Every later draft save removes that
+binding, including a save with identical text or an empty draft. A held send cannot
+overwrite a newer acknowledged draft. Rejected and unknown effects retain the
+draft. An approval candidate persists its exact signed bytes before exposure. The owner's
 inspection exposes its action digest, content, scope and validity. Submission
 uses those same bytes; changing content or scope requires another approval.
 
@@ -120,7 +122,11 @@ Preferences include dark/light theme, compact/comfortable density, text scale fr
 all/mentions/off notifications. Mentions use stable account bindings. Ignored or
 muted actors produce no local notification. Catch-up after connection does not
 emit notification bursts. Sounds are emitted only when both global and room
-preferences permit them.
+preferences permit them. A current filter update immediately refilters live and
+focused history, search results and queued notifications, even if a later view
+read fails. Muting suppresses notifications without hiding retained history.
+Explicit denial of a focused context removes that context; a temporary failure
+retains it with stale status.
 
 Search cancellation uses the existing authenticated stream. One query can be in
 flight, with at most one exact correlated cancel request. The service registers
@@ -135,9 +141,12 @@ actions. Later requests cannot overtake it; it receives no permission bypass.
 Both its initial transport check and its subsequent Home admission retain the
 original query deadline, and no authority slot is held while Home work executes.
 
-The cache schema accepts version 1 only. The draft migration adds an empty mention
-list to the known earlier three-column table, preserving text. Unknown schema or
-corrupt encrypted state is refused; opening never resets a database or guard.
+The cache schema accepts version 1 only. Draft migrations preserve text and add
+an empty mention list to the known earlier three-column table. The independent
+`HRC.ClientDraftBinding.Schema.1` migration adds a nullable exact-send binding.
+Older drafts remain unbound; resolving an old outbox action cannot claim ownership
+of them. Unknown schema or corrupt encrypted state is refused; opening never
+resets a database or guard.
 
 `hrc service init --motd 'Welcome to this service.'` stores an optional message of
 the day in the private service configuration. The default is empty; the maximum
@@ -148,7 +157,12 @@ The controller exposes the authenticated value as `Snapshot.motd`.
 `Snapshot.completions` retains the last 64 queued command completions. Each entry
 binds the local request number to success or its stable error. A draft save can
 therefore be acknowledged before switching rooms or closing an interface without
-confusing it with message delivery. Disconnect and search cancellation use their
+confusing it with message delivery. Shared presentation tracks each edit revision
+and retires completed save requests. A delayed save or send acknowledgement cannot
+claim a later revision, even when text or selected mention spelling is identical.
+Room and event-context navigation waits for the latest old-room draft to be saved.
+The composer visibly pauses only while the dispatched navigation is pending,
+then resumes on success or failure. Disconnect and search cancellation use their
 reserved control flags rather than waiting behind the normal command queue.
 
 `OpenEvent` requests `HistoryContext` from the service under current room,

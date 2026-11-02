@@ -35,7 +35,12 @@ scroll history. Ctrl+A selects the draft, Shift+Left/Right extends selection, an
 Ctrl+Z/Y undo or redo. Esc returns to the conversation. Terminal controls in
 received text are rendered visibly and cannot execute commands or clipboard actions.
 
-Editing, selection and deletion preserve whole Unicode graphemes. Drafts are limited
+Room and event-context navigation saves the latest draft before switching. The
+composer pauses while that navigation is in progress and resumes when it finishes
+or fails. A delayed send result cannot clear text or mentions edited afterwards.
+
+Editing, selection and deletion preserve whole Unicode graphemes. Completion
+recognises whole Unicode whitespace characters, including in restored drafts. Drafts are limited
 to 8,192 UTF-8 bytes and 2,000 graphemes. An invalid replacement paste preserves the
 existing draft. The GUI uses installed system fonts for scripts and emoji missing
 from its bundled fonts; terminal glyph support depends on the terminal and its fonts.
