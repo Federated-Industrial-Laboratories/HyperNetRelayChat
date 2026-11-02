@@ -56,7 +56,8 @@ impl Run {
         operation: &'static str,
         call: impl FnOnce(Instant) -> Result<T>,
     ) -> Result<T> {
-        let deadline = self.end.min(Instant::now() + Duration::from_secs(45));
+        let started = Instant::now();
+        let deadline = self.end.min(started + Duration::from_secs(45));
         *self
             .observation
             .lock()
@@ -68,7 +69,16 @@ impl Run {
         // Deliberate pacing respects the documented crypto-account burst/refill budget.
         thread::sleep(Duration::from_secs(2));
         ensure(Instant::now() < deadline, "StepDeadline")?;
-        let result = call(deadline)
+        let result = call(deadline);
+        if self.steps < 128 || result.is_err() {
+            eprintln!(
+                "{}",
+                json!({"case":"ConfidentialStep","step":self.steps,"principal":principal,
+                    "operation":operation,"returnedOk":result.is_ok(),
+                    "elapsedMs":started.elapsed().as_millis()})
+            );
+        }
+        let result = result
             .map_err(|code| format!("principal={principal} operation={operation} status={code}"))?;
         ensure(Instant::now() < deadline, "StepDeadline")?;
         self.steps += 1;
@@ -95,8 +105,37 @@ impl Run {
 fn ensure(ok: bool, code: &str) -> Result<()> {
     if ok { Ok(()) } else { Err(code.into()) }
 }
+fn reason(detail: &str) -> &str {
+    if detail.len() <= 80
+        && detail
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+    {
+        detail
+    } else {
+        "UnstructuredDetail"
+    }
+}
+fn diagnostic(error: &client::Error) -> String {
+    match error {
+        client::Error::Rejected { code, detail } => {
+            format!("Rejected:{code:?}:{}", reason(detail))
+        }
+        client::Error::Refused {
+            code,
+            detail,
+            retry_after_ms,
+        } => {
+            format!(
+                "Refused:{code:?}:{}:retryMs={retry_after_ms:?}",
+                reason(detail)
+            )
+        }
+        _ => error.code().into(),
+    }
+}
 fn net<T>(value: client::Result<T>) -> Result<T> {
-    value.map_err(|e| e.code().into())
+    value.map_err(|e| diagnostic(&e))
 }
 fn transient(error: &client::Error) -> bool {
     match error {
@@ -185,7 +224,7 @@ fn execute_exact(
                 c.disconnect();
                 net(c.connect())?;
             }
-            Err(error) => return Err(error.code().into()),
+            Err(error) => return Err(diagnostic(&error)),
         }
         first = false;
         *recoveries += 1;
@@ -194,9 +233,18 @@ fn execute_exact(
 fn committed(outcome: Outcome) -> Result<(Option<Id>, Value)> {
     match outcome {
         Outcome::Committed { event, body, .. } => Ok((event, body)),
-        Outcome::Rejected { code, .. } | Outcome::Refused { code, .. } => {
-            Err(format!("ExpectedCommit:{code:?}"))
-        }
+        Outcome::Rejected { code, detail } => Err(format!(
+            "ExpectedCommit:Rejected:{code:?}:{}",
+            reason(&detail)
+        )),
+        Outcome::Refused {
+            code,
+            detail,
+            retry_after_ms,
+        } => Err(format!(
+            "ExpectedCommit:Refused:{code:?}:{}:retryMs={retry_after_ms:?}",
+            reason(&detail)
+        )),
         _ => Err("ExpectedCommit".into()),
     }
 }
