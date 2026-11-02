@@ -24,6 +24,18 @@ pub enum Panel {
     Status,
     Motd,
 }
+struct Draft {
+    generation: u64,
+    text: String,
+    mentions: Vec<hrc::messaging::Mention>,
+}
+impl Draft {
+    fn matches(&self, model: &Model) -> bool {
+        self.generation == model.generation
+            && self.text == model.editor.text()
+            && self.mentions == model.editor.mentions()
+    }
+}
 pub struct Model {
     pub controller: Controller,
     pub snapshot: Arc<Snapshot>,
@@ -34,10 +46,13 @@ pub struct Model {
     pub closing: bool,
     pub notified: bool,
     room: Option<RoomId>,
-    switching: Option<RoomId>,
-    sends: BTreeMap<u64, (RoomId, String)>,
+    switching: Option<Command>,
+    selection_pending: Option<u64>,
+    sends: BTreeMap<u64, (RoomId, Draft)>,
     changed: Instant,
-    save_pending: Option<(u64, String)>,
+    generation: u64,
+    saved_generation: u64,
+    save_pending: Option<(u64, Draft)>,
     notification: u64,
 }
 impl Model {
@@ -55,8 +70,11 @@ impl Model {
             notified: false,
             room: None,
             switching: None,
+            selection_pending: None,
             sends: BTreeMap::new(),
             changed: Instant::now(),
+            generation: 0,
+            saved_generation: 0,
             save_pending: None,
             notification: 0,
         };
@@ -85,34 +103,73 @@ impl Model {
     }
     pub fn edited(&mut self) {
         self.changed = Instant::now();
-        self.save_pending = None;
+        self.generation += 1;
+    }
+    fn draft(&self) -> Draft {
+        Draft {
+            generation: self.generation,
+            text: self.editor.text().into(),
+            mentions: self.editor.mentions().to_vec(),
+        }
+    }
+    pub fn composer_enabled(&self) -> bool {
+        self.selection_pending.is_none() && !self.closing
+    }
+    pub fn edit(
+        &mut self,
+        edit: impl FnOnce(&mut Editor) -> Result<(), hrc::presentation::editor::InvalidDraft>,
+    ) {
+        if !self.composer_enabled() {
+            return;
+        }
+        match edit(&mut self.editor) {
+            Ok(()) => self.edited(),
+            Err(error) => self.error = Some(error.to_string()),
+        }
     }
     pub fn draft_saved(&self) -> bool {
-        self.snapshot.selected.as_ref().is_none_or(|room| {
-            room.summary.room == self.room.unwrap_or(room.summary.room)
-                && room.draft == self.editor.text()
-                && room.draft_mentions == self.editor.mentions()
-        })
+        self.room.is_none()
+            || self.snapshot.selected.as_ref().is_some_and(|room| {
+                Some(room.summary.room) == self.room
+                    && self.saved_generation == self.generation
+                    && room.draft == self.editor.text()
+                    && room.draft_mentions == self.editor.mentions()
+            })
     }
     pub fn save(&mut self) {
         if self.draft_saved() {
             return;
         }
         if let Some(room) = self.room {
-            let text = self.editor.text().to_owned();
-            if self.save_pending.as_ref().map(|(_, text)| text.as_str()) != Some(&text)
+            let draft = self.draft();
+            if !self
+                .save_pending
+                .as_ref()
+                .is_some_and(|(_, pending)| pending.matches(self))
                 && let Some(id) = self.dispatch(Command::SaveDraft {
                     room,
-                    text: text.clone(),
-                    mentions: self.editor.mentions().to_vec(),
+                    text: draft.text.clone(),
+                    mentions: draft.mentions.clone(),
                 })
             {
-                self.save_pending = Some((id, text));
+                self.save_pending = Some((id, draft));
             }
         }
     }
     pub fn select(&mut self, room: RoomId) {
-        self.switching = Some(room);
+        if !self.composer_enabled() || self.room == Some(room) {
+            return;
+        }
+        self.navigate(Command::SelectRoom(room));
+    }
+    pub fn open_event(&mut self, room: RoomId, event: Id) {
+        self.navigate(Command::OpenEvent { room, event });
+    }
+    fn navigate(&mut self, command: Command) {
+        if !self.composer_enabled() {
+            return;
+        }
+        self.switching = Some(command);
         self.save();
     }
     pub fn close(&mut self) {
@@ -122,17 +179,37 @@ impl Model {
     }
     pub fn tick(&mut self) -> bool {
         self.snapshot = self.controller.snapshot();
+        self.update()
+    }
+    fn update(&mut self) -> bool {
         if let Some((id, _)) = &self.save_pending
             && let Some(completion) = self
                 .snapshot
                 .completions
                 .iter()
                 .find(|c| c.request_id == *id)
-            && let Some(error) = &completion.error
         {
-            self.error = Some(format!("Draft was not saved: {}", error.code));
-            self.closing = false;
-            self.switching = None;
+            if let Some(error) = &completion.error {
+                self.error = Some(format!("Draft was not saved: {}", error.code));
+                self.closing = false;
+                self.switching = None;
+                self.changed = Instant::now();
+            } else if let Some((_, draft)) = &self.save_pending {
+                self.saved_generation = draft.generation;
+            }
+            self.save_pending = None;
+        }
+        if let Some(id) = self.selection_pending
+            && let Some(completion) = self
+                .snapshot
+                .completions
+                .iter()
+                .find(|c| c.request_id == id)
+        {
+            self.selection_pending = None;
+            if let Some(error) = &completion.error {
+                self.error = Some(format!("Room selection failed: {}", error.code));
+            }
         }
         for completion in &self.snapshot.completions {
             if completion.error.is_some()
@@ -154,6 +231,8 @@ impl Model {
             self.room = current;
             self.reply = None;
             self.save_pending = None;
+            self.generation += 1;
+            self.saved_generation = self.generation;
             if let Some(room) = &self.snapshot.selected {
                 if let Err(error) = self.editor.reset_draft(&room.draft, &room.draft_mentions) {
                     self.error = Some(error.to_string());
@@ -176,14 +255,15 @@ impl Model {
             })
             .collect::<Vec<_>>();
         for (id, committed) in delivered {
-            if let Some((room, text)) = self.sends.remove(&id)
+            if let Some((room, draft)) = self.sends.remove(&id)
                 && committed
                 && Some(room) == self.room
-                && text == self.editor.text()
+                && draft.matches(self)
             {
                 let _ = self.editor.reset("");
                 self.reply = None;
                 self.edited();
+                self.save();
             }
         }
         if self.changed.elapsed() >= Duration::from_millis(300)
@@ -193,9 +273,9 @@ impl Model {
             self.save();
         }
         if self.draft_saved()
-            && let Some(room) = self.switching.take()
+            && let Some(command) = self.switching.take()
         {
-            self.dispatch(Command::SelectRoom(room));
+            self.selection_pending = self.dispatch(command);
         }
         let mut sound = false;
         self.notified = false;
@@ -209,7 +289,7 @@ impl Model {
         sound && !self.snapshot.preferences.quiet
     }
     pub fn submit(&mut self) {
-        if self.editor.text().is_empty() {
+        if !self.composer_enabled() || self.editor.text().is_empty() {
             return;
         }
         match commands::parse(
@@ -219,6 +299,12 @@ impl Model {
             self.reply,
         ) {
             Ok(Interaction::Request(command)) => {
+                if matches!(*command, Command::SelectRoom(_) | Command::OpenEvent { .. }) {
+                    let _ = self.editor.reset("");
+                    self.edited();
+                    self.navigate(*command);
+                    return;
+                }
                 let send_room = match &*command {
                     Command::Send { room, .. } => Some(*room),
                     _ => None,
@@ -227,7 +313,7 @@ impl Model {
                     && self
                         .sends
                         .values()
-                        .any(|(room, text)| Some(*room) == send_room && text == self.editor.text())
+                        .any(|(room, draft)| Some(*room) == send_room && draft.matches(self))
                 {
                     self.error = Some(
                         "This exact draft already has a pending send; inspect its delivery state"
@@ -237,7 +323,7 @@ impl Model {
                 }
                 if let Some(id) = self.dispatch(*command) {
                     if let Some(room) = send_room {
-                        self.sends.insert(id, (room, self.editor.text().into()));
+                        self.sends.insert(id, (room, self.draft()));
                     } else {
                         let _ = self.editor.reset("");
                         self.edited();
@@ -260,3 +346,7 @@ impl Model {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "../../Tests/Presentation/Interaction.rs"]
+mod tests;

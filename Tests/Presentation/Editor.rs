@@ -62,3 +62,42 @@ fn selected_mentions_keep_identity_until_edited_and_same_text_completion_is_undo
     editor.undo();
     assert_eq!(editor.mentions()[0].account, account);
 }
+
+#[test]
+fn completion_after_unicode_spaces_keeps_valid_byte_boundaries_in_restored_drafts() {
+    use crate::protocol::{Id, NetworkId};
+    let account = AccountId {
+        origin: NetworkId {
+            network: Id::from_bytes([1; 32]),
+            incarnation: Id::from_bytes([2; 32]),
+        },
+        local: Id::from_bytes([3; 32]),
+    };
+    for space in ['\u{a0}', '\u{2003}'] {
+        let prefix = format!("e\u{301}👩‍🚀{space}");
+        let text = format!("{prefix}@Al tail");
+        let mut editor = Editor::new(&text).unwrap();
+        editor.select(prefix.len(), prefix.len());
+        assert_eq!(&editor.text()[editor.completion_range()], "");
+        editor.select(prefix.len() + 3, prefix.len() + 3);
+        assert_eq!(&editor.text()[editor.completion_range()], "@Al");
+        editor
+            .complete_mention(editor.completion_range(), account, "Alice")
+            .unwrap();
+        assert_eq!(editor.text(), format!("{prefix}@Alice  tail"));
+        assert_eq!(editor.mentions()[0].start as usize, prefix.len());
+
+        let text = format!("{prefix}@Al");
+        editor.reset_draft(&text, &[]).unwrap();
+        assert_eq!(&editor.text()[editor.completion_range()], "@Al");
+        editor
+            .complete_mention(editor.completion_range(), account, "Alice")
+            .unwrap();
+        let mut reopened = Editor::default();
+        reopened
+            .reset_draft(editor.text(), editor.mentions())
+            .unwrap();
+        reopened.left(false);
+        assert_eq!(&reopened.text()[reopened.completion_range()], "@Alice");
+    }
+}
