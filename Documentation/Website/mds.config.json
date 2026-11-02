@@ -176,17 +176,17 @@
   "publicationEdits": [
     {
       "source": "Documentation/HyperNetContract.md",
-      "from": "https://github.com/Federated-Industrial-Laboratories/HyperNet/blob/b840c8b8e7d74fac71e898cf2c2eb7c660c57275/Documentation/ApplicationStreams.md",
+      "from": "https://github.com/Federated-Industrial-Laboratories/HyperNet/blob/f3b95f798def698087bd229dca9dcd0ec2c513e4/Documentation/ApplicationStreams.md",
       "to": "/docs/core/application-streams/"
     },
     {
       "source": "Documentation/HyperNetContract.md",
-      "from": "https://github.com/Federated-Industrial-Laboratories/HyperNet/blob/b840c8b8e7d74fac71e898cf2c2eb7c660c57275/Documentation/PermissionScopes.md",
+      "from": "https://github.com/Federated-Industrial-Laboratories/HyperNet/blob/f3b95f798def698087bd229dca9dcd0ec2c513e4/Documentation/PermissionScopes.md",
       "to": "/docs/core/permission-scopes/"
     },
     {
       "source": "Documentation/HyperNetContract.md",
-      "from": "https://github.com/Federated-Industrial-Laboratories/HyperNet/blob/b840c8b8e7d74fac71e898cf2c2eb7c660c57275/Documentation/Applications.md",
+      "from": "https://github.com/Federated-Industrial-Laboratories/HyperNet/blob/f3b95f798def698087bd229dca9dcd0ec2c513e4/Documentation/Applications.md",
       "to": "/docs/core/applications/"
     },
     {
@@ -196,7 +196,7 @@
     },
     {
       "source": "Documentation/HyperNetContract.md",
-      "from": "https://github.com/Federated-Industrial-Laboratories/HyperNet/blob/b840c8b8e7d74fac71e898cf2c2eb7c660c57275/Documentation/ApplicationChecks.md",
+      "from": "https://github.com/Federated-Industrial-Laboratories/HyperNet/blob/f3b95f798def698087bd229dca9dcd0ec2c513e4/Documentation/ApplicationChecks.md",
       "to": "/docs/core/application-checks/"
     },
     {
@@ -206,7 +206,7 @@
     },
     {
       "source": "Documentation/HyperNetContract.md",
-      "from": "https://github.com/Federated-Industrial-Laboratories/HyperNet/blob/b840c8b8e7d74fac71e898cf2c2eb7c660c57275/Documentation/Federation.md",
+      "from": "https://github.com/Federated-Industrial-Laboratories/HyperNet/blob/f3b95f798def698087bd229dca9dcd0ec2c513e4/Documentation/Federation.md",
       "to": "/docs/core/federation/"
     },
     {
@@ -216,12 +216,12 @@
     },
     {
       "source": "Documentation/IntegrationProfile.md",
-      "from": "https://github.com/Federated-Industrial-Laboratories/HyperNet/blob/b840c8b8e7d74fac71e898cf2c2eb7c660c57275/Documentation/AuthorityContract.md",
+      "from": "https://github.com/Federated-Industrial-Laboratories/HyperNet/blob/f3b95f798def698087bd229dca9dcd0ec2c513e4/Documentation/AuthorityContract.md",
       "to": "/docs/core/authority-contract/"
     },
     {
       "source": "Documentation/IntegrationProfile.md",
-      "from": "https://github.com/Federated-Industrial-Laboratories/HyperNet/blob/b840c8b8e7d74fac71e898cf2c2eb7c660c57275/Documentation/ApplicationChecks.md",
+      "from": "https://github.com/Federated-Industrial-Laboratories/HyperNet/blob/f3b95f798def698087bd229dca9dcd0ec2c513e4/Documentation/ApplicationChecks.md",
       "to": "/docs/core/application-checks/"
     },
     {
@@ -231,7 +231,7 @@
     },
     {
       "source": "Documentation/IntegrationProfile.md",
-      "from": "https://github.com/Federated-Industrial-Laboratories/HyperNet/blob/b840c8b8e7d74fac71e898cf2c2eb7c660c57275/Documentation/PrivateRoutes.md",
+      "from": "https://github.com/Federated-Industrial-Laboratories/HyperNet/blob/f3b95f798def698087bd229dca9dcd0ec2c513e4/Documentation/PrivateRoutes.md",
       "to": "/docs/core/private-routes/"
     }
   ],

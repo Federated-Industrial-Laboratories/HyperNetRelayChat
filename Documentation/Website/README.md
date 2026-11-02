@@ -68,9 +68,9 @@ source headings across updates. All relative HRC manual and license links resolv
 inside `/docs/hrc/`; MDS checks those paths and heading anchors. Local search is
 owned at `/docs/hrc/search/` and requires no external search service.
 
-Twelve explicit publication edits map pinned HyperNet 0.10.0 documentation URLs
+Twelve explicit publication edits map pinned Core 0.10.1 and Suite 0.10.0 documentation URLs
 to the existing `/docs/core/` and `/docs/suite/` routes. They match the published
-Core `b840c8b8e7d74fac71e898cf2c2eb7c660c57275` and Suite
+Core `f3b95f798def698087bd229dca9dcd0ec2c513e4` and Suite
 `3055f06a691fbc2f0214b4d9bb706a004d5c22ad` source identities. Each original URL
 must match exactly once. Code references and historical draft links remain as
 authored. No technical prose or code example is rewritten during publication.
