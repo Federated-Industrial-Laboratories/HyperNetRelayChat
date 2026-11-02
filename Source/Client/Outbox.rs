@@ -20,14 +20,15 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub struct Pending {
     pub action: VerifiedAction,
     pub last_response: Option<Response>,
+    pub abandoned: bool,
 }
 
 pub fn initialize(store: &mut Store) -> Result<()> {
     store.write(|tx|{
-        tx.execute_batch("CREATE TABLE IF NOT EXISTS client_outbox(window TEXT NOT NULL,operation TEXT NOT NULL,digest BLOB NOT NULL,action BLOB NOT NULL,response BLOB,terminal INTEGER NOT NULL DEFAULT 0,created INTEGER NOT NULL,expires INTEGER NOT NULL,PRIMARY KEY(window,operation));
+        tx.execute_batch("CREATE TABLE IF NOT EXISTS client_outbox(window TEXT NOT NULL,operation TEXT NOT NULL,digest BLOB NOT NULL,action BLOB NOT NULL,response BLOB,terminal INTEGER NOT NULL DEFAULT 0,created INTEGER NOT NULL,expires INTEGER NOT NULL,abandoned INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(window,operation));
             CREATE TABLE IF NOT EXISTS client_clock(singleton INTEGER PRIMARY KEY CHECK(singleton=1),floor INTEGER NOT NULL);
             INSERT OR IGNORE INTO client_clock VALUES(1,0);
-            CREATE TABLE IF NOT EXISTS client_drafts(room TEXT PRIMARY KEY,text TEXT NOT NULL,updated INTEGER NOT NULL);")?;
+            CREATE TABLE IF NOT EXISTS client_drafts(room TEXT PRIMARY KEY,text TEXT NOT NULL,updated INTEGER NOT NULL,mentions BLOB NOT NULL DEFAULT X'80',sending BLOB);")?;
         Ok(Commit::new((),b"client outbox schema 1".to_vec()))
     })?;
     Ok(())
@@ -57,22 +58,48 @@ pub fn prepare(
     if action.action().operation_id.window != window.id || now.upper_ms >= window.expires_ms {
         return Err(Error::Invalid);
     }
-    store.write(|tx|{
-        let now=clock(tx,now)?;
-        if now.upper_ms>=window.expires_ms{return Err(rusqlite::Error::InvalidQuery);}
-        let id=action.action().operation_id;
-        let previous:Option<Vec<u8>>=tx.query_row("SELECT action FROM client_outbox WHERE window=?1 AND operation=?2",params![id.window.as_hex(),id.operation.as_hex()],|r|r.get(0)).optional()?;
-        if let Some(previous)=previous {
-            if previous!=action.signed_bytes(){return Err(rusqlite::Error::InvalidQuery);}
-        }else{
-            let (count,bytes):(u64,u64)=tx.query_row("SELECT count(*),coalesce(sum(length(action)),0) FROM client_outbox WHERE terminal=0",[],|r|Ok((r.get(0)?,r.get(1)?)))?;
-            if count>=32||bytes+action.signed_bytes().len() as u64>8*1024*1024{return Err(rusqlite::Error::InvalidQuery);}
-            tx.execute("INSERT INTO client_outbox(window,operation,digest,action,created,expires) VALUES(?1,?2,?3,?4,?5,?6)",params![id.window.as_hex(),id.operation.as_hex(),action.digest().as_bytes(),action.signed_bytes(),now.lower_ms,window.expires_ms])?;
-        }
-        Ok(Commit::new((),action.digest().as_bytes().to_vec()))
+    store.write(|tx| {
+        prepare_transaction(tx, action, window, now)?;
+        Ok(Commit::new((), action.digest().as_bytes().to_vec()))
     })?;
     Ok(())
 }
+/// Join exact outbox preparation to the caller's guarded local cursor transaction.
+pub fn prepare_transaction(
+    tx: &rusqlite::Transaction<'_>,
+    action: &VerifiedAction,
+    window: &RetryWindow,
+    now: TimeBounds,
+) -> rusqlite::Result<()> {
+    if action.action().operation_id.window != window.id {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    let now = clock(tx, now)?;
+    if now.upper_ms >= window.expires_ms {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    let id = action.action().operation_id;
+    let previous: Option<(Vec<u8>, bool)> = tx
+        .query_row(
+            "SELECT action,abandoned FROM client_outbox WHERE window=?1 AND operation=?2",
+            params![id.window.as_hex(), id.operation.as_hex()],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    if let Some((previous, abandoned)) = previous {
+        if abandoned || previous != action.signed_bytes() {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+    } else {
+        let (count,bytes):(u64,u64)=tx.query_row("SELECT coalesce(sum(CASE WHEN abandoned=0 THEN 1 ELSE 0 END),0),coalesce(sum(length(action)),0) FROM client_outbox WHERE terminal=0",[],|r|Ok((r.get(0)?,r.get(1)?)))?;
+        if count >= 32 || bytes + action.signed_bytes().len() as u64 > 8 * 1024 * 1024 {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        tx.execute("INSERT INTO client_outbox(window,operation,digest,action,created,expires) VALUES(?1,?2,?3,?4,?5,?6)",params![id.window.as_hex(),id.operation.as_hex(),action.digest().as_bytes(),action.signed_bytes(),now.lower_ms,window.expires_ms])?;
+    }
+    Ok(())
+}
+
 pub fn record(
     store: &mut Store,
     action: &VerifiedAction,
@@ -105,17 +132,31 @@ pub fn record(
 }
 pub fn pending(store: &mut Store, key: &VerifyingKey) -> Result<Vec<Pending>> {
     Ok(store.read(Duration::from_secs(2),|db|{
-        let mut q=db.prepare("SELECT action,response FROM client_outbox WHERE terminal=0 ORDER BY created,operation LIMIT 32")?;
+        let mut q=db.prepare("SELECT action,response,abandoned FROM client_outbox WHERE terminal=0 ORDER BY abandoned,created,operation LIMIT 288")?;
         q.query_map([],|r|{
             let bytes:Vec<u8>=r.get(0)?;
             let action=verify_action(&bytes,key).map_err(|_|rusqlite::Error::InvalidQuery)?;
             let encoded:Option<Vec<u8>>=r.get(1)?;
             let last_response=encoded.map(|v|canonical_decode(&v,CRYPTO_FRAME_BYTES).and_then(|v|v.deserialized().map_err(|_|crate::protocol::Error::Encoding))).transpose().map_err(|_|rusqlite::Error::InvalidQuery)?;
-            Ok(Pending{action,last_response})
+            Ok(Pending{action,last_response,abandoned:r.get(2)?})
         })?.collect()
     })?)
 }
 pub fn save_draft(store: &mut Store, room: RoomId, text: &str) -> Result<()> {
+    save_draft_mentions(store, room, text, &[])
+}
+pub fn save_draft_mentions(
+    store: &mut Store,
+    room: RoomId,
+    text: &str,
+    mentions: &[crate::messaging::Mention],
+) -> Result<()> {
+    crate::messaging::mention_spans(text, mentions).map_err(|_| Error::Invalid)?;
+    let encoded = canonical_encode(
+        &Value::serialized(&mentions).map_err(|_| Error::Invalid)?,
+        8192,
+    )
+    .map_err(|_| Error::Invalid)?;
     if !text.is_empty() {
         crate::text::message(text).map_err(|_| Error::Invalid)?;
     }
@@ -131,11 +172,62 @@ pub fn save_draft(store: &mut Store, room: RoomId, text: &str) -> Result<()> {
             let exists:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM client_drafts WHERE room=?1)",[room.to_string()],|r|r.get(0))?;
             let count:u64=tx.query_row("SELECT count(*) FROM client_drafts",[],|r|r.get(0))?;
             if !exists&&count>=64{return Err(rusqlite::Error::InvalidQuery);}
-            tx.execute("INSERT INTO client_drafts VALUES(?1,?2,?3) ON CONFLICT(room) DO UPDATE SET text=excluded.text,updated=excluded.updated",params![room.to_string(),text,updated])?;
+            // Every save starts a new draft revision, including identical text.
+            tx.execute("INSERT INTO client_drafts(room,text,updated,mentions) VALUES(?1,?2,?3,?4) ON CONFLICT(room) DO UPDATE SET text=excluded.text,updated=excluded.updated,mentions=excluded.mentions,sending=NULL",params![room.to_string(),text,updated,encoded])?;
         }
-        Ok(Commit::new((),digest(text.as_bytes()).as_bytes().to_vec()))
+        Ok(Commit::new((),digest(&[text.as_bytes(),&encoded].concat()).as_bytes().to_vec()))
     })?;
     Ok(())
+}
+fn draft_operation(action: &Action) -> Result<Vec<u8>> {
+    canonical_encode(
+        &Value::serialized(&(
+            action.operation_id,
+            action_digest(action).map_err(|_| Error::Invalid)?,
+        ))
+        .map_err(|_| Error::Invalid)?,
+        1024,
+    )
+    .map_err(|_| Error::Invalid)
+}
+/// Bind the current draft revision to one exact send before its first submission.
+/// Later saves remove this binding; resolution must never infer ownership from text.
+pub(super) fn bind_draft(store: &mut Store, action: &Action) -> Result<()> {
+    let Target::Room(room) = action.target else {
+        return Err(Error::Invalid);
+    };
+    let message: crate::messaging::Send = action.body.deserialized().map_err(|_| Error::Invalid)?;
+    let mentions = canonical_encode(
+        &Value::serialized(&message.mentions).map_err(|_| Error::Invalid)?,
+        8192,
+    )
+    .map_err(|_| Error::Invalid)?;
+    let binding = draft_operation(action)?;
+    store.write(|tx| {
+        let changed = tx.execute(
+            "UPDATE client_drafts SET sending=?1 WHERE room=?2 AND text=?3 AND mentions=?4",
+            params![binding, room.to_string(), message.text, mentions],
+        )?;
+        if changed != 1 {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        Ok(Commit::new((), binding))
+    })?;
+    Ok(())
+}
+/// A verified committed outcome can consume only the revision bound to that operation.
+pub(super) fn clear_sent_draft(store: &mut Store, action: &Action) -> Result<bool> {
+    let Target::Room(room) = action.target else {
+        return Err(Error::Invalid);
+    };
+    let binding = draft_operation(action)?;
+    Ok(store.write(|tx| {
+        let changed = tx.execute(
+            "DELETE FROM client_drafts WHERE room=?1 AND sending=?2",
+            params![room.to_string(), binding],
+        )?;
+        Ok(Commit::new(changed == 1, binding))
+    })?)
 }
 pub fn draft(store: &mut Store, room: RoomId) -> Result<Option<String>> {
     Ok(store.read(Duration::from_secs(1), |db| {
@@ -213,4 +305,171 @@ pub fn retain(store: &mut Store, now: TimeBounds) -> Result<()> {
         Ok(Commit::new((), b"client retention".to_vec()))
     })?;
     Ok(())
+}
+
+pub fn draft_mentions(store: &mut Store, room: RoomId) -> Result<Vec<crate::messaging::Mention>> {
+    Ok(store.read(Duration::from_secs(1), |db| {
+        let bytes: Option<Vec<u8>> = db
+            .query_row(
+                "SELECT mentions FROM client_drafts WHERE room=?1",
+                [room.to_string()],
+                |r| r.get(0),
+            )
+            .optional()?;
+        bytes
+            .map(|b| {
+                canonical_decode(&b, 8192)
+                    .map_err(|_| rusqlite::Error::InvalidQuery)?
+                    .deserialized()
+                    .map_err(|_| rusqlite::Error::InvalidQuery)
+            })
+            .transpose()
+            .map(|v| v.unwrap_or_default())
+    })?)
+}
+pub(super) fn migrate(store: &mut Store) -> storage::Result<()> {
+    let (drafts, outbox) = store.read(Duration::from_secs(1), |db| {
+        let columns = |sql| -> rusqlite::Result<Vec<String>> {
+            let stmt = db.prepare(sql)?;
+            Ok(stmt.column_names().into_iter().map(str::to_owned).collect())
+        };
+        Ok((
+            columns("SELECT * FROM client_drafts LIMIT 0")?,
+            columns("SELECT * FROM client_outbox LIMIT 0")?,
+        ))
+    })?;
+    let old_drafts = drafts == ["room", "text", "updated"];
+    let unbound_drafts = old_drafts || drafts == ["room", "text", "updated", "mentions"];
+    let old_outbox = outbox
+        == [
+            "window",
+            "operation",
+            "digest",
+            "action",
+            "response",
+            "terminal",
+            "created",
+            "expires",
+        ];
+    if (!unbound_drafts && drafts != ["room", "text", "updated", "mentions", "sending"])
+        || (!old_outbox
+            && outbox
+                != [
+                    "window",
+                    "operation",
+                    "digest",
+                    "action",
+                    "response",
+                    "terminal",
+                    "created",
+                    "expires",
+                    "abandoned",
+                ])
+    {
+        return Err(storage::Error::InvalidInput);
+    }
+    if !unbound_drafts && !old_outbox {
+        return Ok(());
+    }
+    store.write(|db| {
+        if old_drafts {
+            db.execute_batch(
+                "ALTER TABLE client_drafts ADD COLUMN mentions BLOB NOT NULL DEFAULT X'80'",
+            )?;
+        }
+        if unbound_drafts {
+            db.execute_batch("ALTER TABLE client_drafts ADD COLUMN sending BLOB")?;
+        }
+        if old_outbox {
+            db.execute_batch(
+                "ALTER TABLE client_outbox ADD COLUMN abandoned INTEGER NOT NULL DEFAULT 0",
+            )?;
+        }
+        Ok(Commit::new((), b"HRC.ClientDraftBinding.Schema.1".to_vec()))
+    })
+}
+/// Stop resubmitting this exact operation without claiming that it was rejected or retracting it.
+pub fn abandon(store: &mut Store, id: OperationId, digest: Id) -> Result<()> {
+    store.write(|db| {
+        let (saved, terminal, abandoned): (Vec<u8>, bool, bool) = db.query_row(
+            "SELECT digest,terminal,abandoned FROM client_outbox WHERE window=?1 AND operation=?2",
+            params![id.window.as_hex(), id.operation.as_hex()],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )?;
+        if saved != digest.as_bytes() || terminal {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        if !abandoned {
+            let count: u64 = db.query_row(
+                "SELECT count(*) FROM client_outbox WHERE terminal=0 AND abandoned=1",
+                [],
+                |r| r.get(0),
+            )?;
+            if count >= 256 {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+            db.execute(
+                "UPDATE client_outbox SET abandoned=1 WHERE window=?1 AND operation=?2",
+                params![id.window.as_hex(), id.operation.as_hex()],
+            )?;
+        }
+        Ok(Commit::new(
+            (),
+            canonical_encode(
+                &Value::serialized(&("HRC.AbandonRetry", id, digest))
+                    .map_err(|_| rusqlite::Error::InvalidQuery)?,
+                4096,
+            )
+            .map_err(|_| rusqlite::Error::InvalidQuery)?,
+        ))
+    })?;
+    Ok(())
+}
+
+/// Read a durable terminal outcome; unresolved or abandoned identities return None.
+pub fn outcome(store: &mut Store, id: OperationId, digest: Id) -> Result<Option<Outcome>> {
+    Ok(store.read(Duration::from_secs(1), |db| {
+        let (saved, terminal, response): (Vec<u8>, bool, Option<Vec<u8>>) = db.query_row(
+            "SELECT digest,terminal,response FROM client_outbox WHERE window=?1 AND operation=?2",
+            params![id.window.as_hex(), id.operation.as_hex()],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )?;
+        if saved != digest.as_bytes() {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        if !terminal {
+            return Ok(None);
+        }
+        let response: Response = canonical_decode(
+            &response.ok_or(rusqlite::Error::InvalidQuery)?,
+            CRYPTO_FRAME_BYTES,
+        )
+        .map_err(|_| rusqlite::Error::InvalidQuery)?
+        .deserialized()
+        .map_err(|_| rusqlite::Error::InvalidQuery)?;
+        let outcome = match response.outcome {
+            Outcome::Committed { .. } | Outcome::Rejected { .. }
+                if response.operation_id == id && response.action_digest == digest =>
+            {
+                response.outcome
+            }
+            Outcome::Result { body } => {
+                let resolved: crate::home::ResolveResult = body
+                    .deserialized()
+                    .map_err(|_| rusqlite::Error::InvalidQuery)?;
+                if resolved.operation_id != id || resolved.action_digest != digest {
+                    return Err(rusqlite::Error::InvalidQuery);
+                }
+                resolved.outcome
+            }
+            _ => return Err(rusqlite::Error::InvalidQuery),
+        };
+        if !matches!(
+            outcome,
+            Outcome::Committed { .. } | Outcome::Rejected { .. }
+        ) {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        Ok(Some(outcome))
+    })?)
 }

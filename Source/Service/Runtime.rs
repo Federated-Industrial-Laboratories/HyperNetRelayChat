@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Authenticated HRC sessions over mandatory HyperNet streams.
-use super::{Config, files, io};
+use super::{Config, admission, files, io};
 use crate::{
     clock,
-    home::{AuthenticatedSession, Home},
+    home::{AuthenticatedSession, Cancellation, Home},
     hypernet::{Companion, Peer, Stream},
     protocol::*,
 };
@@ -39,6 +39,12 @@ pub enum Error {
     RetryWindow,
     #[error("the ingress budget was exceeded")]
     RateLimited,
+    #[error("authority check admission is busy")]
+    AuthorityAdmissionBusy,
+    #[error("authority check admission was stopped")]
+    AuthorityAdmissionStopped,
+    #[error("the enclosing authority check deadline expired")]
+    AuthorityAdmissionExpired,
 }
 impl Error {
     pub fn code(&self) -> &'static str {
@@ -53,6 +59,9 @@ impl Error {
             Self::HandshakeExpired => "HandshakeExpired",
             Self::RetryWindow => "RetryWindowUnavailable",
             Self::RateLimited => "IngressRateLimited",
+            Self::AuthorityAdmissionBusy => "AuthorityAdmissionBusy",
+            Self::AuthorityAdmissionStopped => "AuthorityAdmissionStopped",
+            Self::AuthorityAdmissionExpired => "AuthorityAdmissionExpired",
         }
     }
 }
@@ -75,9 +84,58 @@ struct Shared {
     ingress: Mutex<Budget>,
     diagnostics: Option<Mutex<Budget>>,
     diagnostic_lines: AtomicUsize,
+    authority_admission: admission::Admission,
+    stop: Arc<AtomicBool>,
 }
 impl Shared {
+    fn check_authority(
+        &self,
+        stream: &Stream,
+        digest: Id,
+        end: Option<u64>,
+        cancel: &Cancellation,
+        operation: &'static str,
+    ) -> Result<crate::hypernet::AuthorityCheck> {
+        let map = |error| match error {
+            admission::Error::Busy => Error::AuthorityAdmissionBusy,
+            admission::Error::Stopped => Error::AuthorityAdmissionStopped,
+            admission::Error::Expired => Error::AuthorityAdmissionExpired,
+            admission::Error::Unavailable => Error::State,
+        };
+        let permit = self
+            .authority_admission
+            .acquire(end, || {
+                self.stop.load(Ordering::Acquire)
+                    || cancel.is_cancelled()
+                    || !stream.check_authority_supported()
+            })
+            .map_err(map)?;
+        let timeout = permit.check_timeout().map_err(map)?;
+        let result = self
+            .companion
+            .check_authority(stream, *digest.as_bytes(), timeout)
+            .map_err(|error| {
+                self.report(operation, error.code());
+                Error::Authority
+            });
+        // The finite observation is used below without retaining the admission slot.
+        drop(permit);
+        if result.as_ref().is_ok_and(|check| check.permitted())
+            && end.is_some_and(|end| !clock::boot_ms().is_ok_and(|now| now < end))
+        {
+            return Err(Error::AuthorityAdmissionExpired);
+        }
+        result
+    }
     fn report(&self, event: &'static str, code: &'static str) {
+        self.report_check(event, code, None);
+    }
+    fn report_check(
+        &self,
+        event: &'static str,
+        code: &'static str,
+        check: Option<&crate::hypernet::AuthorityCheck>,
+    ) {
         let Some(budget) = &self.diagnostics else {
             return;
         };
@@ -94,8 +152,35 @@ impl Shared {
             return;
         }
         drop(budget);
-        // Only fixed categories enter diagnostics; no peer-controlled text or identifiers.
-        eprintln!("{{\"event\":\"{event}\",\"code\":\"{code}\"}}");
+        // Only fixed categories and freshness timing enter diagnostics, never peer identifiers or content.
+        let authority = check.and_then(|check| {
+            let value = serde_json::to_value(check).ok()?;
+            let mut fields = serde_json::Map::new();
+            for name in [
+                "disposition",
+                "receiptDisposition",
+                "companionStartedBootMs",
+                "companionDeadlineBootMs",
+                "receiptNotAfterBootMs",
+                "usableUntilBootMs",
+                "usableNow",
+            ] {
+                fields.insert(name.into(), value.get(name)?.clone());
+            }
+            fields.insert(
+                "certified".into(),
+                serde_json::Value::Bool(check.certified()),
+            );
+            Some(serde_json::Value::Object(fields))
+        });
+        eprintln!(
+            "{}",
+            serde_json::json!({"event":event,"code":code,"bootMs":now,"authority":authority})
+        );
+    }
+    fn authentication(&self, stage: &'static str) -> Error {
+        self.report("SessionAuthenticationFailed", stage);
+        Error::Authentication
     }
 }
 /// Own at most one periodic storage task without performing disk work on accept.
@@ -193,7 +278,9 @@ pub fn run_with_ready(
         config.descriptor.home,
         signer.clone(),
     )
-    .map_err(|_| Error::State)?;
+    .map_err(|_| Error::State)?
+    .with_motd(config.motd.clone())
+    .map_err(|_| Error::Configuration)?;
     config.clock.sample().map_err(|_| Error::Clock)?;
     let companion = Companion::new(&config.companion).map_err(|_| Error::Transport)?;
     let status = companion.status().map_err(|_| Error::Transport)?;
@@ -210,6 +297,8 @@ pub fn run_with_ready(
         ingress: Mutex::new(Budget::new(64, 16)),
         diagnostics: diagnostics.then(|| Mutex::new(Budget::new(1, 8))),
         diagnostic_lines: AtomicUsize::new(128),
+        authority_admission: admission::Admission::default(),
+        stop: Arc::clone(&stop),
     });
     ready(&shared.config.descriptor)?;
     let mut connections: Vec<(Arc<Stream>, thread::JoinHandle<()>)> = Vec::new();
@@ -287,7 +376,7 @@ fn frame(stream: &Stream, kind: FrameKind, payload: Vec<u8>, timeout: Duration) 
 fn serve(shared: &Shared, stream: &Stream) -> Result<()> {
     let handshake = Handshake(&shared.handshakes);
     let Peer::Incoming(peer) = stream.peer() else {
-        return Err(Error::Authentication);
+        return Err(shared.authentication("IncomingPeerRequired"));
     };
     let home = shared.config.descriptor.home;
     if stream.peer().protocol() != PROTOCOL
@@ -296,9 +385,10 @@ fn serve(shared: &Shared, stream: &Stream) -> Result<()> {
         || stream.peer().service() != home.service.as_hex()
         || !stream.check_authority_supported()
     {
-        return Err(Error::Authentication);
+        return Err(shared.authentication("TransportContextBinding"));
     }
-    let principal = Id::from_hex(peer.principal()).map_err(|_| Error::Authentication)?;
+    let principal =
+        Id::from_hex(peer.principal()).map_err(|_| shared.authentication("PrincipalEncoding"))?;
     let end = clock::boot_ms().map_err(|_| Error::Clock)? + 5000;
     let incoming = io::receive(stream, remaining(end)?).map_err(|_| Error::Transport)?;
     if incoming.kind != FrameKind::Hello {
@@ -312,7 +402,7 @@ fn serve(shared: &Shared, stream: &Stream) -> Result<()> {
             .iter()
             .any(|v| !CAPABILITIES.contains(&v.as_str()))
     {
-        return Err(Error::Authentication);
+        return Err(shared.authentication("HelloBinding"));
     }
     let endpoint = shared
         .home
@@ -320,9 +410,9 @@ fn serve(shared: &Shared, stream: &Stream) -> Result<()> {
         .map_err(|_| Error::State)?
         .endpoint(hello.account, hello.endpoint)
         .map_err(|_| Error::State)?
-        .ok_or(Error::Authentication)?;
+        .ok_or_else(|| shared.authentication("EndpointUnavailable"))?;
     if endpoint.principal != principal {
-        return Err(Error::Authentication);
+        return Err(shared.authentication("EndpointPrincipalBinding"));
     }
     let now = shared.config.clock.sample().map_err(|_| Error::Clock)?;
     let challenge = SessionChallenge {
@@ -335,7 +425,7 @@ fn serve(shared: &Shared, stream: &Stream) -> Result<()> {
         service_boot: shared.boot,
         transport_principal: principal,
         transport_session: Id::from_hex(stream.peer().session())
-            .map_err(|_| Error::Authentication)?,
+            .map_err(|_| shared.authentication("TransportSessionEncoding"))?,
         transport_generation: stream.peer().generation(),
         expires_ms: now.lower_ms + 5000,
     };
@@ -346,10 +436,10 @@ fn serve(shared: &Shared, stream: &Stream) -> Result<()> {
     frame(stream, FrameKind::Challenge, signed, remaining(end)?)?;
     let incoming = io::receive(stream, remaining(end)?).map_err(|_| Error::Transport)?;
     if incoming.kind != FrameKind::Proof {
-        return Err(Error::Authentication);
+        return Err(shared.authentication("ProofFrameKind"));
     }
-    let proof =
-        verify_proof(&incoming.payload, &endpoint.key).map_err(|_| Error::Authentication)?;
+    let proof = verify_proof(&incoming.payload, &endpoint.key)
+        .map_err(|_| shared.authentication("ProofSignature"))?;
     let p = proof.value();
     if p.home != home
         || p.account != hello.account
@@ -357,16 +447,15 @@ fn serve(shared: &Shared, stream: &Stream) -> Result<()> {
         || p.client_nonce != hello.client_nonce
         || p.challenge_digest != challenge_digest
     {
-        return Err(Error::Authentication);
+        return Err(shared.authentication("ProofBinding"));
     }
-    let check = shared
-        .companion
-        .check_authority(
-            stream,
-            *proof.digest().as_bytes(),
-            remaining(end)?.min(Duration::from_secs(1)),
-        )
-        .map_err(|_| Error::Authority)?;
+    let check = shared.check_authority(
+        stream,
+        proof.digest(),
+        Some(end),
+        &Cancellation::default(),
+        "SessionAuthority",
+    )?;
     let now = shared.config.clock.sample().map_err(|_| Error::Clock)?;
     if now.upper_ms >= challenge.expires_ms || clock::boot_ms().map_err(|_| Error::Clock)? >= end {
         return Err(Error::HandshakeExpired);
@@ -378,7 +467,7 @@ fn serve(shared: &Shared, stream: &Stream) -> Result<()> {
         .home
         .lock()
         .map_err(|_| Error::State)?
-        .open_window(&endpoint, now, &|| check.permitted())
+        .open_window(&endpoint, now, &|| current(&check, Some(end)))
         .map_err(|_| Error::RetryWindow)?;
     let session = AuthenticatedSession::new(
         &endpoint,
@@ -428,7 +517,25 @@ fn serve(shared: &Shared, stream: &Stream) -> Result<()> {
         {
             return Err(Error::Frame);
         }
-        let response = execute(shared, stream, &verified, &session);
+        if verified.action().operation == Operation::SearchQuery {
+            search(
+                shared,
+                stream,
+                &verified,
+                &session,
+                &endpoint.key,
+                &mut budget,
+            )?;
+            continue;
+        }
+        let response = execute(
+            shared,
+            stream,
+            &verified,
+            &session,
+            &Cancellation::default(),
+            None,
+        );
         frame(
             stream,
             FrameKind::Response,
@@ -442,6 +549,8 @@ fn execute(
     stream: &Stream,
     action: &VerifiedAction,
     session: &AuthenticatedSession,
+    cancel: &Cancellation,
+    end: Option<u64>,
 ) -> Response {
     let base = |outcome| Response {
         home: shared.config.descriptor.home,
@@ -456,21 +565,37 @@ fn execute(
             retry_after_ms: Some(1000),
         })
     };
-    let Ok(check) = shared.companion.check_authority(
+    let check = match shared.check_authority(
         stream,
-        *action.digest().as_bytes(),
-        Duration::from_secs(1),
-    ) else {
-        return refused(ErrorCode::Unavailable, "TransportAuthority");
+        action.digest(),
+        end,
+        cancel,
+        action.action().operation.name(),
+    ) {
+        Ok(check) => check,
+        Err(error) => {
+            shared.report(action.action().operation.name(), error.code());
+            if matches!(error, Error::AuthorityAdmissionBusy) {
+                return refused(ErrorCode::Overloaded, error.code());
+            }
+            if matches!(
+                error,
+                Error::AuthorityAdmissionStopped | Error::AuthorityAdmissionExpired
+            ) {
+                return refused(ErrorCode::Unavailable, error.code());
+            }
+            return refused(ErrorCode::Unavailable, "TransportAuthority");
+        }
     };
     if !check.permitted() {
         use crate::hypernet::Disposition;
         let (code, detail) = match check.disposition() {
             Disposition::Denied if check.certified() => (ErrorCode::Denied, "TransportDenied"),
-            Disposition::Expired => (ErrorCode::Expired, "TransportAuthorityExpired"),
+            Disposition::Expired => (ErrorCode::Unavailable, "TransportAuthorityExpired"),
             Disposition::NotActive => (ErrorCode::Unavailable, "TransportInactive"),
             _ => (ErrorCode::Unavailable, "TransportAuthority"),
         };
+        shared.report_check(action.action().operation.name(), detail, Some(&check));
         return refused(code, detail);
     }
     let Ok(now) = shared.config.clock.sample() else {
@@ -479,8 +604,115 @@ fn execute(
     let Ok(mut home) = shared.home.try_lock() else {
         return refused(ErrorCode::Overloaded, "OperationBusy");
     };
-    match home.execute(action, session, now, &|| check.permitted()) {
+    match home.execute_cancellable(action, session, now, &|| current(&check, end), cancel) {
         Ok(response) => response,
         Err(_) => base(Outcome::Unknown),
     }
+}
+
+fn current(check: &crate::hypernet::AuthorityCheck, end: Option<u64>) -> bool {
+    check.permitted() && end.is_none_or(|end| clock::boot_ms().is_ok_and(|now| now < end))
+}
+
+/// Only an exact authenticated cancellation can accompany the single in-flight query.
+fn search(
+    shared: &Shared,
+    stream: &Stream,
+    query: &VerifiedAction,
+    session: &AuthenticatedSession,
+    key: &VerifyingKey,
+    budget: &mut Budget,
+) -> Result<()> {
+    let cancel = Cancellation::default();
+    let end = clock::boot_ms().map_err(|_| Error::Clock)? + 10000;
+    thread::scope(|scope| {
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        let token = cancel.clone();
+        scope.spawn(move || {
+            let response = execute(shared, stream, query, session, &token, Some(end));
+            let _ = sender.send(response);
+        });
+        let mut control = None;
+        let result = (|| {
+            loop {
+                if let Ok(response) = receiver.try_recv() {
+                    frame(
+                        stream,
+                        FrameKind::Response,
+                        sign_response(&response, &shared.signer).map_err(|_| Error::Frame)?,
+                        remaining(end)?.min(Duration::from_secs(5)),
+                    )?;
+                    if let Some(control) = control {
+                        let response = execute(
+                            shared,
+                            stream,
+                            &control,
+                            session,
+                            &Cancellation::accepted_control(),
+                            Some(end),
+                        );
+                        frame(
+                            stream,
+                            FrameKind::Response,
+                            sign_response(&response, &shared.signer).map_err(|_| Error::Frame)?,
+                            remaining(end)?.min(Duration::from_secs(5)),
+                        )?;
+                    }
+                    return Ok(());
+                }
+                if !stream
+                    .wait_readable(remaining(end)?.min(Duration::from_millis(25)))
+                    .map_err(|_| Error::Transport)?
+                {
+                    continue;
+                }
+                if control.is_some() {
+                    return Err(Error::RateLimited);
+                }
+                let incoming = io::receive(stream, remaining(end)?.min(Duration::from_secs(5)))
+                    .map_err(|_| Error::Transport)?;
+                let now = clock::boot_ms().map_err(|_| Error::Clock)?;
+                if incoming.kind != FrameKind::Action
+                    || !budget.admit(now)
+                    || !shared.ingress.lock().map_err(|_| Error::State)?.admit(now)
+                {
+                    return Err(Error::RateLimited);
+                }
+                let verified =
+                    verify_action(&incoming.payload, key).map_err(|_| Error::Authentication)?;
+                let body: crate::home::Resolve = verified
+                    .action()
+                    .body
+                    .deserialized()
+                    .map_err(|_| Error::Frame)?;
+                if verified.action().operation != Operation::SearchCancel
+                    || verified.action().target != Target::Service
+                    || verified.action().home != query.action().home
+                    || verified.action().actor != query.action().actor
+                    || body.operation_id != query.action().operation_id
+                    || body.action_digest != query.digest()
+                {
+                    return Err(Error::Authentication);
+                }
+                let authority = shared.check_authority(
+                    stream,
+                    verified.digest(),
+                    Some(end),
+                    &Cancellation::default(),
+                    "SearchCancel",
+                )?;
+                if !current(&authority, Some(end)) {
+                    return Err(Error::Authority);
+                }
+                // Cancellation only stops work. Its response still receives full current Home admission.
+                cancel.cancel();
+                control = Some(verified);
+            }
+        })();
+        if result.is_err() {
+            cancel.cancel();
+            stream.close();
+        }
+        result
+    })
 }

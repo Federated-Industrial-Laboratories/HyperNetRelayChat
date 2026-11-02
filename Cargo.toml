@@ -14,6 +14,10 @@ path = "Source/Lib.rs"
 name = "hrc"
 path = "Source/Main.rs"
 
+[[example]]
+name = "native-local-client"
+path = "Tests/Integration/NativeLocalClient.rs"
+
 [dependencies]
 clap = { version = "4.6.7", features = ["derive"] }
 serde = { version = "1.0.229", features = ["derive"] }
@@ -39,3 +43,7 @@ openmls_basic_credential = "=0.6.0"
 openmls_traits = "=0.6.0"
 openmls_sqlite_storage = "=0.3.0"
 tls_codec = { version = "=0.5.0", features = ["derive", "std"] }
+eframe = { version = "=0.37.0", default-features = false, features = ["accesskit", "clipboard", "default_fonts", "system_fonts", "glow", "wayland", "x11"] }
+crossterm = { version = "=0.29.0", default-features = false, features = ["events", "bracketed-paste"] }
+signal-hook = "=0.3.18"
+time = { version = "=0.3.55", features = ["formatting", "parsing", "macros"] }

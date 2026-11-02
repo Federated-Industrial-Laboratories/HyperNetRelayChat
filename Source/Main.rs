@@ -1,6 +1,16 @@
 //! HyperNet Relay Chat command-line interface.
+#[path = "Presentation/Commands.rs"]
+mod commands;
 #[path = "Cli.rs"]
 mod conversation;
+#[path = "Presentation/Display.rs"]
+mod display;
+#[path = "Gui/Mod.rs"]
+mod gui;
+#[path = "Presentation/Interaction.rs"]
+mod interaction;
+#[path = "Tui/Mod.rs"]
+mod tui;
 use clap::{Args, Parser, Subcommand};
 use hrc::hypernet::{Companion, Peer};
 use serde_json::{Value, json};
@@ -21,6 +31,14 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Open the graphical conversation client.
+    Gui(Interactive),
+    /// Open the interactive terminal client.
+    Tui(Interactive),
+    /// Run a bounded deterministic room-help bot with a separately enrolled agent profile.
+    Bot(Bot),
+    /// Stop automatic retries of an exact pending operation while retaining its unknown outcome.
+    Abandon(conversation::Abandon),
     /// Administer a home HRC service.
     Service {
         #[command(subcommand)]
@@ -72,6 +90,83 @@ enum Command {
         #[command(subcommand)]
         command: Transport,
     },
+}
+
+#[derive(Args)]
+struct Interactive {
+    /// Existing encrypted endpoint profile directory.
+    #[arg(long)]
+    profile: PathBuf,
+    /// Open retained history and drafts without attempting a connection.
+    #[arg(long)]
+    offline: bool,
+}
+
+#[derive(Args)]
+struct Bot {
+    #[arg(long)]
+    profile: PathBuf,
+    /// Joined rooms; repeat for at most eight rooms.
+    #[arg(long, required = true)]
+    room: Vec<hrc::protocol::RoomId>,
+    /// Exact bounded response to a new direct human !help message.
+    #[arg(long)]
+    help_text: String,
+    #[arg(long, default_value_t=5000, value_parser=clap::value_parser!(u64).range(1000..=60000))]
+    poll_interval_ms: u64,
+    /// Explicit current autonomous delegation; otherwise participate independently.
+    #[arg(long)]
+    grant: Option<hrc::protocol::Id>,
+    /// Replace a stale cursor and catch up without triggering historical messages.
+    #[arg(long)]
+    resynchronise: bool,
+}
+fn bot(options: Bot) -> Result<(), Failure> {
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let interrupt = signal_hook::flag::register(signal_hook::consts::SIGINT, stop.clone())
+        .map_err(|_| Failure("SignalControlUnavailable"))?;
+    let terminate = match signal_hook::flag::register(signal_hook::consts::SIGTERM, stop.clone()) {
+        Ok(id) => id,
+        Err(_) => {
+            signal_hook::low_level::unregister(interrupt);
+            return Err(Failure("SignalControlUnavailable"));
+        }
+    };
+    let ready_stop = stop.clone();
+    let result = hrc::bot::run_observed(
+        hrc::bot::Config {
+            profile: options.profile,
+            rooms: options.room,
+            help: options.help_text,
+            poll_interval_ms: options.poll_interval_ms,
+            grant: options.grant,
+            resynchronise: options.resynchronise,
+        },
+        stop,
+        move || {
+            if output(&json!({"status":"BotReady","meaning":"InitialAuthorisedCatchUpComplete"}))
+                .is_err()
+            {
+                ready_stop.store(true, std::sync::atomic::Ordering::Release);
+            }
+        },
+    );
+    signal_hook::low_level::unregister(interrupt);
+    signal_hook::low_level::unregister(terminate);
+    result.map_err(|error| {
+        Failure(match error {
+            hrc::bot::Error::Configuration => "InvalidBotConfiguration",
+            hrc::bot::Error::AgentRequired => "BotAgentRequired",
+            hrc::bot::Error::State => "BotStateUnavailable",
+            hrc::bot::Error::Grant => "BotGrantUnavailable",
+            hrc::bot::Error::ResynchronisationRequired => "BotResynchronisationRequired",
+            hrc::bot::Error::PendingOutcome => "BotOutcomeUnknown",
+            hrc::bot::Error::Denied => "BotPermissionDenied",
+            hrc::bot::Error::Client(error) => error.code(),
+            hrc::bot::Error::RetryLater { .. } => "BotTemporarilyUnavailable",
+        })
+    })?;
+    output(&json!({"status":"BotStopped"}))
 }
 
 #[derive(Subcommand)]
@@ -214,6 +309,9 @@ fn run(command: Transport) -> Result<(), Failure> {
 
 fn main() -> ExitCode {
     let result = match Cli::parse().command {
+        Command::Gui(options) => gui::run(&options.profile, options.offline).map_err(Failure),
+        Command::Tui(options) => tui::run(&options.profile, options.offline).map_err(Failure),
+        Command::Bot(options) => bot(options),
         Command::Transport { command } => run(command),
         command => {
             let result = match command {
@@ -231,7 +329,9 @@ fn main() -> ExitCode {
                     conversation::submit(&profile, &candidate)
                 }
                 Command::Resolve { profile } => conversation::resolve(&profile),
-                Command::Transport { .. } => unreachable!(),
+                Command::Abandon(request) => conversation::abandon(request),
+                Command::Transport { .. } | Command::Gui(_) | Command::Tui(_) => unreachable!(),
+                Command::Bot(_) => unreachable!(),
             };
             result.map_err(Failure).and_then(|v| output(&v))
         }

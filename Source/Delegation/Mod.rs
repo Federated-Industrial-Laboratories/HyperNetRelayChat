@@ -163,7 +163,11 @@ pub(crate) fn authorize(
         return Err(Fault::Reject(ErrorCode::Expired, "GrantValidity"));
     }
     home::check_revision(action, Revision::Grant, grant.reference.generation)?;
-    if action.operation == Operation::ApprovalPrepare {
+    if action.operation == Operation::ApprovalPrepare
+        || (action.operation == Operation::SearchCancel
+            && action.target == Target::Service
+            && grant.scope.operations.contains(&Operation::SearchQuery))
+    {
         return Ok(Permit {
             history_from: grant.scope.history_from_ms,
             history_until: grant.scope.history_until_ms,
@@ -234,6 +238,7 @@ fn allowed(operation: Operation) -> bool {
             | Operation::MessageReply
             | Operation::MessageAction
             | Operation::HistoryPage
+            | Operation::HistoryContext
             | Operation::SearchQuery
             | Operation::EventsSubscribe
             | Operation::EventsResume
@@ -259,6 +264,7 @@ fn reference(action: &Action) -> Domain<GrantRef> {
 }
 pub(crate) fn operate(db: &Transaction<'_>, action: &Action, now: TimeBounds) -> Domain<Outcome> {
     match action.operation {
+        Operation::DelegationList => list(db, action),
         Operation::DelegationCreate => create(db, action, now),
         Operation::ApprovalPrepare => prepare(db, action, now),
         Operation::ApprovalApprove | Operation::ApprovalReject => decide(db, action, now),
@@ -533,4 +539,31 @@ fn decide(db: &Transaction<'_>, action: &Action, now: TimeBounds) -> Domain<Outc
         ],
     )?;
     home::committed(db, None, Value::Null)
+}
+
+fn list(db: &Connection, action: &Action) -> Domain<Outcome> {
+    home::inspection::own(action)?;
+    let p = home::inspection::request(action)?;
+    let mut stmt=db.prepare("SELECT id FROM hrc_grants WHERE (owner=?1 OR (agent=?1 AND endpoint=?4)) AND id>?2 ORDER BY id LIMIT ?3")?;
+    let ids = stmt
+        .query_map(
+            params![
+                action.actor.acting().account.to_string(),
+                p.after.unwrap_or_default(),
+                u32::from(p.limit) + 1,
+                action.actor.acting().endpoint.as_hex()
+            ],
+            |r| r.get::<_, String>(0),
+        )?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut rows = Vec::new();
+    for id in ids {
+        let grant = load(
+            db,
+            id.parse()
+                .map_err(|_| Fault::Sql(rusqlite::Error::InvalidQuery))?,
+        )?;
+        rows.push((id, grant));
+    }
+    home::inspection::page(rows, p.limit)
 }

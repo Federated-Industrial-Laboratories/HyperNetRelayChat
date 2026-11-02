@@ -221,13 +221,13 @@ operation-specific target compatibility remain feature-owner checks.
 
 | Operation codes | Meaning in code order |
 | --- | --- |
-| 1, 2 | Account.SetNickname, Presence.Set |
-| 10-14 | Room.Create, Join, Leave, SetTopic, List |
+| 1-5 | Account.SetNickname, Presence.Set, Account.Inspect, Agent.List, Service.Inspect |
+| 10-15 | Room.Create, Join, Leave, SetTopic, List, Inspect |
 | 20-22 | Message.Send, Reply, Action |
-| 30-36 | History.Page, Search.Query, Search.Cancel, Events.Subscribe, Events.Resume, Unread.Set, Operation.Resolve |
-| 40-44 | Delegation.Create, Inspect, Pause, Resume, Revoke |
+| 30-37 | History.Page, Search.Query, Search.Cancel, Events.Subscribe, Events.Resume, Unread.Set, Operation.Resolve, History.Context |
+| 40-45 | Delegation.Create, Inspect, Pause, Resume, Revoke, List |
 | 50-52 | Approval.Prepare, Approve, Reject |
-| 60-64 | Moderation.Ignore, Mute, Silence, Kick, Ban |
+| 60-66 | Moderation.Ignore, Mute, Silence, Kick, Ban, Filters, Restrictions |
 | 70-74 | Crypto.EnrolEndpoint, PublishKeyPackage, Propose, Commit, EpochReady |
 | 80-84 | Federation.Propose, Accept, Withdraw, Exchange, Challenge |
 | 90-93 | Account.Recover, RotateRecovery, EnrolEndpoint, DisableEndpoint |
@@ -239,6 +239,29 @@ with `UnsupportedFeature`. Codes 71-73 use crypto framing; all other Actions fit
 ordinary framing. Message bodies still obey their separate text and grapheme
 limits. HRC's current operation authorization point checks the Action digest,
 fresh transport observation and current home state before effects.
+
+The following inspection bodies are closed maps. `InspectionPage<T>` is
+`{items: [T], next: text or null}`; an input page is `{after: text or null,
+limit: unsigned}`. The limit is 1-16, the continuation text is at most 512 ASCII
+bytes, and encoding limits can shorten a page. Continuations are positions, not
+authorization. Each request checks current endpoint, account and room rights.
+
+| Code | Target and request body | Successful result body |
+| --- | --- | --- |
+| 3 | Own account, `{}` | `{nickname, revision, filterRevision}` |
+| 4 | Own account, input page | `InspectionPage<{actor: EndpointActor, nickname}>`; current eligible endpoints of agents operated by that account |
+| 5 | Service, `{}` | `{motd: text}`; at most 1,024 bytes, empty by default |
+| 15 | Room, `{}` | `{members, readSequence, roomRevision, filterRevision, moderator}`; at most 32 members |
+| 37 | Room, `{event: Id}` | `{events, members, roomRevision}`; the accessible original event and up to two sequence positions on each side, at most five events |
+| 45 | Own account, input page | `InspectionPage<Grant>`; grants owned by the caller or assigned to its exact current agent endpoint |
+| 65 | Own account, input page | `InspectionPage<{subject: AccountId, ignored: bool, muted: bool}>` |
+| 66 | Room, input page | `InspectionPage<{subject: AccountId, kind: unsigned, expiresMs, moderator: AccountId}>`; active silence (`kind=1`) and ban (`kind=2`) restrictions |
+
+Account and filter inspections cannot impersonate a represented account through a
+delegated actor. History context uses the same current membership, retention,
+delegation and recipient-filter rules as ordinary history. Context does not issue
+or rewind a resume cursor. See [conversation operations](ConversationOperations.md)
+for operation-specific access and the correlated Search.Cancel contract.
 
 ## Responses, events and cursors
 

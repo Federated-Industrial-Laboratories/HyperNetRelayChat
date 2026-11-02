@@ -7,7 +7,7 @@ use crate::{
     home::{self, types::*},
     protocol::*,
 };
-use rusqlite::{Connection, Transaction, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -315,4 +315,103 @@ pub(super) fn unread(db: &Transaction<'_>, action: &Action, now: TimeBounds) -> 
     }
     db.execute("INSERT INTO hrc_unread VALUES(?1,?2,?3) ON CONFLICT(room,account) DO UPDATE SET sequence=MAX(sequence,excluded.sequence)",params![access.room.to_string(),action.actor.represented().to_string(),body.sequence])?;
     home::committed(db, None, Value::Null)
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Context {
+    pub event: Id,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ContextResult {
+    pub events: Vec<Event>,
+    pub members: Vec<conversations::Member>,
+    pub room_revision: u64,
+}
+pub(super) fn context(
+    db: &Transaction<'_>,
+    action: &Action,
+    now: TimeBounds,
+    permit: Permit,
+    signer: &SigningKey,
+) -> Domain<Outcome> {
+    let body: Context = unpack(&action.body)?;
+    let access = conversations::access(db, action, now)?;
+    let from = access
+        .history_from
+        .max(permit.history_from)
+        .max(now.upper_ms.saturating_sub(RETENTION));
+    let until = permit.history_until.min(i64::MAX as u64);
+    let owner = action.actor.represented().to_string();
+    let sql = format!(
+        "SELECT e.sequence FROM hrc_events e WHERE e.room=?1 AND e.id=?2 AND e.created>=?3 AND e.created<=?4{FILTER}"
+    );
+    let sequence: Option<u64> = db
+        .query_row(
+            &sql,
+            params![
+                access.room.to_string(),
+                body.event.as_hex(),
+                from,
+                until,
+                owner
+            ],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let Some(sequence) = sequence else {
+        return deny("EventUnavailable");
+    };
+    let sql = format!(
+        "SELECT e.event FROM hrc_events e WHERE e.room=?1 AND e.sequence BETWEEN ?2 AND ?6 AND e.created>=?3 AND e.created<=?4{FILTER} ORDER BY e.sequence LIMIT 5"
+    );
+    let mut stmt = db.prepare(&sql)?;
+    let mut events = stmt
+        .query_map(
+            params![
+                access.room.to_string(),
+                sequence.saturating_sub(2),
+                from,
+                until,
+                owner,
+                sequence.saturating_add(2)
+            ],
+            |r| decode::<Event>(&r.get::<_, Vec<u8>>(0)?),
+        )?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let members = conversations::members(db, access.room, now)?;
+    loop {
+        if !events.iter().any(|e| e.event == body.event) {
+            return deny("EventUnavailable");
+        }
+        let outcome = Outcome::Result {
+            body: value(&ContextResult {
+                events: events.clone(),
+                members: members.clone(),
+                room_revision: access.revision,
+            })?,
+        };
+        let response = Response {
+            home: action.home,
+            operation_id: action.operation_id,
+            action_digest: action_digest(action)
+                .map_err(|_| Fault::Sql(rusqlite::Error::InvalidQuery))?,
+            outcome: outcome.clone(),
+        };
+        if sign_response(&response, signer).is_ok() {
+            return Ok(outcome);
+        }
+        if events.len() == 1 {
+            return Err(Fault::Reject(
+                ErrorCode::Overloaded,
+                "ContextRepresentation",
+            ));
+        }
+        if events.last().is_some_and(|e| e.event != body.event) {
+            events.pop();
+        } else {
+            events.remove(0);
+        }
+    }
 }

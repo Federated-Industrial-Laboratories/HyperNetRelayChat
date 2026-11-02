@@ -1,10 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Membership, room metadata and the current history-access boundary.
+#[path = "Inspection.rs"]
+mod inspection;
 use crate::{
     clock::TimeBounds,
     home::{self, types::*},
     protocol::*,
 };
+pub use inspection::Inspection;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 
@@ -157,6 +160,7 @@ pub(crate) fn operate(db: &Transaction<'_>, action: &Action, now: TimeBounds) ->
     match action.operation {
         Operation::RoomCreate => create(db, action, now),
         Operation::RoomList => list(db, action, now),
+        Operation::RoomInspect => inspection::read(db, action, now),
         Operation::RoomJoin => join(db, action, now),
         Operation::RoomLeave => {
             empty(&action.body)?;

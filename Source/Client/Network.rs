@@ -7,14 +7,21 @@ use crate::{
     protocol::*,
     service::io,
 };
-use std::{collections::BTreeMap, time::Duration};
+use std::{
+    collections::BTreeMap,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    #[error("the configured HyperNet companion is unavailable")]
-    Companion,
-    #[error("HyperNet could not prepare the authorized connection")]
-    Connect,
+    #[error("HyperNet companion preparation failed: {0}")]
+    Companion(#[source] crate::hypernet::Error),
+    #[error("HyperNet connection preparation failed: {0}")]
+    Connect(#[source] crate::hypernet::Error),
     #[error("the HRC session exchange did not complete")]
     Handshake,
     #[error("HyperNet is unavailable; pending operation outcomes remain unresolved")]
@@ -31,8 +38,8 @@ pub enum Error {
 impl Error {
     pub fn code(&self) -> &'static str {
         match self {
-            Self::Companion => "CompanionUnavailable",
-            Self::Connect => "HyperNetPreparationUnavailable",
+            Self::Companion(_) => "CompanionUnavailable",
+            Self::Connect(_) => "HyperNetPreparationUnavailable",
             Self::Handshake => "HrcHandshakeUnavailable",
             Self::Transport => "TransportUnavailable",
             Self::Authentication => "SessionAuthenticationFailed",
@@ -41,11 +48,25 @@ impl Error {
             Self::Expired => "RetryWindowExpired",
         }
     }
+    pub(crate) fn retryable_session(&self) -> bool {
+        self.retryable_setup() || matches!(self, Self::Transport | Self::Clock)
+    }
+    fn retryable_setup(&self) -> bool {
+        use crate::hypernet::Error as HyperNet;
+        matches!(self, Self::Handshake)
+            || matches!(
+                self,
+                Self::Companion(error) | Self::Connect(error)
+                    if matches!(error, HyperNet::Timeout | HyperNet::Unavailable
+                        | HyperNet::Closed | HyperNet::Capacity | HyperNet::Busy
+                        | HyperNet::NotActive)
+            )
+    }
 }
 pub type Result<T> = std::result::Result<T, Error>;
 pub struct Session {
     companion: Companion,
-    stream: Stream,
+    stream: Arc<Stream>,
     server_key: VerifyingKey,
     pub ready: SessionReady,
 }
@@ -58,14 +79,23 @@ impl Session {
         if Id::from_bytes(key.verifying_key().to_bytes()) != profile.registration.endpoint_key {
             return Err(Error::Authentication);
         }
-        let companion = Companion::new(&profile.companion).map_err(|_| Error::Companion)?;
+        let companion = Companion::new(&profile.companion).map_err(Error::Companion)?;
+        let started = clock::boot_ms().map_err(|_| Error::Clock)?;
         let stream = companion
             .connect(
                 &profile.server.home.service.as_hex(),
                 PROTOCOL,
                 remaining(overall_end)?.min(Duration::from_secs(10)),
             )
-            .map_err(|_| Error::Connect)?;
+            .map_err(|error| {
+                eprintln!(
+                    "{}",
+                    serde_json::json!({"event":"ConnectionPreparationFailed", "code":error.code(),
+                        "startedBootMs":started, "finishedBootMs":clock::boot_ms().ok(),
+                        "setupDeadlineBootMs":overall_end})
+                );
+                Error::Connect(error)
+            })?;
         let Peer::Outgoing(_) = stream.peer() else {
             return Err(Error::Authentication);
         };
@@ -162,7 +192,7 @@ impl Session {
         }
         Ok(Self {
             companion,
-            stream,
+            stream: Arc::new(stream),
             server_key,
             ready,
         })
@@ -201,9 +231,27 @@ impl Session {
     }
     /// Submit exactly the persisted bytes. An I/O error does not imply rejection.
     pub fn submit(&self, bytes: &[u8], key: &VerifyingKey) -> Result<Verified<Response>> {
+        self.submit_bounded(bytes, key, None)
+    }
+    /// Retry a read within its original caller budget; mutations cannot enter this path.
+    pub(crate) fn submit_read_until(
+        &self,
+        bytes: &[u8],
+        key: &VerifyingKey,
+        end: u64,
+    ) -> Result<Verified<Response>> {
+        self.submit_bounded(bytes, key, Some(end))
+    }
+    fn submit_bounded(
+        &self,
+        bytes: &[u8],
+        key: &VerifyingKey,
+        end: Option<u64>,
+    ) -> Result<Verified<Response>> {
         let action = verify_action(bytes, key).map_err(|_| Error::Authentication)?;
         if action.action().home != self.ready.home
             || action.action().actor.acting() != &self.ready.acting
+            || end.is_some() && !crate::home::is_read_operation(action.action().operation)
         {
             return Err(Error::Authentication);
         }
@@ -213,9 +261,18 @@ impl Session {
             FrameKind::Action
         };
         let frame = Frame::new(kind, bytes.to_vec()).map_err(|_| Error::Frame)?;
-        io::send(&self.stream, &frame, Duration::from_secs(5)).map_err(|_| Error::Transport)?;
-        let incoming =
-            io::receive(&self.stream, Duration::from_secs(10)).map_err(|_| Error::Transport)?;
+        let incoming = if let Some(end) = end {
+            let send_end = end.min(
+                clock::boot_ms()
+                    .map_err(|_| Error::Clock)?
+                    .saturating_add(5000),
+            );
+            io::send_before(&self.stream, &frame, send_end).map_err(transport_failure)?;
+            io::receive_before(&self.stream, end).map_err(transport_failure)?
+        } else {
+            io::send(&self.stream, &frame, Duration::from_secs(5)).map_err(transport_failure)?;
+            io::receive(&self.stream, Duration::from_secs(10)).map_err(transport_failure)?
+        };
         if incoming.kind != FrameKind::Response {
             return Err(Error::Frame);
         }
@@ -230,23 +287,116 @@ impl Session {
         }
         Ok(verified)
     }
+    pub fn stream_handle(&self) -> Arc<Stream> {
+        Arc::clone(&self.stream)
+    }
+    /// The sole reader demultiplexes one query and, at most, its exact cancellation response.
+    pub fn submit_cancellable(
+        &self,
+        bytes: &[u8],
+        cancel_bytes: &[u8],
+        key: &VerifyingKey,
+        cancel: &AtomicBool,
+    ) -> Result<Verified<Response>> {
+        let query = verify_action(bytes, key).map_err(|_| Error::Authentication)?;
+        let control = verify_action(cancel_bytes, key).map_err(|_| Error::Authentication)?;
+        let reference: crate::home::Resolve = control
+            .action()
+            .body
+            .deserialized()
+            .map_err(|_| Error::Frame)?;
+        if query.action().operation != Operation::SearchQuery
+            || control.action().operation != Operation::SearchCancel
+            || control.action().actor != query.action().actor
+            || query.action().actor.acting() != &self.ready.acting
+            || query.action().home != self.ready.home
+            || control.action().home != self.ready.home
+            || reference.operation_id != query.action().operation_id
+            || reference.action_digest != query.digest()
+        {
+            return Err(Error::Authentication);
+        }
+        let end = clock::boot_ms().map_err(|_| Error::Clock)? + 10000;
+        io::send(
+            &self.stream,
+            &Frame::new(FrameKind::Action, bytes.to_vec()).map_err(|_| Error::Frame)?,
+            remaining(end)?,
+        )
+        .map_err(transport_failure)?;
+        let mut sent = false;
+        let mut query_response = None;
+        let mut control_response = false;
+        loop {
+            if cancel.load(Ordering::Acquire) && !sent && query_response.is_none() {
+                io::send(
+                    &self.stream,
+                    &Frame::new(FrameKind::Action, cancel_bytes.to_vec())
+                        .map_err(|_| Error::Frame)?,
+                    remaining(end)?.min(Duration::from_secs(5)),
+                )
+                .map_err(transport_failure)?;
+                sent = true;
+            }
+            if (!sent || control_response)
+                && let Some(response) = query_response.take()
+            {
+                return Ok(response);
+            }
+            if !self
+                .stream
+                .wait_readable(remaining(end)?.min(Duration::from_millis(25)))
+                .map_err(|_| Error::Transport)?
+            {
+                continue;
+            }
+            let incoming = io::receive(&self.stream, remaining(end)?).map_err(transport_failure)?;
+            if incoming.kind != FrameKind::Response {
+                return Err(Error::Frame);
+            }
+            let response = verify_response(&incoming.payload, &self.server_key)
+                .map_err(|_| Error::Authentication)?;
+            if response.value().home != self.ready.home {
+                return Err(Error::Authentication);
+            }
+            if response.value().operation_id == query.action().operation_id
+                && response.value().action_digest == query.digest()
+                && query_response.is_none()
+            {
+                query_response = Some(response);
+            } else if sent
+                && response.value().operation_id == control.action().operation_id
+                && response.value().action_digest == control.digest()
+                && !control_response
+            {
+                control_response = true;
+            } else {
+                return Err(Error::Authentication);
+            }
+        }
+    }
     pub fn close(&self) {
         self.stream.close();
     }
 }
-/// A discarded transport handoff can precede any HRC operation. Obtain a fresh
-/// stream and challenge; never reuse authority or retry an operation here.
+/// Transient preparation or a discarded handoff precedes any HRC operation.
+/// Obtain a fresh stream and challenge without renewing the original deadline.
 fn establish<T>(end: u64, mut attempt: impl FnMut(u64) -> Result<T>) -> Result<T> {
     for number in 0..3 {
         if remaining(end)?.as_millis() < 100 {
             return Err(Error::Handshake);
         }
         match attempt(end) {
-            Err(Error::Handshake) if number < 2 => {
+            Err(error) if error.retryable_setup() && number < 2 => {
                 let mut jitter = [0u8; 1];
                 getrandom::fill(&mut jitter).map_err(|_| Error::Authentication)?;
                 let delay = Duration::from_millis(200 + number * 200 + u64::from(jitter[0]));
-                std::thread::sleep(delay.min(remaining(end)?));
+                let Ok(left) = remaining(end) else {
+                    return Err(error);
+                };
+                if left < delay + Duration::from_millis(100) {
+                    return Err(error);
+                }
+                std::thread::sleep(delay);
             }
             result => return result,
         }
@@ -261,10 +411,6 @@ fn remaining(end: u64) -> Result<Duration> {
         Ok(Duration::from_millis(end - now))
     }
 }
-
-#[cfg(test)]
-#[path = "../../Tests/Client/Connection.rs"]
-mod tests;
 fn send(stream: &Stream, kind: FrameKind, payload: Vec<u8>, end: u64) -> Result<()> {
     io::send(
         stream,
@@ -280,3 +426,14 @@ fn handshake_failure(error: io::Error) -> Error {
         io::Error::Transport | io::Error::Deadline => Error::Handshake,
     }
 }
+
+fn transport_failure(error: io::Error) -> Error {
+    match error {
+        io::Error::Frame => Error::Frame,
+        io::Error::Transport | io::Error::Deadline => Error::Transport,
+    }
+}
+
+#[cfg(test)]
+#[path = "../../Tests/Client/Connection.rs"]
+mod tests;

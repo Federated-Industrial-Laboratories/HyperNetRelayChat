@@ -18,7 +18,9 @@ pub fn create(
     home: ServiceId,
     companion: PathBuf,
     clock: clock::Config,
+    motd: String,
 ) -> Result<Descriptor> {
+    crate::home::ServiceInformation::new(motd.clone()).map_err(|_| Error)?;
     clock.sample().map_err(|_| Error)?;
     files::directory(directory, true).map_err(|_| Error)?;
     files::directory(&directory.join("Data"), true).map_err(|_| Error)?;
@@ -36,6 +38,7 @@ pub fn create(
         descriptor: descriptor.clone(),
         companion,
         clock,
+        motd,
     };
     let store = storage::Store::create(
         directory.join("Data"),

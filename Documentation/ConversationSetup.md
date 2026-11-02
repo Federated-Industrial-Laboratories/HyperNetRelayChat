@@ -1,6 +1,6 @@
 # Service and client setup
 
-The Linux command-line workflow uses an existing HyperNet Core/Suite 0.10.0
+The Linux command-line workflow uses existing HyperNet Core 0.10.1 and Suite 0.10.0
 deployment. Its receiving application service and each caller require explicit
 HyperNet admission, current grants, and a configured `hrc/1` stream binding or
 target. HRC does not create application consent or renew it automatically.
@@ -65,6 +65,8 @@ backup. New-device encrypted history remains future-only.
 
 Add `--diagnostics` to `service run` to report fixed lifecycle categories on
 standard error. Diagnostics contain no messages, account identifiers or keys.
+Failed authority observations include fixed disposition categories and monotonic
+deadline timings. Authentication failures identify their fixed validation stage.
 Output is limited to a burst of eight lines, one line per second thereafter and
 128 lines per process. Client errors distinguish local configuration and storage,
 HyperNet preparation, session authentication, clock and handshake failures.
@@ -75,6 +77,23 @@ enforces current access and expiry before returning content or applying effects.
 The companion accept wait allows five seconds for transport handoff, including
 its current privacy observation. HRC's subsequent handshake retains its separate
 five-second bound; acceptance never extends an authority observation's validity.
+
+The service admits authority checks through one bounded FIFO shared by session
+setup, actions and exact search cancellation. At most 32 callers can hold or wait
+for its single exchange slot; each admission wait is at most one second. A queued
+control cannot be overtaken by later ordinary reads. Queue saturation or an
+admission timeout reports `AuthorityAdmissionBusy` (an `Overloaded` pre-admission
+action refusal), separately from a failed transport authority check. Shutdown,
+stream invalidation or query cancellation removes a waiter.
+
+After admission, each check starts a fresh nonce and a separate lifetime of at
+most one second. The original five-second handshake and ten-second search ends
+also cap admission and check time; neither is restarted. The exchange slot is
+released before Home state is locked or work executes. The resulting observation
+must still be currently permitted at every existing admission and commit check.
+This scheduling does not extend a receipt, reuse authority, retry an effect, or
+conceal a Core busy or unavailable result.
+
 If transport handoff closes before session setup finishes, the client can obtain
 up to three fresh streams and challenges within one 30-second setup budget,
 with bounded jitter between attempts. Invalid identities and frames fail at once.

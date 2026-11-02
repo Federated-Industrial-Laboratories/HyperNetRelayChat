@@ -64,13 +64,25 @@ impl AuthenticatedSession {
     }
 }
 #[derive(Clone, Default)]
-pub struct Cancellation(Arc<AtomicBool>);
+pub struct Cancellation {
+    cancelled: Arc<AtomicBool>,
+    control_registered: bool,
+}
 impl Cancellation {
+    pub(crate) fn accepted_control() -> Self {
+        Self {
+            cancelled: Arc::new(AtomicBool::new(false)),
+            control_registered: true,
+        }
+    }
+    pub(crate) fn control_registered(&self) -> bool {
+        self.control_registered
+    }
     pub fn cancel(&self) {
-        self.0.store(true, Ordering::Release);
+        self.cancelled.store(true, Ordering::Release);
     }
     pub fn is_cancelled(&self) -> bool {
-        self.0.load(Ordering::Acquire)
+        self.cancelled.load(Ordering::Acquire)
     }
 }
 

@@ -423,6 +423,21 @@ impl Privacy {
         }
         Ok(result)
     }
+    pub fn selected_minimum(&self) -> Option<Assurance> {
+        self.selected_minimum
+    }
+    pub fn configured_assurance(&self) -> Option<Assurance> {
+        self.configured_assurance
+    }
+    pub fn transport_protection(&self) -> Option<TransportProtection> {
+        self.transport_protection
+    }
+    pub fn endpoint_mode(&self) -> Option<u64> {
+        self.endpoint_mode
+    }
+    pub fn tls(&self) -> Option<&str> {
+        self.tls.as_deref()
+    }
     pub fn direction(&self) -> Direction {
         self.direction
     }

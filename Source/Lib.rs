@@ -2,6 +2,8 @@
 #[path = "HyperNet/Mod.rs"]
 pub mod hypernet;
 
+#[path = "Bot/Mod.rs"]
+pub mod bot;
 #[path = "Client/Mod.rs"]
 pub mod client;
 #[path = "Clock/Mod.rs"]
@@ -20,6 +22,8 @@ pub mod identity;
 pub mod messaging;
 #[path = "Moderation/Mod.rs"]
 pub mod moderation;
+#[path = "Presentation/Mod.rs"]
+pub mod presentation;
 #[path = "Protocol/Mod.rs"]
 pub mod protocol;
 #[path = "Service/Mod.rs"]

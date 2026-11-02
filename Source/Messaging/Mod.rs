@@ -9,13 +9,22 @@ use crate::{
     home::{self, types::*},
     protocol::*,
 };
-pub use history::{Page, PageResult, Search, Unread};
+pub use history::{Context, ContextResult, Page, PageResult, Search, Unread};
 use rusqlite::{OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Mention {
+    pub account: AccountId,
+    pub start: u32,
+    pub end: u32,
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Send {
     pub text: String,
+    #[serde(default)]
+    pub mentions: Vec<Mention>,
     pub parent: Option<Id>,
     pub causation: Option<Id>,
 }
@@ -97,6 +106,7 @@ pub(crate) fn operate(
         Operation::HistoryPage | Operation::EventsSubscribe | Operation::EventsResume => {
             history::page(db, action, now, permit, signer, cancel)
         }
+        Operation::HistoryContext => history::context(db, action, now, permit, signer),
         Operation::SearchQuery => history::search(db, action, now, permit, signer, cancel),
         Operation::UnreadSet => history::unread(db, action, now),
         _ => invalid("MessageOperation"),
@@ -110,6 +120,7 @@ fn send(db: &Transaction<'_>, action: &Action, now: TimeBounds, permit: Permit) 
         return invalid("ReplyParent");
     }
     let access = conversations::access(db, action, now)?;
+    validate_mentions(db, access.room, &body)?;
     if conversations::restriction(db, access.room, &action.actor, 1, now)? {
         return deny("RoomSilenced");
     }
@@ -176,4 +187,48 @@ fn send(db: &Transaction<'_>, action: &Action, now: TimeBounds, permit: Permit) 
         )?;
     }
     Ok(outcome)
+}
+
+/// Local drafts validate structural spans; current nickname and membership remain server decisions.
+pub fn mention_spans(
+    text: &str,
+    mentions: &[Mention],
+) -> std::result::Result<(), crate::text::InvalidText> {
+    use unicode_segmentation::UnicodeSegmentation;
+    if mentions.len() > 16 {
+        return Err(crate::text::InvalidText);
+    }
+    let boundaries: std::collections::BTreeSet<_> = text
+        .grapheme_indices(true)
+        .map(|(i, _)| i)
+        .chain(std::iter::once(text.len()))
+        .collect();
+    let mut last = 0;
+    for mention in mentions {
+        let start = mention.start as usize;
+        let end = mention.end as usize;
+        if start < last
+            || start >= end
+            || !boundaries.contains(&start)
+            || !boundaries.contains(&end)
+            || !text[start..end].starts_with('@')
+        {
+            return Err(crate::text::InvalidText);
+        }
+        last = end;
+    }
+    Ok(())
+}
+fn validate_mentions(db: &rusqlite::Connection, room: RoomId, body: &Send) -> Domain<()> {
+    mention_spans(&body.text, &body.mentions)
+        .map_err(|_| Fault::Reject(ErrorCode::InvalidInput, "MentionSpan"))?;
+    for mention in &body.mentions {
+        let nickname:Option<String>=db.query_row("SELECT a.nickname FROM hrc_members m JOIN hrc_accounts a ON a.id=m.account WHERE m.room=?1 AND m.account=?2 AND m.active=1",params![room.to_string(),mention.account.to_string()],|r|r.get(0)).optional()?;
+        if nickname.is_none_or(|name| {
+            body.text[mention.start as usize..mention.end as usize] != format!("@{name}")
+        }) {
+            return conflict("MentionBindingChanged");
+        }
+    }
+    Ok(())
 }

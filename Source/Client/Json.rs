@@ -29,12 +29,18 @@ pub fn action(bytes: &[u8]) -> Result<Action> {
         PresenceSet => body::<identity::Presence>(body_json)?,
         RoomCreate => body::<conversations::Create>(body_json)?,
         RoomList => body::<conversations::List>(body_json)?,
-        RoomJoin | RoomLeave | DelegationInspect | DelegationPause | DelegationResume
-        | DelegationRevoke => body::<home::Empty>(body_json)?,
+        AgentList | DelegationList | ModerationFilters | ModerationRestrictions => {
+            body::<home::InspectPage>(body_json)?
+        }
+        ServiceInspect | RoomInspect | AccountInspect | RoomJoin | RoomLeave
+        | DelegationInspect | DelegationPause | DelegationResume | DelegationRevoke => {
+            body::<home::Empty>(body_json)?
+        }
         RoomSetTopic => body::<conversations::Topic>(body_json)?,
         MessageSend | MessageReply | MessageAction => body::<messaging::Send>(body_json)?,
         HistoryPage | EventsSubscribe | EventsResume => body::<messaging::Page>(body_json)?,
         SearchQuery => body::<messaging::Search>(body_json)?,
+        HistoryContext => body::<messaging::Context>(body_json)?,
         UnreadSet => body::<messaging::Unread>(body_json)?,
         OperationResolve | SearchCancel => body::<home::Resolve>(body_json)?,
         DelegationCreate => body::<delegation::Create>(body_json)?,

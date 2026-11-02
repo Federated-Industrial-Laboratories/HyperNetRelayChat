@@ -1,11 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Current account, endpoint and authenticated actor bindings.
+#[path = "Inspection.rs"]
+mod inspection;
 use crate::{
     clock::TimeBounds,
     home::{self, types::*},
     protocol::*,
     storage::Commit,
 };
+pub use inspection::{AccountView, AgentEndpoint};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 
@@ -209,6 +212,7 @@ pub(crate) fn operate(db: &Transaction<'_>, action: &Action, now: TimeBounds) ->
         return invalid("AccountTarget");
     }
     match action.operation {
+        Operation::AccountInspect | Operation::AgentList => return inspection::read(db, action),
         Operation::AccountSetNickname => {
             let body: Nickname = unpack(&action.body)?;
             crate::text::handle(&body.nickname)

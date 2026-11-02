@@ -57,6 +57,8 @@ pub enum Service {
         incarnation: Id,
         #[arg(long)]
         service: Id,
+        #[arg(long, default_value = "")]
+        motd: String,
         #[command(flatten)]
         connection: Connection,
     },
@@ -325,6 +327,7 @@ pub fn service(command: Service) -> Result<Json, &'static str> {
             network,
             incarnation,
             service,
+            motd,
             connection,
         } => {
             let clock = connection.clock();
@@ -340,6 +343,7 @@ pub fn service(command: Service) -> Result<Json, &'static str> {
                     },
                     connection.companion,
                     clock,
+                    motd,
                 )
                 .map_err(|_| "ServiceSetupFailed")?,
             )
@@ -418,7 +422,7 @@ pub fn profile(command: Profile) -> Result<Json, &'static str> {
         Profile::Session { profile } => {
             let c = open(&profile)?;
             Ok(
-                json!({"status":"Authenticated","session":c.session.ready,"privacy":c.session.privacy()}),
+                json!({"status":"Authenticated","session":c.session().map_err(|_| "SessionUnavailable")?.ready,"privacy":c.session().map_err(|_| "SessionUnavailable")?.privacy()}),
             )
         }
     }
@@ -479,6 +483,7 @@ pub fn send(request: Send) -> Result<Json, &'static str> {
         Operation::MessageSend
     };
     let body = Value::serialized(&messaging::Send {
+        mentions: Vec::new(),
         text: request.text,
         parent: request.reply,
         causation: None,
@@ -490,7 +495,12 @@ pub fn send(request: Send) -> Result<Json, &'static str> {
     if let Some(path) = request.grant {
         let grant: delegation::Grant = service::files::json(&path).map_err(|_| "GrantFile")?;
         action.actor = Actor::Delegated {
-            acting: c.session.ready.acting.clone(),
+            acting: c
+                .session()
+                .map_err(|_| "SessionUnavailable")?
+                .ready
+                .acting
+                .clone(),
             operator: grant.operator,
             represented: grant.owner,
             represented_security_generation: grant.owner_security_generation,
@@ -551,7 +561,12 @@ pub fn agent(command: Agent) -> Result<Json, &'static str> {
             let body: delegation::Create =
                 service::files::json(&permissions).map_err(|_| "InvalidPermissions")?;
             let mut c = open(&profile)?;
-            let owner = c.session.ready.acting.account;
+            let owner = c
+                .session()
+                .map_err(|_| "SessionUnavailable")?
+                .ready
+                .acting
+                .account;
             call(
                 &mut c,
                 Operation::DelegationCreate,
@@ -734,5 +749,28 @@ pub fn resolve(profile: &Path) -> Result<Json, &'static str> {
         open(profile)?
             .resolve_pending()
             .map_err(|_| "OutcomeUnknown")?,
+    )
+}
+
+#[derive(clap::Args)]
+pub struct Abandon {
+    #[arg(long)]
+    pub profile: PathBuf,
+    #[arg(long)]
+    pub window: Id,
+    #[arg(long)]
+    pub operation: Id,
+    #[arg(long)]
+    pub action_digest: Id,
+}
+pub fn abandon(request: Abandon) -> Result<Json, &'static str> {
+    let operation_id = OperationId {
+        window: request.window,
+        operation: request.operation,
+    };
+    client::local::abandon(&request.profile, operation_id, request.action_digest)
+        .map_err(|_| "PendingOperationUnavailable")?;
+    Ok(
+        json!({"status":"RetryStoppedOutcomeUnknown","operationId":operation_id,"actionDigest":request.action_digest,"abandoned":true}),
     )
 }

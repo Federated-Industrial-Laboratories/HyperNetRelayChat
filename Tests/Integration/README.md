@@ -23,6 +23,90 @@ outbox, service restart, exact resolution and absence of duplicate publication.
 The ordinary companion is restored afterwards. Baseline conversation uses no
 proxy.
 
+`NativeLocalClient.rs`, built as the `native-local-client` example, optionally
+extends this same fixture with the production Controller used by the local
+interfaces. Set `configuration.localClientBinary` or
+`HYPERNET_HRC_LOCAL_CLIENT` to its exact executable path. The hook runs after
+acknowledgement-loss recovery and before final HyperNet grant revocation, using
+the existing Alice, Bob and Agent profiles and live service. It opens one Store
+owner per profile; no CLI process accesses those profiles concurrently.
+
+For independent local-client qualification, set `configuration.localClientOnly`
+to true or `HYPERNET_HRC_LOCAL_CLIENT_ONLY=1`. This mode creates the real service,
+three profiles and one room through shipped commands, joins Bob and Agent, then
+runs the Controller immediately. After all Controller profiles close, it creates
+and revokes an exact fixture grant, runs the same bot cases and final HyperNet
+authority refusal. Its result is `NativeLocalClientWorkflow`, with
+`conversationBaselineIncluded=false`; it does not claim to rerun the separate
+conversation baseline, acknowledgement-loss or service-restart cases. Reuse their
+identified existing evidence only when that source and behaviour remain applicable.
+
+The example checks persistent Controller send/receive, three distinct identities,
+request/completion and delivery/event correlation, Unicode typed mentions,
+unread state and mention notifications, current ignore filtering, indexed search
+and current-authorised event context. It saves a draft while disconnected,
+releases and reopens Bob's profile, verifies cached state is marked stale, then
+resumes current history without duplicate event IDs and sends the retained draft.
+Commands are submitted once and results are asserted through actual immutable
+snapshots. The helper does not resubmit uncertain effects.
+
+Initial connection may complete with `OperationTemporarilyUnavailable` while the
+Controller reconnects automatically. The helper waits for `Online` with current
+inspection and privacy state within the original 40-second command budget; it
+does not dispatch another Connect. The same transient status from SelectRoom
+must recover the original selection to a current room view without a gap, Online
+connection, current inspection and privacy within that command's original bound.
+The helper does not dispatch another selection. Successful offline selection
+still exposes stale cached state. Other command errors fail the check. Network
+commands wait for current online state before their single
+dispatch, within the same original command deadline. Earlier readiness of another
+Controller does not imply this Controller is still online. A send
+with a visibly pending delivery may recover only if the same request, operation
+ID and Action digest become committed through the Controller's own resolution.
+Permanent refusals, abandonment and replacement identities fail. Evidence counts
+observed backoff entries, recovered selections and resolved original deliveries, and claims zero
+helper resubmissions, not zero internal retries. Failure diagnostics name the
+principal, command and last visible status, with bounded native service logs
+providing the individual read-operation category when available.
+The helper retains at most sixteen observed connection/status transitions per
+principal, with boot time, command stage and request number. A failure therefore
+distinguishes waiting before dispatch from waiting for a specific completion.
+The trace contains no message content, keys or permission evidence and does not
+change deadlines, retries or effects.
+
+Cancellation is attempted while a real query is visibly running. Evidence says
+whether cancellation was observed or completion won the race; it does not claim
+that a small native query was interrupted inside SQL. A subsequent search checks
+that request/response correlation remains usable. This verifies the shared client
+workflow, not GUI rendering, terminal interaction or desktop notification delivery.
+
+The example accepts `--request FILE --maximum-seconds 240`. The private JSON file
+contains `alice`, `bob`, `agent` profile paths and the typed `room` ID. Input is
+limited to 16 KiB, one command queue is used per Controller, and observed snapshots
+are checked against their bounds. Command/result waits are at most 40 seconds;
+a process watchdog and the parent subprocess timeout enforce the total limit.
+The optional run consumes the existing 900-second conversation budget. Build it
+from the same frozen candidate as HRC with `cargo build --example native-local-client`.
+
+The optional extension then releases all Controllers and starts the shipped
+`hrc bot` on the Agent profile, with a one-second poll interval and a unique fixed
+help response. It waits for the exact `BotReady` result whose meaning is
+`InitialAuthorisedCatchUpComplete`. A historical human `!help` must produce no
+reply; one new Alice `!help` must produce exactly one independently attributed
+agent `MessageReply`, with parent and causation both naming that exact event.
+
+After a bounded clean stop, the ordinary CLI publishes an agent `!help` and a
+human reply containing `!help`. No process shares the Agent profile while the bot
+runs. The check crosses the documented five-second reply-rate window before
+restarting, so throttling cannot mask a trigger-rule failure. Restart readiness
+proves a current authorised catch-up; unchanged reply IDs then establish agent
+and reply suppression without replay. A final bot invocation with the existing
+revoked fixture grant must explicitly refuse before readiness and publication.
+This extension has a 180-second budget within the same conversation deadline,
+and cleanup terminates only its own child process, escalating to a bounded kill
+if needed. Readiness and history assertions establish progress; timed waits are
+used only for polling and the documented reply-rate boundary.
+
 The final refusal case revokes the agent principal's actual HyperNet stream
 grant. The shipped send command must refuse connection, preserve its local draft
 and leave no corresponding conversation event. No direct connection is provided.
@@ -36,6 +120,15 @@ and `revoke_principal`. Record accepts bounded result dictionaries for the
 qualification report. Every subprocess has a deadline; service and proxy cleanup
 runs even after a failed assertion. Never point this destructive finite fixture
 at ordinary user profiles, installed services or production grants.
+
+Set `configuration.suiteBinary` or `HYPERNET_HRC_SUITE_BINARY` to the exact installed
+Suite executable for failure diagnostics. Before teardown, the driver uses the
+supported `streams status` command to retain each companion's at most eight recent
+errors and connection count. Collection is limited to six seconds in total and
+the remaining conversation deadline, with at most two seconds per companion.
+Diagnostic failure does not replace the original workflow failure. CLI result
+records include boot-time start and finish; connection-preparation stderr retains
+the static adapter failure category. No diagnostic triggers another effect or retry.
 
 This workflow qualifies community conversations. The dedicated Crypto contract
 tests qualify persistent MLS behaviour; encrypted client flows and independently
