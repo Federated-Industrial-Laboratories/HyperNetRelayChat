@@ -138,6 +138,10 @@ eligible moderator explicitly starts fresh group recovery. Old keys, restored
 ratchet snapshots and administrative identity replacement are never recovery
 shortcuts. A new or recovered device receives future traffic only. Retained
 plaintext archives remain governed by their separate local retention policy.
+After a verified Welcome, catch-up skips membership transitions at or before its
+durable MLS position. A new device need not trust removed historical participants
+to use its admitted epoch. Every later transition still requires pinned contact
+continuity, endpoint evidence and MLS verification before advancing local state.
 
 ## Application and local state
 
