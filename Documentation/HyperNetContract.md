@@ -2,7 +2,7 @@
 
 Draft 3, 31 October 2026. [Product plan](ProductPlan.md) · [Protocol proposal](ProtocolPermissions.md)
 
-This map records inspected source behaviour and HRC integration gaps. It does not claim that HRC has a working adapter or qualified deployment. The 0.10.0 source implements the previously required companion authority and directional-context extension while retaining the 0.9.1 permission correction.
+This map records inspected upstream behaviour and the HRC integration boundary. The HRC Rust adapter and smallest local conversation have representative real HyperNet integration evidence; complete release and pilot-capacity qualification remain open. The 0.10.0 source implements the previously required companion authority and directional-context extension while retaining the 0.9.1 permission correction.
 
 | Product | Published v0.10.0 revision | Status |
 | --- | --- | --- |
@@ -98,10 +98,10 @@ The [transport authority and federation profile](IntegrationProfile.md) applies 
 | Remote freshness and clock recovery | Preserve source expiry and the home five-second challenge bound with conservative cross-host conversion and home-owned withdrawal barriers |
 | Pilot and platform qualification | Exercise actual Linux IPC/security constraints, actor topology and bounded resource/latency behaviour; upstream limits are not an HRC capacity result |
 
-HyperNet's current federation copies explicitly shared approved Pages. Its treaty/bridge trust pattern informs HRC, but it supplies no live chat forwarding contract. HRC's proposed separately admitted bilateral gateways require their own setup, evidence and tests. [Existing federation](https://github.com/Federated-Industrial-Laboratories/HyperNet/blob/b840c8b8e7d74fac71e898cf2c2eb7c660c57275/Documentation/Federation.md)
+HyperNet's current federation copies explicitly shared approved Pages. Its treaty/bridge trust pattern informs HRC, but it supplies no live chat forwarding contract. HRC's separately admitted bilateral gateways use the [federation runtime contract](FederationRuntime.md) and require their own setup and native qualification. [Existing federation](https://github.com/Federated-Industrial-Laboratories/HyperNet/blob/b840c8b8e7d74fac71e898cf2c2eb7c660c57275/Documentation/Federation.md)
 
 ## Platform and evidence gate
 
 Suite's release manifest uses Rust edition 2024 with `rust-version = 1.95`, eframe 0.37.0, Crossterm 0.29.0 and OpenMLS 0.9.1. These are inspected dependency facts, not HRC dependency commitments. The current qualified family is native Ubuntu x86_64 within its documented limits; HRC still needs its own qualification. [Manifest](https://github.com/Federated-Industrial-Laboratories/HyperNetSuite/blob/3055f06a691fbc2f0214b4d9bb706a004d5c22ad/Cargo.toml) · [Platform scope](https://github.com/Federated-Industrial-Laboratories/HyperNetSuite/blob/3055f06a691fbc2f0214b4d9bb706a004d5c22ad/ReadMe.md)
 
-Before the first slice, demonstrate one exact admitted endpoint binding, successful/denied stream admission, narrow grant ancestry, permission expiry/revocation, cancellation, explicit renewal, same-principal versus distinct-agent attribution, and constrained receiving/sending topology. Exercise malformed IPC, path/socket replacement and size bounds at the adapter boundary. Preserve genuine transport outcomes and exact source identities; a fake transport test cannot establish this integration.
+The integration checks must demonstrate one exact admitted endpoint binding, successful/denied stream admission, narrow grant ancestry, permission expiry/revocation, cancellation, explicit renewal, same-principal versus distinct-agent attribution, and constrained receiving/sending topology. Exercise malformed IPC, path/socket replacement and size bounds at the adapter boundary. Preserve genuine transport outcomes and exact source identities; a fake transport test cannot establish this integration.

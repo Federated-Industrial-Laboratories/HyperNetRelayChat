@@ -13,7 +13,7 @@ agreement acceptance, explicit remote admissions, verified origin continuity,
 purpose-bound bootstrap and shared local/remote execution. Tests use two guarded
 home stores and actual signatures, delegation and MLS operations. Transport
 evidence in those domain tests is synthetic: it does not establish that both
-HyperNet legs work. The gateway/client integration and real two-network
+HyperNet legs work. The gateway and client paths are implemented. Real two-network
 qualification must complete before this document can describe a shipped or
 qualified federation runtime. The ordinary local handshake still authenticates
 locally enrolled endpoints only; remote execution has its own verified context.
