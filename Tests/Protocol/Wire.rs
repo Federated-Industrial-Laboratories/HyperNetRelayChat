@@ -120,6 +120,74 @@ fn canonical_input_rejects_ambiguous_and_unbounded_cbor() {
         .is_err()
     );
 }
+
+#[test]
+fn bounded_generated_input_preserves_canonical_and_frame_boundaries() {
+    // A fixed corpus seed makes malformed-input failures reproducible. This is
+    // bounded parser coverage, not a coverage-guided fuzzing campaign.
+    let mut state = 0x6ad3_8eb1_5c04_729fu64;
+    let mut next = || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+    for case in 0..4096 {
+        let length = match case {
+            0..=255 => 1,
+            256..=263 => [
+                0,
+                4,
+                5,
+                255,
+                256,
+                4096,
+                ORDINARY_FRAME_BYTES,
+                CRYPTO_FRAME_BYTES,
+            ][case - 256],
+            _ => (next() % 4097) as usize,
+        };
+        let mut bytes = vec![0u8; length];
+        for byte in &mut bytes {
+            *byte = next() as u8;
+        }
+        if case <= 255 {
+            bytes[0] = case as u8;
+        }
+        if let Ok(value) = canonical_decode(&bytes, ORDINARY_FRAME_BYTES) {
+            assert_eq!(
+                canonical_encode(&value, ORDINARY_FRAME_BYTES).unwrap(),
+                bytes,
+                "accepted noncanonical corpus case {case}"
+            );
+        }
+        if let Ok(frame) = Frame::decode(&bytes) {
+            assert_eq!(frame.encode().unwrap(), bytes, "frame case {case}");
+        }
+    }
+}
+
+#[test]
+fn every_signed_action_byte_is_bound_and_every_truncation_is_rejected() {
+    let key = SigningKey::from_bytes(&[42; 32]);
+    let signed = sign_action(&action(), &key).unwrap();
+    let public = key.verifying_key();
+    for index in 0..signed.len() {
+        assert!(
+            verify_action(&signed[..index], &public).is_err(),
+            "accepted truncation at {index}"
+        );
+        let mut changed = signed.clone();
+        changed[index] ^= 1 << (index % 8);
+        assert!(
+            verify_action(&changed, &public).is_err(),
+            "accepted mutation at {index}"
+        );
+    }
+    let mut trailing = signed;
+    trailing.push(0);
+    assert!(verify_action(&trailing, &public).is_err());
+}
 #[test]
 fn signed_action_round_trip_preserves_text_and_exact_bytes() {
     let key = SigningKey::from_bytes(&[42; 32]);
