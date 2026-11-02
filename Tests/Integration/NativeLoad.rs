@@ -496,12 +496,8 @@ fn interactive(
                 m.started += 1;
                 m.schedule_lag_ms
                     .push(millis(now.saturating_duration_since(scheduled)));
-                if let Err(e) = dispatch_offer(
-                    &mut ui,
-                    room,
-                    scheduled,
-                    format!("{phase} endpoint{} offer{next} λ", ui.index),
-                ) {
+                let text = format!("{phase} endpoint{} offer{next} λ", ui.index);
+                if let Err(e) = dispatch_offer(&mut ui, room, scheduled, text) {
                     *m.results.entry(format!("Dispatch:{e:?}")).or_default() += 1;
                 }
             }
