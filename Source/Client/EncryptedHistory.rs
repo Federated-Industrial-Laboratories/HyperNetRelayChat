@@ -139,9 +139,11 @@ impl Client {
         }
         let key = VerifyingKey::from_bytes(self.profile.active_server().signing_key.as_bytes())
             .map_err(|_| Error::Configuration)?;
-        for _ in 0..8 {
+        let mut restarted = false;
+        for attempt in 0..8 {
             let cached = cache::room(&mut self.store, room).map_err(|_| Error::Storage)?;
-            let page: messaging::PageResult = self.read_as(
+            let had_cursor = cached.cursor.is_some();
+            let page = self.read_as::<messaging::PageResult, _>(
                 Operation::CryptoHistory,
                 Target::Room(room),
                 &messaging::Page {
@@ -149,7 +151,24 @@ impl Client {
                     limit: 16,
                 },
                 grant,
-            )?;
+            );
+            let page = match page {
+                Ok(page) => page,
+                Err(error)
+                    if had_cursor
+                        && !restarted
+                        && attempt < 7
+                        && cache::cursor_context_changed(&error) =>
+                {
+                    // Restart only the signed history continuation, never MLS state.
+                    // The next read checks current authority and shares this call's
+                    // eight-request ceiling. A second context change is explicit.
+                    cache::restart_cursor(&mut self.store, room).map_err(|_| Error::Storage)?;
+                    restarted = true;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
             let now = self
                 .profile
                 .clock

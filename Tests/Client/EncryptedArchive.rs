@@ -235,6 +235,7 @@ fn encrypted_archive_search_restart_filters_and_expiry_preserve_authenticated_ev
     assert!(
         !cache::inspection_failed(
             &mut client.store,
+            Operation::CryptoHistory,
             room,
             &client::Error::Refused {
                 code: ErrorCode::Unavailable,
@@ -250,6 +251,192 @@ fn encrypted_archive_search_restart_filters_and_expiry_preserve_authenticated_ev
             .unwrap()
             .is_empty()
     );
+}
+
+#[test]
+fn encrypted_cursor_restart_preserves_plaintext_pending_mls_and_drafts_after_reopen() {
+    let f = Fixture::new();
+    let mut client = offline(&f);
+    let e = event(1, TimeBounds::test_now().lower_ms);
+    let room = e.room;
+    cache::save_rooms(
+        &mut client.store,
+        &[conversations::Summary {
+            room,
+            name: "private".into(),
+            topic: String::new(),
+            revision: 1,
+            sequence: 1,
+            joined: true,
+            unread: 0,
+            confidentiality: RoomConfidentiality::PrivateGroup,
+            invited: false,
+        }],
+    )
+    .unwrap();
+    let key = SigningKey::from_bytes(&[11; 32]);
+    let mut cursor = HistoryCursor {
+        home: e.home,
+        room,
+        account: e.actor.represented(),
+        sequence: 1,
+        membership_revision: 1,
+        filter_revision: 1,
+        access_digest: id(70),
+        expires_ms: e.timestamp_ms + 300_000,
+    };
+    let mut page = messaging::PageResult {
+        events: vec![e.clone()],
+        cursor: Blob(sign_cursor(&cursor, &key).unwrap()),
+        has_more: false,
+        room_revision: 1,
+        members: vec![],
+    };
+    cache::receive(
+        &mut client.store,
+        room,
+        e.actor.represented(),
+        &page,
+        &key.verifying_key(),
+        e.timestamp_ms,
+    )
+    .unwrap();
+    let text = archive::MessageContent::Decrypted("retained secret".into());
+    client
+        .store
+        .write(|tx| {
+            archive::persist_content(tx, &e, &text).map_err(|_| rusqlite::Error::InvalidQuery)?;
+            Ok(storage::Commit::new(
+                (),
+                b"retained encrypted history".to_vec(),
+            ))
+        })
+        .unwrap();
+    client.save_draft(room, "unfinished reply").unwrap();
+    let device = crypto::Device::provision(&mut client.store, e.actor.acting().clone()).unwrap();
+    let roster = crypto::ApprovedRoster::new(room, vec![device.credential(room)]).unwrap();
+    let group = id(71);
+    device
+        .create_group(&mut client.store, group, &roster, 0)
+        .unwrap();
+    let pending = device
+        .prepare_transition(
+            &mut client.store,
+            group,
+            0,
+            &roster,
+            &roster,
+            crypto::Change::Update,
+        )
+        .unwrap();
+    let state = cache::encode(&device.state(&mut client.store, group).unwrap()).unwrap();
+    let changed = client::Error::Rejected {
+        code: ErrorCode::ResynchronisationRequired,
+        detail: "CursorContext".into(),
+    };
+    let before = client.store.usage().unwrap().commit_counter;
+    assert!(
+        !cache::inspection_failed(&mut client.store, Operation::CryptoHistory, room, &changed)
+            .unwrap()
+    );
+    assert_eq!(client.store.usage().unwrap().commit_counter, before);
+    cache::restart_cursor(&mut client.store, room).unwrap();
+    drop(client);
+    let mut client = client::Client::open_offline(&f.root).unwrap();
+    let cached = cache::room(&mut client.store, room).unwrap();
+    assert!(cached.cursor.is_none());
+    assert_eq!(cached.events.len(), 1);
+    assert_eq!(
+        archive::content(&mut client.store, std::slice::from_ref(&e)).unwrap()[&e.event],
+        text
+    );
+    assert_eq!(
+        client.draft(room).unwrap().as_deref(),
+        Some("unfinished reply")
+    );
+    assert_eq!(
+        cache::encode(&device.state(&mut client.store, group).unwrap()).unwrap(),
+        state
+    );
+    assert_eq!(
+        device
+            .prepare_transition(
+                &mut client.store,
+                group,
+                0,
+                &roster,
+                &roster,
+                crypto::Change::Update
+            )
+            .unwrap()
+            .commit,
+        pending.commit
+    );
+    cursor.access_digest = id(72);
+    page.cursor = Blob(sign_cursor(&cursor, &key).unwrap());
+    page.room_revision += 1;
+    cache::receive(
+        &mut client.store,
+        room,
+        e.actor.represented(),
+        &page,
+        &key.verifying_key(),
+        e.timestamp_ms,
+    )
+    .unwrap();
+    assert_eq!(
+        archive::content(&mut client.store, std::slice::from_ref(&e)).unwrap()[&e.event],
+        text
+    );
+    assert!(
+        cache::inspection_failed(
+            &mut client.store,
+            Operation::CryptoHistory,
+            room,
+            &client::Error::Rejected {
+                code: ErrorCode::Denied,
+                detail: "Membership".into(),
+            }
+        )
+        .unwrap()
+    );
+    assert!(
+        cache::room(&mut client.store, room)
+            .unwrap()
+            .events
+            .is_empty()
+    );
+    assert!(
+        archive::content(&mut client.store, &[e])
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        client.draft(room).unwrap().as_deref(),
+        Some("unfinished reply")
+    );
+}
+
+#[test]
+fn current_encrypted_history_window_limits_retained_presentation() {
+    let e = event(1, TimeBounds::test_now().lower_ms);
+    let mut current = view(e.room, e.timestamp_ms);
+    current.remote.history_from_ms = e.timestamp_ms;
+    current.remote.history_until_ms = e.timestamp_ms;
+    assert!(current.history_visible(&e));
+    current.remote.history_from_ms += 1;
+    assert!(!current.history_visible(&e));
+    current.remote.history_from_ms = e.timestamp_ms - 1;
+    current.remote.history_until_ms = e.timestamp_ms - 1;
+    assert!(!current.history_visible(&e));
+    current.remote.history_until_ms = e.timestamp_ms;
+    current.remote.ignored.push(e.actor.represented());
+    assert!(!current.history_visible(&e));
+    current.remote.ignored.clear();
+    let mut foreign = e.clone();
+    foreign.room.local = id(73);
+    assert!(!current.history_visible(&foreign));
+    assert!(current.history_visible(&e));
 }
 
 #[test]
