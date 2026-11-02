@@ -1,5 +1,13 @@
 use super::*;
 fn frame(ctx: &egui::Context, editor: &mut Editor, events: Vec<egui::Event>) -> bool {
+    frame_enabled(ctx, editor, events, true)
+}
+fn frame_enabled(
+    ctx: &egui::Context,
+    editor: &mut Editor,
+    events: Vec<egui::Event>,
+    enabled: bool,
+) -> bool {
     let id = egui::Id::unique("test-composer");
     ctx.memory_mut(|m| m.request_focus(id));
     let mut rejected = false;
@@ -13,11 +21,36 @@ fn frame(ctx: &egui::Context, editor: &mut Editor, events: Vec<egui::Event>) -> 
             ..Default::default()
         },
         |ui| {
-            rejected = show(ui, id, editor).rejected;
+            rejected = ui
+                .add_enabled_ui(enabled, |ui| show(ui, id, editor))
+                .inner
+                .rejected;
         },
     );
     output.textures_delta.clear();
     rejected
+}
+
+#[test]
+fn a_disabled_composer_cannot_accept_paste_or_custom_undo() {
+    let ctx = egui::Context::default();
+    let mut editor = Editor::new("saved draft").unwrap();
+    editor.insert(" latest").unwrap();
+    frame(&ctx, &mut editor, vec![]);
+    frame_enabled(
+        &ctx,
+        &mut editor,
+        vec![egui::Event::Paste(" blocked".into())],
+        false,
+    );
+    assert_eq!(editor.text(), "saved draft latest");
+    frame_enabled(
+        &ctx,
+        &mut editor,
+        vec![key(egui::Key::Z, egui::Modifiers::CTRL)],
+        false,
+    );
+    assert_eq!(editor.text(), "saved draft latest");
 }
 fn key(key: egui::Key, modifiers: egui::Modifiers) -> egui::Event {
     egui::Event::Key {

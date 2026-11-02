@@ -17,16 +17,20 @@ fn character(text: &str, byte: usize) -> CharIndex {
 }
 struct Buffer<'a> {
     editor: &'a mut Editor,
+    editable: bool,
     rejected: bool,
 }
 impl egui::TextBuffer for Buffer<'_> {
     fn is_mutable(&self) -> bool {
-        true
+        self.editable
     }
     fn as_str(&self) -> &str {
         self.editor.text()
     }
     fn insert_text(&mut self, text: &str, at: CharIndex) -> usize {
+        if !self.editable {
+            return 0;
+        }
         let at = editor::floor(self.editor.text(), byte(self.editor.text(), at));
         if self.editor.replace(at..at, text).is_err() {
             self.rejected = true;
@@ -36,6 +40,9 @@ impl egui::TextBuffer for Buffer<'_> {
         }
     }
     fn delete_char_range(&mut self, range: Range<CharIndex>) {
+        if !self.editable {
+            return;
+        }
         let start = byte(self.editor.text(), range.start);
         let end = byte(self.editor.text(), range.end);
         let _ = self.editor.replace(start..end, "");
@@ -50,6 +57,9 @@ impl egui::TextBuffer for Buffer<'_> {
             ..editor::ceil(text, byte(text, range.end))]
     }
     fn replace_with(&mut self, text: &str) {
+        if !self.editable {
+            return;
+        }
         if self
             .editor
             .replace(0..self.editor.text().len(), text)
@@ -76,7 +86,7 @@ pub fn show(ui: &mut egui::Ui, id: egui::Id, editor: &mut Editor) -> Output {
             byte(editor.text(), range.primary.index),
         );
     }
-    if ui.memory(|memory| memory.has_focus(id)) {
+    if ui.is_enabled() && ui.memory(|memory| memory.has_focus(id)) {
         ui.input_mut(|input| {
             input.events.retain(|event| {
                 let egui::Event::Key {
@@ -117,10 +127,12 @@ pub fn show(ui: &mut egui::Ui, id: egui::Id, editor: &mut Editor) -> Output {
     let before = editor.cursor();
     let mut buffer = Buffer {
         editor,
+        editable: ui.is_enabled(),
         rejected: false,
     };
     let mut output = egui::TextEdit::multiline(&mut buffer)
         .id(id)
+        .interactive(ui.is_enabled())
         .hint_text("Write a message or /help")
         .desired_rows(3)
         .desired_width(f32::INFINITY)

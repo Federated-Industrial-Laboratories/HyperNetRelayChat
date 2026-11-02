@@ -1,15 +1,23 @@
 # HRC HyperNet integration contract map
 
-Draft 3, 31 October 2026. [Product plan](ProductPlan.md) · [Protocol proposal](ProtocolPermissions.md)
+Revision 4, 2 November 2026. [Product plan](ProductPlan.md) · [Protocol proposal](ProtocolPermissions.md)
 
-This map records inspected upstream behaviour and the HRC integration boundary. The HRC Rust adapter and smallest local conversation have representative real HyperNet integration evidence; complete release and pilot-capacity qualification remain open. The 0.10.0 source implements the previously required companion authority and directional-context extension while retaining the 0.9.1 permission correction.
+This map records the inspected upstream boundary used by the HRC Rust adapter. Core 0.10.1 corrects authority preparation near gate renewal and remains compatible with Suite 0.10.0. Both retain the earlier permission correction. HRC local conversation integration has passed its bounded native workflow; pilot capacity and the remaining release scenarios still require qualification.
 
-| Product | Published v0.10.0 revision | Status |
+| Product | Published revision | Status |
 | --- | --- | --- |
-| HyperNet Core | `b840c8b8e7d74fac71e898cf2c2eb7c660c57275` | Published; signed public assets verified |
-| HyperNetSuite | `3055f06a691fbc2f0214b4d9bb706a004d5c22ad` | Published; signed public assets verified |
+| HyperNet Core 0.10.1 | `f3b95f798def698087bd229dca9dcd0ec2c513e4` | Published; signed public assets verified |
+| HyperNetSuite 0.10.0 | `3055f06a691fbc2f0214b4d9bb706a004d5c22ad` | Published; signed public assets verified |
 
-Sources below refer to the exact published revisions. The stable v0.10.0 releases, all sixteen public assets, their hashes and the checksum/package signatures were verified. Installed qualification with the final release executables passed version-1 and version-2 payloads, exact session/action/nonce binding, a check using the one-second SDK default, expiry, cancellation and certified denial after grant revocation. The bounded fixture was cleaned up. This establishes the recorded HyperNet boundary, not HRC interoperability, pilot capacity, other-platform support or independent security certification. Earlier source-bound results retain their original identities. A version string alone is insufficient to prove the selected semantics.
+Sources below refer to the exact published revisions. Core 0.10.1's signed
+package, installed confinement and native application renewal/reconnect/refusal
+checks pass. Its public assets and signatures are verified. Suite 0.10.0 retains
+its published qualification. The earlier paired 0.10.0 workflow covers version-1
+and version-2 payloads, exact session/action/nonce binding, the one-second SDK
+default, expiry, cancellation and certified denial after revocation. Those
+results retain their original artifact identities. None establishes HRC pilot
+capacity, another supported platform or independent security certification.
+A version string alone is insufficient to prove the selected semantics.
 
 ## Transport and service contract
 
@@ -24,7 +32,7 @@ Sources below refer to the exact published revisions. The stable v0.10.0 release
 | Directional EOF permits half-close; cancellation, expiry, revocation or hard failure closes the stream | Distinguish transport closure from an HRC commit result; no automatic effect replay |
 | Same service/principal has 16 reusable slots with generations and fenced retirement | A client close is not permission to revive a spent session or restore its quota |
 
-These behaviours are documented in [Core application streams](https://github.com/Federated-Industrial-Laboratories/HyperNet/blob/b840c8b8e7d74fac71e898cf2c2eb7c660c57275/Documentation/ApplicationStreams.md) and implemented in [Suite's companion](https://github.com/Federated-Industrial-Laboratories/HyperNetSuite/blob/3055f06a691fbc2f0214b4d9bb706a004d5c22ad/Source/Applications/ApplicationStreamsAgent.rs).
+These behaviours are documented in [Core application streams](https://github.com/Federated-Industrial-Laboratories/HyperNet/blob/f3b95f798def698087bd229dca9dcd0ec2c513e4/Documentation/ApplicationStreams.md) and implemented in [Suite's companion](https://github.com/Federated-Industrial-Laboratories/HyperNetSuite/blob/3055f06a691fbc2f0214b4d9bb706a004d5c22ad/Source/Applications/ApplicationStreamsAgent.rs).
 
 HyperNet is mandatory for all HRC remote chat/service paths. A refusal, unavailable relay, incompatible protocol or missing selected privacy policy fails closed. HRC must not use a direct TCP/HTTP path, process proxy, payload-supplied address or alternate trust root as recovery. Local companion IPC is the documented local boundary, not an Internet fallback.
 
@@ -32,15 +40,15 @@ HyperNet is mandatory for all HRC remote chat/service paths. A refusal, unavaila
 
 The hotfix retains signed action numbers and record bytes. Stream management is action 29 and connection is action 30, with an exact Service scope `(3, service ID)`. The terminal grant and every non-root ancestor must have only Service scopes. Network, mixed-family or other resource kinds fail these effects. Sealed publication uses Object/Namespace-only grants, so its overlapping numbers cannot grant stream access.
 
-Only a root accepted by current governance may remain broad as an ancestor authorising explicit scoped delegation. A broad root cannot execute the stream effect as its terminal grant. A narrow child beneath a broad non-root grant does not repair the chain. Existing exact subject, action, version, admission, tier, expiry, revocation and consent checks still apply. See [scope classifier](https://github.com/Federated-Industrial-Laboratories/HyperNet/blob/b840c8b8e7d74fac71e898cf2c2eb7c660c57275/Source/Protocol/TrustActionScope.rs), [chain check](https://github.com/Federated-Industrial-Laboratories/HyperNet/blob/b840c8b8e7d74fac71e898cf2c2eb7c660c57275/Source/Authority/Governance/AuthorityGovernance.rs) and [stream evaluation](https://github.com/Federated-Industrial-Laboratories/HyperNet/blob/b840c8b8e7d74fac71e898cf2c2eb7c660c57275/Source/Authority/Domains/AuthorityStreamsEvaluation.rs).
+Only a root accepted by current governance may remain broad as an ancestor authorising explicit scoped delegation. A broad root cannot execute the stream effect as its terminal grant. A narrow child beneath a broad non-root grant does not repair the chain. Existing exact subject, action, version, admission, tier, expiry, revocation and consent checks still apply. See [scope classifier](https://github.com/Federated-Industrial-Laboratories/HyperNet/blob/f3b95f798def698087bd229dca9dcd0ec2c513e4/Source/Protocol/TrustActionScope.rs), [chain check](https://github.com/Federated-Industrial-Laboratories/HyperNet/blob/f3b95f798def698087bd229dca9dcd0ec2c513e4/Source/Authority/Governance/AuthorityGovernance.rs) and [stream evaluation](https://github.com/Federated-Industrial-Laboratories/HyperNet/blob/f3b95f798def698087bd229dca9dcd0ec2c513e4/Source/Authority/Domains/AuthorityStreamsEvaluation.rs).
 
-When migrating from 0.9.0 to the corrected permission evaluator, the complete authority committee, endpoints and corresponding Suite clients need a coordinated stopped upgrade before affected work resumes. First quiesce ordered mutations and pending requests on the old version, complete catch-up, inspect fresh quorum evidence, and stop all voters at the same fully applied and committed height. Preserve complete journals, state, history and floors. An old committed but unapplied suffix would execute under the new evaluator and can diverge; lagging or mixed-version upgrades are unsupported. Old binaries retain the earlier broad interpretation; unchanged wire numbers do not make mixed semantics supported. Existing broad admissions/service/reviewer bindings need the documented explicit migration. Same-rights application renewal cannot change an accepted grant. [Permission scopes and migration](https://github.com/Federated-Industrial-Laboratories/HyperNet/blob/b840c8b8e7d74fac71e898cf2c2eb7c660c57275/Documentation/PermissionScopes.md)
+When migrating from 0.9.0 to the corrected permission evaluator, the complete authority committee, endpoints and corresponding Suite clients need a coordinated stopped upgrade before affected work resumes. First quiesce ordered mutations and pending requests on the old version, complete catch-up, inspect fresh quorum evidence, and stop all voters at the same fully applied and committed height. Preserve complete journals, state, history and floors. An old committed but unapplied suffix would execute under the new evaluator and can diverge; lagging or mixed-version upgrades are unsupported. Old binaries retain the earlier broad interpretation; unchanged wire numbers do not make mixed semantics supported. Existing broad admissions/service/reviewer bindings need the documented explicit migration. Same-rights application renewal cannot change an accepted grant. [Permission scopes and migration](https://github.com/Federated-Industrial-Laboratories/HyperNet/blob/f3b95f798def698087bd229dca9dcd0ec2c513e4/Documentation/PermissionScopes.md)
 
 The additive 0.10.0 check interface needs matching Core endpoints and Suite companions, stopped service replacement and renewed local artifact consent. It does not itself require new grants. Existing 0.9.1 payload-only peers remain compatible but cannot supply the fresh-check capability HRC requires.
 
 ## Application identity and renewal
 
-An application admission binds its own key, owner and exact grant, with validity at most seven days and within grant validity. Applications have no further delegation authority. Same-rights renewal requires explicit owner/application consent; it does not enlarge rights or permit unattended consent. Withdrawal remains restrictive, and withdrawn application keys cannot be reused. [Application lifecycle](https://github.com/Federated-Industrial-Laboratories/HyperNet/blob/b840c8b8e7d74fac71e898cf2c2eb7c660c57275/Documentation/Applications.md)
+An application admission binds its own key, owner and exact grant, with validity at most seven days and within grant validity. Applications have no further delegation authority. Same-rights renewal requires explicit owner/application consent; it does not enlarge rights or permit unattended consent. Withdrawal remains restrictive, and withdrawn application keys cannot be reused. [Application lifecycle](https://github.com/Federated-Industrial-Laboratories/HyperNet/blob/f3b95f798def698087bd229dca9dcd0ec2c513e4/Documentation/Applications.md)
 
 Each HRC agent that requires independent transport attribution needs its own admitted principal and companion/profile. Sharing a human's companion authenticates the same principal and cannot prove a separate agent. HRC's account/endpoint enrolment must bind that principal explicitly; no caller-supplied display name or represented-account field can do so.
 
@@ -79,11 +87,17 @@ Core performs a new endpoint-only `Stream::Permit` read, verifies its certified 
 
 The caller's 100-5,000 ms wait becomes an absolute `CLOCK_BOOTTIME` deadline at companion dispatch. The SDK also retains its earlier call-start deadline; HRC's Rust adapter must do the same. The authority challenge has a separate immutable ceiling at original companion start plus 5,000 ms, including time spent queued. This permits the authority uncertainty window without extending the caller's wait. The delivered receipt is clipped by current clock validity, original caller and stream bounds, current consent/gates and the certified authority lifetime. Queueing, copying and reconnect never renew it. Pending checks die with the control generation; known cancellation, closure or replacement invalidates use. A delivered observation cannot report an as-yet-unobserved remote change.
 
+Core 0.10.1 prepares an endpoint or selected-stream gate at most once when it
+lacks headroom for a queued check. Preparation keeps the original caller budget;
+its readiness reads inherit the original five-second signed challenge ceiling.
+Current consent, cancellation, route lifetime and certified expiry still clip
+acceptance. This correction neither caches authority nor expands read capacity.
+
 There is at most one pending check per connection and four per companion. The endpoint executes one authority read at a time with bounded request/frame queues. The control channel consumes none of the sixteen application connection slots. These are implementation bounds, not evidence that the accepted HRC pilot meets latency or fairness targets.
 
 Version-2 outgoing context records actual authenticated nested TLS 1.3 and the selected/configured route settings. When the certified lookup matches the actual TLS destination, it includes bounded destination-profile provenance. Incoming context requires an exact-session endpoint observation: public mode 2 reports unknown upstream relay transit; attached mode 3 attests its approved attachment, relay service and profile digest. Missing evidence remains unknown. No saved profile or attachment proves physical operator independence or current profile validity; the corresponding assertions remain false. Message encryption is application-defined.
 
-Sources: [Core check contract](https://github.com/Federated-Industrial-Laboratories/HyperNet/blob/b840c8b8e7d74fac71e898cf2c2eb7c660c57275/Documentation/ApplicationChecks.md), [canonical endpoint control schema](https://github.com/Federated-Industrial-Laboratories/HyperNet/blob/b840c8b8e7d74fac71e898cf2c2eb7c660c57275/Source/Authority/Domains/ApplicationStreamControl.rs), [Suite context contract](https://github.com/Federated-Industrial-Laboratories/HyperNetSuite/blob/3055f06a691fbc2f0214b4d9bb706a004d5c22ad/Documentation/ApplicationContext.md) and [check verification](https://github.com/Federated-Industrial-Laboratories/HyperNetSuite/blob/3055f06a691fbc2f0214b4d9bb706a004d5c22ad/Source/Applications/ApplicationStreamChecks.rs).
+Sources: [Core check contract](https://github.com/Federated-Industrial-Laboratories/HyperNet/blob/f3b95f798def698087bd229dca9dcd0ec2c513e4/Documentation/ApplicationChecks.md), [canonical endpoint control schema](https://github.com/Federated-Industrial-Laboratories/HyperNet/blob/f3b95f798def698087bd229dca9dcd0ec2c513e4/Source/Authority/Domains/ApplicationStreamControl.rs), [Suite context contract](https://github.com/Federated-Industrial-Laboratories/HyperNetSuite/blob/3055f06a691fbc2f0214b4d9bb706a004d5c22ad/Documentation/ApplicationContext.md) and [check verification](https://github.com/Federated-Industrial-Laboratories/HyperNetSuite/blob/3055f06a691fbc2f0214b4d9bb706a004d5c22ad/Source/Applications/ApplicationStreamChecks.rs).
 
 ## Remaining HRC integration gates
 
@@ -98,7 +112,7 @@ The [transport authority and federation profile](IntegrationProfile.md) applies 
 | Remote freshness and clock recovery | Preserve source expiry and the home five-second challenge bound with conservative cross-host conversion and home-owned withdrawal barriers |
 | Pilot and platform qualification | Exercise actual Linux IPC/security constraints, actor topology and bounded resource/latency behaviour; upstream limits are not an HRC capacity result |
 
-HyperNet's current federation copies explicitly shared approved Pages. Its treaty/bridge trust pattern informs HRC, but it supplies no live chat forwarding contract. HRC's separately admitted bilateral gateways use the [federation runtime contract](FederationRuntime.md) and require their own setup and native qualification. [Existing federation](https://github.com/Federated-Industrial-Laboratories/HyperNet/blob/b840c8b8e7d74fac71e898cf2c2eb7c660c57275/Documentation/Federation.md)
+HyperNet's current federation copies explicitly shared approved Pages. Its treaty/bridge trust pattern informs HRC, but it supplies no live chat forwarding contract. HRC's separately admitted bilateral gateways use the [federation runtime contract](FederationRuntime.md) and require their own setup and native qualification. [Existing federation](https://github.com/Federated-Industrial-Laboratories/HyperNet/blob/f3b95f798def698087bd229dca9dcd0ec2c513e4/Documentation/Federation.md)
 
 ## Platform and evidence gate
 

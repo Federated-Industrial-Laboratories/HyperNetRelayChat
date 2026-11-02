@@ -54,6 +54,7 @@ impl Worker {
                 mentions,
             } => {
                 self.client.save_draft_mentions(room, &text, &mentions)?;
+                self.draft_saved(room);
                 if let Some(v) = &mut self.snapshot.selected
                     && v.summary.room == room
                 {
@@ -400,14 +401,7 @@ impl Worker {
             parent,
             causation,
         } = message;
-        self.client.save_draft_mentions(room, &text, &mentions)?;
-        if let Some(v) = &mut self.snapshot.selected
-            && v.summary.room == room
-        {
-            v.draft = text.clone();
-            v.draft_mentions = mentions.clone();
-        }
-        self.publish();
+        let owns_draft = self.preserve_send_draft(room, &text, &mentions)?;
         if grant
             .as_ref()
             .is_some_and(|g| g.scope.mode == delegation::Mode::Draft)
@@ -447,17 +441,24 @@ impl Worker {
         } else {
             None
         };
-        let prepared = self.client.prepare_send(
+        let message = messaging::Send {
+            text,
+            mentions,
+            parent,
+            causation,
+        };
+        let prepared = self.client.prepare_preserved_send_with(
             room,
-            &messaging::Send {
-                text,
-                mentions,
-                parent,
-                causation,
-            },
+            &message,
             grant.as_deref(),
             is_action,
             approval,
+            |tx, action| {
+                if owns_draft {
+                    super::super::outbox::bind_draft_transaction(tx, action.action(), &message)?;
+                }
+                Ok(())
+            },
         )?;
         let action = prepared.action;
         let operation = action.operation;
@@ -550,10 +551,14 @@ impl Worker {
         }
         let page = result?;
         view.content.extend(page.content);
-        view.events.extend(page.events);
+        view.events.extend(page.events.into_iter().filter(|event| {
+            !cache::filtered(&self.snapshot.inspection.filters, &event.actor, false)
+        }));
         if view.events.len() > 256 {
             view.events.drain(..view.events.len() - 256);
         }
+        view.content
+            .retain(|id, _| view.events.iter().any(|event| event.event == *id));
         view.query.cursor = Some(page.cursor);
         view.has_more = page.has_more;
         Ok(())

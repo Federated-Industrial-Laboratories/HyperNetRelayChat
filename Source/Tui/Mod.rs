@@ -10,7 +10,7 @@ use crossterm::{
     event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     execute, terminal,
 };
-use hrc::{client::Command, presentation::editor::Editor};
+use hrc::client::Command;
 use std::{
     io::{self, IsTerminal, Write},
     path::Path,
@@ -71,7 +71,7 @@ pub fn run(profile: &Path, offline: bool) -> Result<(), &'static str> {
                 Event::Key(key) if key.kind != KeyEventKind::Release => {
                     key_event(&mut model, key, &mut scroll)
                 }
-                Event::Paste(text) => edit(&mut model, |editor| editor.insert(&text)),
+                Event::Paste(text) => model.edit(|editor| editor.insert(&text)),
                 Event::Resize(_, _) => {}
                 _ => {}
             }
@@ -79,15 +79,6 @@ pub fn run(profile: &Path, offline: bool) -> Result<(), &'static str> {
     }
     model.controller.shutdown();
     Ok(())
-}
-fn edit(
-    model: &mut Model,
-    f: impl FnOnce(&mut Editor) -> Result<(), hrc::presentation::editor::InvalidDraft>,
-) {
-    match f(&mut model.editor) {
-        Ok(()) => model.edited(),
-        Err(error) => model.error = Some(error.to_string()),
-    }
 }
 fn key_event(model: &mut Model, key: KeyEvent, scroll: &mut usize) {
     let shift = key.modifiers.contains(KeyModifiers::SHIFT);
@@ -97,14 +88,18 @@ fn key_event(model: &mut Model, key: KeyEvent, scroll: &mut usize) {
         KeyCode::Char('q' | 'c') if ctrl => model.close(),
         KeyCode::Char('a') if ctrl => model.editor.select_all(),
         KeyCode::Char('z') if ctrl => {
-            model.editor.undo();
-            model.edited();
+            model.edit(|editor| {
+                editor.undo();
+                Ok(())
+            });
         }
         KeyCode::Char('y') if ctrl => {
-            model.editor.redo();
-            model.edited();
+            model.edit(|editor| {
+                editor.redo();
+                Ok(())
+            });
         }
-        KeyCode::Char('j') if ctrl => edit(model, |e| e.insert("\n")),
+        KeyCode::Char('j') if ctrl => model.edit(|e| e.insert("\n")),
         KeyCode::Char('n' | 'p') if ctrl => {
             let rooms = model
                 .snapshot
@@ -169,28 +164,33 @@ fn key_event(model: &mut Model, key: KeyEvent, scroll: &mut usize) {
         KeyCode::Home => model.editor.home(shift, ctrl),
         KeyCode::End => model.editor.end(shift, ctrl),
         KeyCode::Backspace => {
-            model.editor.backspace();
-            model.edited();
+            model.edit(|editor| {
+                editor.backspace();
+                Ok(())
+            });
         }
         KeyCode::Delete => {
-            model.editor.delete();
-            model.edited();
+            model.edit(|editor| {
+                editor.delete();
+                Ok(())
+            });
         }
-        KeyCode::Enter if alt || shift => edit(model, |e| e.insert("\n")),
+        KeyCode::Enter if alt || shift => model.edit(|e| e.insert("\n")),
         KeyCode::Enter => {
             model.submit();
             *scroll = 0;
         }
         KeyCode::Tab => complete(model),
-        KeyCode::Char(c) if !ctrl && !alt => edit(model, |e| e.insert(c.encode_utf8(&mut [0; 4]))),
+        KeyCode::Char(c) if !ctrl && !alt => model.edit(|e| e.insert(c.encode_utf8(&mut [0; 4]))),
         _ => {}
     }
 }
 fn complete(model: &mut Model) {
-    let cursor = model.editor.cursor();
-    let start = model.editor.text()[..cursor]
-        .rfind(char::is_whitespace)
-        .map_or(0, |i| i + 1);
+    if !model.composer_enabled() {
+        return;
+    }
+    let range = model.editor.completion_range();
+    let (start, cursor) = (range.start, range.end);
     let prefix = &model.editor.text()[start..cursor];
     if let Some(prefix) = prefix.strip_prefix('@') {
         let key = hrc::text::lookup(prefix, 1024).unwrap_or_default();
@@ -241,7 +241,7 @@ fn complete(model: &mut Model) {
             .collect::<Vec<_>>();
         if matches.len() == 1 {
             let replacement = format!("{} ", matches[0]);
-            edit(model, |e| e.replace(start..cursor, &replacement));
+            model.edit(|e| e.replace(start..cursor, &replacement));
         } else {
             model.error = Some(matches.join("  "));
         }

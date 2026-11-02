@@ -1,6 +1,6 @@
 # Service and client setup
 
-The Linux command-line workflow uses an existing HyperNet Core/Suite 0.10.0
+The Linux command-line workflow uses existing HyperNet Core 0.10.1 and Suite 0.10.0
 deployment. Its receiving application service and each caller require explicit
 HyperNet admission, current grants, and a configured `hrc/1` stream binding or
 target. HRC does not create application consent or renew it automatically.
