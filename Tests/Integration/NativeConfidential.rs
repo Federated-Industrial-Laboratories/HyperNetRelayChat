@@ -602,7 +602,11 @@ fn workflow(run: &mut Run, request: &Request) -> Result<serde_json::Value> {
     let grant = run.step("Alice", "InspectGrant", |_| {
         net(alice.inspect_grant(reference)).map(|p| p.inspection.grant)
     })?;
-    run.step("Agent", "PublishDelegatedPackage", |_| {
+    run.step("Agent", "PublishDelegatedPackage", |end| {
+        // The agent was idle during the human workflow. Renew the session before
+        // crypto_publish's read preflight, and invoke the publication only once.
+        net(agent.connect())?;
+        ensure(Instant::now() < end, "PublicationPreparationDeadline")?;
         completed(net(agent.crypto_publish(private, Some(&grant)))?)
     })?;
     let view = run.step("Alice", "TrustDelegatedContact", |_| {

@@ -158,7 +158,10 @@ pub(super) fn workflow(
     let mut recovered = run.step("Bob", "ConnectRecoveredDevice", |_| {
         net(Client::open(&recovered))
     })?;
-    let barrier = run.step("Alice", "InspectRecoveryBarrier", |_| {
+    let barrier = run.step("Alice", "InspectRecoveryBarrier", |end| {
+        // Observe recovery through a fresh session after the device administration.
+        net(alice.connect())?;
+        ensure(Instant::now() < end, "RecoveryObservationDeadline")?;
         net(alice.crypto_inspect(room, None))
     })?;
     ensure(
