@@ -361,6 +361,37 @@ fn deliberate_offline_never_reconnects_or_prepares_a_queued_effect() {
 }
 
 #[test]
+fn idle_disconnect_publishes_offline_without_a_following_command() {
+    let (_fixture, mut worker, room) = worker();
+    worker.request = None;
+    worker
+        .command(Command::SaveDraft {
+            room,
+            text: "retained while disconnected".into(),
+            mentions: vec![],
+        })
+        .unwrap();
+    worker.publish();
+    let before = Arc::clone(&worker.shared.snapshot.lock().unwrap());
+    assert_eq!(before.connection, ConnectionState::Online);
+    assert!(!before.inspection.stale);
+
+    worker.offline();
+
+    // No tick, completion or unrelated command may be needed to expose this.
+    let visible = Arc::clone(&worker.shared.snapshot.lock().unwrap());
+    assert_eq!(visible.connection, ConnectionState::Offline);
+    assert!(visible.revision > before.revision);
+    assert!(visible.inspection.stale && visible.privacy.is_none());
+    let selected = visible.selected.as_ref().unwrap();
+    assert!(selected.stale);
+    assert_eq!(selected.draft, "retained while disconnected");
+    assert!(!worker.desired);
+    assert!(worker.client.session().is_err());
+    assert_eq!(visible.completions.len(), before.completions.len());
+}
+
+#[test]
 fn reserved_disconnect_releases_one_held_request_without_starting_it() {
     let (fixture, worker, room) = worker();
     drop(worker);
