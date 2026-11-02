@@ -159,7 +159,7 @@ impl Client {
                     Operation::RoomInspect | Operation::CryptoInspect | Operation::CryptoHistory
                 ) && let Target::Room(room) = action.target
                 {
-                    cache::inspection_failed(&mut self.store, room, &error)
+                    cache::inspection_failed(&mut self.store, operation, room, &error)
                         .map_err(|_| Error::Storage)?;
                 }
                 Err(error)

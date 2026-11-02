@@ -224,8 +224,13 @@ impl Worker {
             match self.read(Operation::RoomInspect, Target::Room(room), &home::Empty {}) {
                 Ok(view) => view,
                 Err(error) => {
-                    if cache::inspection_failed(&mut self.client.store, room, &error)
-                        .map_err(|_| Error::Storage)?
+                    if cache::inspection_failed(
+                        &mut self.client.store,
+                        Operation::RoomInspect,
+                        room,
+                        &error,
+                    )
+                    .map_err(|_| Error::Storage)?
                     {
                         self.caught_up.remove(&room);
                         if let Some(view) = &mut self.snapshot.selected
@@ -524,12 +529,7 @@ impl Worker {
         let mut cached = cache::room(&mut self.client.store, room).map_err(|_| Error::Storage)?;
         cached.events.retain(|e| {
             !cache::filtered(&self.snapshot.inspection.filters, &e.actor, false)
-                && (!matches!(
-                    e.kind,
-                    Operation::MessageSend | Operation::MessageReply | Operation::MessageAction
-                ) || !conversations::subjects(&e.actor)
-                    .iter()
-                    .any(|a| view.remote.ignored.contains(a)))
+                && view.history_visible(e)
         });
         if self.caught_up.contains(&room) {
             self.notify(

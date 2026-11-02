@@ -203,6 +203,17 @@ content without publishing a live epoch-ready receipt. Required removals and
 history windows excluding the present prohibit ready/send admission. A missing
 future transition is an explicit resynchronisation result.
 
+An accepted membership transition changes the room revision and invalidates older
+signed history cursors. Encrypted catch-up handles an exact `CursorContext`
+response by discarding only the history cursor and reading again under current
+authority. It permits one restart within its existing eight history-read attempts;
+another context change remains an explicit failure. This does not rewind the MLS
+epoch, ratchet or transition cursor, discard pending commits, or erase retained
+plaintext. Replayed transitions and messages keep their existing ordering and
+deduplication checks. Current presentation and search apply the latest history
+window and ignore policy to retained content. A denied or expired access decision
+continues to invalidate the current room cache.
+
 Authenticated events, decrypted application content, and normalized local FTS
 entries share the encrypted endpoint store. Removing an event cascades to its
 plaintext/index rows and its consumed crypto delivery copy. Terminal outbox and
