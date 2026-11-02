@@ -507,6 +507,19 @@ fn settle_crypto(
     action: &Action,
     outcome: &Outcome,
 ) -> rusqlite::Result<()> {
+    if action.operation == Operation::CryptoEpochReady
+        && matches!(outcome, Outcome::Committed { .. })
+    {
+        let ready: crate::confidential::Ready = action
+            .body
+            .deserialized()
+            .map_err(|_| rusqlite::Error::InvalidQuery)?;
+        tx.execute(
+            "INSERT INTO client_preferences(id,value) VALUES(?1,?2) ON CONFLICT(id) DO UPDATE SET value=excluded.value",
+            params![super::archive::ready_key(ready.group, ready.epoch, ready.commit_digest), b"true".as_slice()],
+        )?;
+        return Ok(());
+    }
     if action.operation == Operation::CryptoCommit && matches!(outcome, Outcome::Rejected { .. }) {
         let Target::Room(room) = action.target else {
             return Ok(());

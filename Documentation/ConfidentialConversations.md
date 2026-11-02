@@ -191,6 +191,21 @@ packages and required removals. TUI `/crypto` and `/trust` commands use the same
 client operations. Recovering a group is explicit and shows that other endpoints
 must be readmitted for future traffic.
 
+Membership commitment and endpoint readiness are separate outcomes. The API's
+`crypto_initialise` and `crypto_commit` return the exact membership response;
+call `crypto_sync` to verify the winning transition and acknowledge readiness.
+The GUI and TUI perform this synchronisation during their normal refresh. A later
+readiness failure leaves the committed delivery visible with a stale view warning.
+
+The CLI's `crypto initialise` and `crypto commit` attempt both operations and emit
+`response`, `readiness` and `pendingReadiness` separately. A committed response is
+not a claim that the endpoint can send. `Incomplete` readiness includes its error,
+retry guidance and any exact pending acknowledgement identity; resume with
+`crypto sync`. `Pending` retains the inspected barrier and local epoch. Only
+`Ready` reports a current active local epoch with the sending barrier cleared.
+A recovered acknowledgement settles its original operation and readiness marker
+atomically, so another sync does not create a replacement acknowledgement.
+
 The send, history and search commands inspect the room mode first. Encrypted
 plaintext is never submitted to the home as a discovery probe. Search and history
 output keep original authenticated events separate from decrypted local content.
