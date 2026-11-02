@@ -43,8 +43,10 @@ scheduled offers are counted instead of slowing the offered schedule. Every
 normal offered message must commit within the measurement window; missed,
 refused, unknown or late outcomes fail the throughput gate. The reported p95
 includes scheduled waiting and all Controller work before the committed delivery
-becomes visible, including preflight, durable outbox and refresh work. It must
-remain below 500 milliseconds. Each request ID is bound to its observed operation
+becomes visible, including preflight, durable outbox and earlier queued work.
+Confirmed durable deliveries are published before trailing view reads finish;
+current room views remain a separate requirement for every Controller. The p95
+must remain below 500 milliseconds. Each request ID is bound to its observed operation
 ID and digest; an unrelated completion cannot count as its commit. All eight
 Controllers must also receive fresh messages from another account and finish
 with current selected-room state. State durations and snapshot revision counts

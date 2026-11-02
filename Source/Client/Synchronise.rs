@@ -7,6 +7,8 @@ impl Worker {
         if let Some(room) = &mut self.snapshot.selected {
             room.stale = true;
         }
+        // Durable outcomes must remain visible while the following view reads wait or fail.
+        self.publish();
         cache::maintain(&mut self.client.store).map_err(|_| Error::Storage)?;
         let mut rooms = Vec::new();
         let mut after = None;
