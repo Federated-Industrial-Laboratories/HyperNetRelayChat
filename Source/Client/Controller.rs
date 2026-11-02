@@ -35,6 +35,9 @@ struct Shared {
 struct QueueBudget {
     closed: bool,
     pending: usize,
+    // At most the bounded queued sends plus the single held command. Local saves
+    // can overtake that lane, but cannot give an older send ownership of new text.
+    draft_sends: std::collections::BTreeMap<u64, (RoomId, bool)>,
 }
 pub struct Controller {
     shared: Arc<Shared>,
@@ -264,16 +267,15 @@ impl Controller {
         if !bounded(&command) {
             return Err(DispatchError::Invalid);
         }
-        let id = self.next_request.fetch_add(1, Ordering::Relaxed);
         let search = matches!(command, Command::Search(_) | Command::NextSearchPage);
         match command {
             Command::Disconnect => {
                 self.disconnect();
-                return Ok(id);
+                return Ok(self.next_request.fetch_add(1, Ordering::Relaxed));
             }
             Command::CancelSearch => {
                 self.shared.cancel.store(true, Ordering::Release);
-                return Ok(id);
+                return Ok(self.next_request.fetch_add(1, Ordering::Relaxed));
             }
             Command::CloseSearch => self.shared.cancel.store(true, Ordering::Release),
             _ => {}
@@ -296,6 +298,11 @@ impl Controller {
             if queue.pending >= 32 {
                 return Err(DispatchError::QueueFull);
             }
+            // Number queue admission under the same lock, including concurrent callers.
+            let id = self.next_request.fetch_add(1, Ordering::Relaxed);
+            if let Command::Send { room, .. } = &command {
+                queue.draft_sends.insert(id, (*room, false));
+            }
             let sender = if Queued::local(&command) {
                 &self.local_sender
             } else {
@@ -303,9 +310,10 @@ impl Controller {
             };
             queue.pending += 1;
             match sender.try_send(Queued::new(id, command)) {
-                Ok(()) => Ok(()),
+                Ok(()) => Ok(id),
                 Err(error) => {
                     queue.pending -= 1;
+                    queue.draft_sends.remove(&id);
                     Err(match error {
                         TrySendError::Full(_) => DispatchError::QueueFull,
                         TrySendError::Disconnected(_) => DispatchError::Stopped,
@@ -314,7 +322,7 @@ impl Controller {
             }
         })();
         match result {
-            Ok(()) => Ok(id),
+            Ok(id) => Ok(id),
             Err(error) => {
                 if search {
                     self.shared.search_pending.store(false, Ordering::Release);
@@ -418,6 +426,7 @@ impl Worker {
         self.request = Some(queued.id);
         let search = matches!(queued.command, Command::Search(_) | Command::NextSearchPage);
         let result = self.command(queued.command);
+        self.retire_draft_send(queued.id);
         if search {
             self.shared.search_pending.store(false, Ordering::Release);
         }
@@ -441,6 +450,7 @@ impl Worker {
         }
     }
     fn admission_expired(&mut self, id: u64) {
+        self.retire_draft_send(id);
         let status = Status {
             request_id: Some(id),
             code: "CommandAdmissionExpired".into(),
@@ -458,6 +468,51 @@ impl Worker {
         if self.snapshot.completions.len() > 64 {
             self.snapshot.completions.remove(0);
         }
+    }
+    fn retire_draft_send(&self, id: u64) {
+        self.shared
+            .queue
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .draft_sends
+            .remove(&id);
+    }
+    fn draft_saved(&self, room: RoomId) {
+        let Some(id) = self.request else { return };
+        let mut queue = self.shared.queue.lock().unwrap_or_else(|e| e.into_inner());
+        for (&send, (target, superseded)) in &mut queue.draft_sends {
+            if send < id && *target == room {
+                *superseded = true;
+            }
+        }
+    }
+    fn preserve_send_draft(
+        &mut self,
+        room: RoomId,
+        text: &str,
+        mentions: &[messaging::Mention],
+    ) -> Result<bool> {
+        let superseded = self.request.is_some_and(|id| {
+            self.shared
+                .queue
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .draft_sends
+                .get(&id)
+                .is_some_and(|(_, superseded)| *superseded)
+        });
+        if superseded {
+            return Ok(false);
+        }
+        self.client.save_draft_mentions(room, text, mentions)?;
+        if let Some(view) = &mut self.snapshot.selected
+            && view.summary.room == room
+        {
+            view.draft = text.to_owned();
+            view.draft_mentions = mentions.to_vec();
+        }
+        self.publish();
+        Ok(true)
     }
     fn complete(&mut self, id: u64, result: Result<()>) {
         self.record_completion(
@@ -704,18 +759,15 @@ impl Worker {
             return Err(Error::Input);
         };
         let message = self.client.own_plaintext(action)?;
-        if self.client.draft(room)?.as_deref() == Some(message.text.as_str())
-            && self.client.draft_mentions(room)? == message.mentions
+        if super::outbox::clear_sent_draft(&mut self.client.store, action)
+            .map_err(|_| Error::Storage)?
+            && let Some(view) = &mut self.snapshot.selected
+            && view.summary.room == room
+            && view.draft == message.text
+            && view.draft_mentions == message.mentions
         {
-            self.client.save_draft(room, "")?;
-            if let Some(view) = &mut self.snapshot.selected
-                && view.summary.room == room
-                && view.draft == message.text
-                && view.draft_mentions == message.mentions
-            {
-                view.draft.clear();
-                view.draft_mentions.clear();
-            }
+            view.draft.clear();
+            view.draft_mentions.clear();
         }
         Ok(())
     }

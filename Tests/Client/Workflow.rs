@@ -472,7 +472,7 @@ fn old_draft_schema_migrates_without_changing_text_or_recreating_state() {
     outbox::save_draft(&mut store, room, "preserved").unwrap();
     store
         .write(|db| {
-            db.execute_batch("ALTER TABLE client_drafts DROP COLUMN mentions")?;
+            db.execute_batch("ALTER TABLE client_drafts DROP COLUMN sending; ALTER TABLE client_drafts DROP COLUMN mentions")?;
             Ok(storage::Commit::new((), b"old schema fixture".to_vec()))
         })
         .unwrap();
@@ -485,6 +485,113 @@ fn old_draft_schema_migrates_without_changing_text_or_recreating_state() {
     let before = store.usage().unwrap().commit_counter;
     outbox::migrate(&mut store).unwrap();
     assert_eq!(store.usage().unwrap().commit_counter, before);
+}
+
+#[test]
+fn existing_mention_drafts_migrate_without_claiming_ownership_for_old_outbox_actions() {
+    let f = Fixture::new();
+    let mut store = f.create();
+    let action = action();
+    let Target::Room(room) = action.target else {
+        unreachable!()
+    };
+    let message: crate::messaging::Send = action.body.deserialized().unwrap();
+    outbox::save_draft_mentions(&mut store, room, &message.text, &message.mentions).unwrap();
+    store
+        .write(|db| {
+            db.execute_batch("ALTER TABLE client_drafts DROP COLUMN sending")?;
+            Ok(storage::Commit::new(
+                (),
+                b"previous mention draft schema".to_vec(),
+            ))
+        })
+        .unwrap();
+    outbox::migrate(&mut store).unwrap();
+    assert!(!outbox::clear_sent_draft(&mut store, &action).unwrap());
+    assert_eq!(
+        outbox::draft(&mut store, room).unwrap().as_deref(),
+        Some(message.text.as_str())
+    );
+    let before = store.usage().unwrap().commit_counter;
+    outbox::migrate(&mut store).unwrap();
+    assert_eq!(store.usage().unwrap().commit_counter, before);
+}
+
+#[test]
+fn encrypted_draft_binding_is_exact_and_shares_the_outbox_transaction() {
+    let f = Fixture::new();
+    let mut store = f.create();
+    let original = action();
+    let Target::Room(room) = original.target else {
+        unreachable!()
+    };
+    let message: crate::messaging::Send = original.body.deserialized().unwrap();
+    let context = crate::crypto::EncryptionContext {
+        home: original.home,
+        room,
+        operation_id: original.operation_id,
+        actor: original.actor,
+        operation: original.operation,
+        expected: original.expected,
+        approval: None,
+        agreement: None,
+        group: id(60),
+        epoch: 1,
+        parent: None,
+        causation: None,
+    };
+    // Ciphertext is opaque to this local ownership boundary; its exact digest is
+    // bound alongside the plaintext draft, never decoded as a plaintext Send.
+    let encrypted = context.action(vec![1, 2, 3]).unwrap();
+    let verified = signed(&encrypted);
+    let now = TimeBounds::test_now();
+    let window = RetryWindow {
+        id: encrypted.operation_id.window,
+        expires_ms: now.upper_ms + 60000,
+    };
+    outbox::save_draft_mentions(&mut store, room, &message.text, &message.mentions).unwrap();
+    let failed: storage::Result<()> = store.write(|tx| {
+        outbox::prepare_transaction(tx, &verified, &window, now)?;
+        outbox::bind_draft_transaction(tx, &encrypted, &message)?;
+        Err(rusqlite::Error::InvalidQuery)
+    });
+    assert!(failed.is_err());
+    assert!(
+        outbox::pending(
+            &mut store,
+            &SigningKey::from_bytes(&[10; 32]).verifying_key()
+        )
+        .unwrap()
+        .is_empty()
+    );
+    assert!(!outbox::clear_sent_draft(&mut store, &encrypted).unwrap());
+    store
+        .write(|tx| {
+            outbox::prepare_transaction(tx, &verified, &window, now)?;
+            outbox::bind_draft_transaction(tx, &encrypted, &message)?;
+            Ok(storage::Commit::new(
+                (),
+                verified.digest().as_bytes().to_vec(),
+            ))
+        })
+        .unwrap();
+    assert!(
+        !outbox::clear_sent_draft(&mut store, &context.action(vec![4, 5, 6]).unwrap()).unwrap()
+    );
+    drop(store);
+    let mut reopened = f.open();
+    let pending = outbox::pending(
+        &mut reopened,
+        &SigningKey::from_bytes(&[10; 32]).verifying_key(),
+    )
+    .unwrap();
+    assert_eq!(pending[0].action.signed_bytes(), verified.signed_bytes());
+    outbox::save_draft_mentions(&mut reopened, room, &message.text, &message.mentions).unwrap();
+    assert!(!outbox::clear_sent_draft(&mut reopened, &encrypted).unwrap());
+    assert_eq!(
+        outbox::draft(&mut reopened, room).unwrap().as_deref(),
+        Some(message.text.as_str())
+    );
 }
 
 #[test]

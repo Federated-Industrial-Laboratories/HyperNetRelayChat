@@ -94,6 +94,9 @@ pub struct Notification {
     pub event: Id,
     pub sound: bool,
     pub mention: bool,
+    // Retain attribution while queued so newly current recipient filters also
+    // suppress notifications whose events have left the visible history page.
+    pub(crate) actor: Actor,
 }
 #[derive(Clone, Debug)]
 pub struct RoomView {

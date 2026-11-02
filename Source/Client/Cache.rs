@@ -114,7 +114,14 @@ pub(super) fn inspection_failed(
     room: RoomId,
     error: &super::Error,
 ) -> storage::Result<bool> {
-    if !matches!(
+    if !access_unavailable(error) {
+        return Ok(false);
+    }
+    invalidate(store, room)?;
+    Ok(true)
+}
+pub(super) fn access_unavailable(error: &super::Error) -> bool {
+    matches!(
         error,
         super::Error::Rejected {
             code: ErrorCode::Denied | ErrorCode::Expired | ErrorCode::ResynchronisationRequired,
@@ -123,11 +130,7 @@ pub(super) fn inspection_failed(
             code: ErrorCode::Denied | ErrorCode::Expired | ErrorCode::ResynchronisationRequired,
             ..
         }
-    ) {
-        return Ok(false);
-    }
-    invalidate(store, room)?;
-    Ok(true)
+    )
 }
 pub(super) fn invalidate(store: &mut Store, room: RoomId) -> storage::Result<()> {
     store.write(|db|{db.execute("DELETE FROM client_events WHERE room=?1",[room.to_string()])?;db.execute("UPDATE client_rooms SET cursor=NULL,members=NULL,gap='ResynchronisationRequired' WHERE id=?1",[room.to_string()])?;Ok(Commit::new((),encode(&("HRC.ClientInvalidate",room))?))})
@@ -284,11 +287,6 @@ pub(super) fn save_filters(
                 params![f.subject.to_string(), f.ignored, f.muted],
             )?;
         }
-        let ignored: std::collections::BTreeSet<_> = filters
-            .iter()
-            .filter(|f| f.ignored)
-            .map(|f| f.subject)
-            .collect();
         let mut stmt = db.prepare("SELECT event FROM client_events LIMIT 4096")?;
         let events = stmt
             .query_map([], |r| decode::<Event>(&r.get::<_, Vec<u8>>(0)?))?
@@ -298,9 +296,7 @@ pub(super) fn save_filters(
             if matches!(
                 event.kind,
                 Operation::MessageSend | Operation::MessageReply | Operation::MessageAction
-            ) && crate::conversations::subjects(&event.actor)
-                .iter()
-                .any(|subject| ignored.contains(subject))
+            ) && filtered(filters, &event.actor, false)
             {
                 db.execute(
                     "DELETE FROM client_events WHERE id=?1",
@@ -312,5 +308,17 @@ pub(super) fn save_filters(
             (),
             encode(&("HRC.ClientFilters", digest(&encode(&filters)?)))?,
         ))
+    })
+}
+/// Presentation of retained copies follows the service's actor/represented/operator
+/// matching rule. This does not grant access or replace fresh service authorization.
+pub(super) fn filtered(
+    filters: &[crate::moderation::FilterState],
+    actor: &Actor,
+    notification: bool,
+) -> bool {
+    let subjects = crate::conversations::subjects(actor);
+    filters.iter().any(|filter| {
+        (filter.ignored || notification && filter.muted) && subjects.contains(&filter.subject)
     })
 }
