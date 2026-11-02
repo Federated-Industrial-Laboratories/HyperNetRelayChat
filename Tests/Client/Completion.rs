@@ -123,6 +123,8 @@ fn committed_send_generic_and_approval_completion_survive_failed_view_refresh() 
         Operation::MessageSend,
         Operation::AccountSetNickname,
         Operation::ApprovalApprove,
+        Operation::CryptoPropose,
+        Operation::CryptoCommit,
     ] {
         let (_fixture, mut worker, room) = worker();
         let mut action = action();
@@ -143,6 +145,19 @@ fn committed_send_generic_and_approval_completion_survive_failed_view_refresh() 
             Operation::ApprovalApprove => Value::serialized(&delegation::Decision {
                 approval: Id::from_bytes([21; 32]),
                 action_digest: Id::from_bytes([22; 32]),
+            })
+            .unwrap(),
+            Operation::CryptoPropose => Value::serialized(&crate::confidential::Initialise {
+                group: Id::from_bytes([24; 32]),
+                group_info: Blob(vec![]),
+            })
+            .unwrap(),
+            Operation::CryptoCommit => Value::serialized(&crate::confidential::CommitEpoch {
+                group: Id::from_bytes([24; 32]),
+                epoch: 0,
+                commit: Blob(vec![]),
+                additions: vec![],
+                removals: vec![],
             })
             .unwrap(),
             _ => action.body,

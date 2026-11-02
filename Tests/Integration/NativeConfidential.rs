@@ -230,6 +230,55 @@ fn execute_exact(
         *recoveries += 1;
     }
 }
+fn synchronise(
+    c: &mut Client,
+    room: RoomId,
+    grant: Option<&delegation::Grant>,
+    end: Instant,
+) -> Result<CryptoView> {
+    loop {
+        ensure(Instant::now() < end, "SynchronisationDeadline")?;
+        let result = if c.session().is_err() {
+            c.connect().and_then(|_| c.crypto_sync(room, grant))
+        } else {
+            c.crypto_sync(room, grant)
+        };
+        match result {
+            Ok(view) => return Ok(view),
+            Err(error) if transient(&error) => {
+                let delay = match &error {
+                    client::Error::Refused { retry_after_ms, .. } => retry_after_ms.unwrap_or(1000),
+                    _ => 1000,
+                };
+                ensure(
+                    end.saturating_duration_since(Instant::now()) > Duration::from_millis(delay),
+                    "SynchronisationRetryDeadline",
+                )?;
+                if matches!(error, client::Error::Network(_)) {
+                    c.disconnect();
+                }
+                thread::sleep(Duration::from_millis(delay));
+            }
+            Err(error) => return Err(diagnostic(&error)),
+        }
+    }
+}
+fn membership_ready(
+    c: &mut Client,
+    room: RoomId,
+    response: Response,
+    end: Instant,
+) -> Result<(Option<Id>, Value)> {
+    let outcome = completed(response)?;
+    let view = synchronise(c, room, None, end)?;
+    ensure(
+        view.local
+            .as_ref()
+            .is_some_and(|state| state.active && !state.frozen && state.epoch == view.remote.epoch),
+        "MembershipAuthorNotCurrent",
+    )?;
+    Ok(outcome)
+}
 fn committed(outcome: Outcome) -> Result<(Option<Id>, Value)> {
     match outcome {
         Outcome::Committed { event, body, .. } => Ok((event, body)),
@@ -351,8 +400,9 @@ fn join_pair(run: &mut Run, alice: &mut Client, bob: &mut Client, room: RoomId) 
     )
     .and_then(committed)?;
     run.step("Alice", "TrustInitialContacts", |_| pin(alice, room, None))?;
-    run.step("Alice", "InitialiseGroup", |_| {
-        completed(net(alice.crypto_initialise(room, false))?)
+    run.step("Alice", "InitialiseGroup", |end| {
+        let response = net(alice.crypto_initialise(room, false))?;
+        membership_ready(alice, room, response, end)
     })?;
     run.step("Bob", "PublishKeyPackage", |_| {
         completed(net(bob.crypto_publish(room, None))?)
@@ -366,12 +416,13 @@ fn join_pair(run: &mut Run, alice: &mut Client, bob: &mut Client, room: RoomId) 
         .find(|p| p.member.credential.actor.endpoint == endpoint)
         .ok_or("BobPackageUnavailable")?
         .digest;
-    run.step("Alice", "CommitAddBob", |_| {
-        completed(net(alice.crypto_commit(room, &[package], &[], None))?)
+    run.step("Alice", "CommitAddBob", |end| {
+        let response = net(alice.crypto_commit(room, &[package], &[], None))?;
+        membership_ready(alice, room, response, end)
     })?;
     run.step("Bob", "TrustWelcomeRoster", |_| pin(bob, room, None))?;
-    let joined = run.step("Bob", "WelcomeAndReady", |_| {
-        net(bob.crypto_sync(room, None))
+    let joined = run.step("Bob", "WelcomeAndReady", |end| {
+        synchronise(bob, room, None, end)
     })?;
     ensure(
         joined
@@ -567,14 +618,15 @@ fn workflow(run: &mut Run, request: &Request) -> Result<serde_json::Value> {
         })
         .ok_or("DelegatedPackageUnavailable")?
         .digest;
-    run.step("Alice", "CommitDelegatedEndpoint", |_| {
-        completed(net(alice.crypto_commit(private, &[package], &[], None))?)
+    run.step("Alice", "CommitDelegatedEndpoint", |end| {
+        let response = net(alice.crypto_commit(private, &[package], &[], None))?;
+        membership_ready(&mut alice, private, response, end)
     })?;
     run.step("Agent", "TrustDelegatedRoster", |_| {
         pin(&mut agent, private, Some(&grant))
     })?;
-    let ready = run.step("Agent", "DelegatedWelcomeReady", |_| {
-        net(agent.crypto_sync(private, Some(&grant)))
+    let ready = run.step("Agent", "DelegatedWelcomeReady", |end| {
+        synchronise(&mut agent, private, Some(&grant), end)
     })?;
     let keys = ready
         .remote
@@ -699,16 +751,12 @@ fn workflow(run: &mut Run, request: &Request) -> Result<serde_json::Value> {
             _ => Err("RevokedGrantNotDenied".into()),
         }
     })?;
-    run.step("Alice", "CommitRemoval", |_| {
-        completed(net(alice.crypto_commit(
-            private,
-            &[],
-            &[agent_actor.endpoint],
-            None,
-        ))?)
+    run.step("Alice", "CommitRemoval", |end| {
+        let response = net(alice.crypto_commit(private, &[], &[agent_actor.endpoint], None))?;
+        membership_ready(&mut alice, private, response, end)
     })?;
-    let after = run.step("Bob", "VerifyRemovalEpoch", |_| {
-        net(bob.crypto_sync(private, None))
+    let after = run.step("Bob", "VerifyRemovalEpoch", |end| {
+        synchronise(&mut bob, private, None, end)
     })?;
     ensure(
         !after.remote.send_barrier

@@ -818,6 +818,146 @@ fn abandoned_unknown_operations_remain_exact_and_can_record_a_late_outcome() {
     assert!(abandoned && terminal);
 }
 
+#[test]
+fn epoch_ready_settlement_survives_refusal_resolution_restart_and_atomic_failure() {
+    use crate::client::{archive, cache};
+    for mode in 0..3 {
+        let fixture = Fixture::new();
+        let mut store = fixture.create();
+        let mut original = action();
+        cache::initialize(&mut store, original.home).unwrap();
+        original.operation = Operation::CryptoEpochReady;
+        let ready = crate::confidential::Ready {
+            group: id(31),
+            epoch: 2,
+            commit_digest: id(32),
+            sequence: 7,
+            welcome: None,
+        };
+        original.body = Value::serialized(&ready).unwrap();
+        let original = signed(&original);
+        let now = TimeBounds::test_now();
+        let window = RetryWindow {
+            id: original.action().operation_id.window,
+            expires_ms: now.upper_ms + 60000,
+        };
+        outbox::prepare(&mut store, &original, &window, now).unwrap();
+        let refused = reply(
+            &original,
+            Outcome::Refused {
+                code: ErrorCode::Unavailable,
+                detail: "TransportAuthorityExpired".into(),
+                retry_after_ms: Some(1000),
+            },
+        );
+        outbox::record(&mut store, &original, &refused, now).unwrap();
+        let marker = archive::ready_key(ready.group, ready.epoch, ready.commit_digest);
+        assert!(!cache::preferences::<bool>(&mut store, &marker).unwrap());
+        drop(store);
+        let mut store = fixture.open();
+        let pending = outbox::pending(
+            &mut store,
+            &SigningKey::from_bytes(&[10; 32]).verifying_key(),
+        )
+        .unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].action.signed_bytes(), original.signed_bytes());
+        let committed = Outcome::Committed {
+            event: None,
+            position: 8,
+            body: Value::Null,
+        };
+        if mode == 0 {
+            store.write(|tx| {
+                tx.execute_batch("CREATE TRIGGER deny_ready BEFORE INSERT ON client_preferences BEGIN SELECT RAISE(ABORT,'ready write failed'); END;")?;
+                Ok(storage::Commit::new((), b"atomic readiness failure".to_vec()))
+            }).unwrap();
+            assert!(
+                outbox::record(
+                    &mut store,
+                    &original,
+                    &reply(&original, committed.clone()),
+                    now
+                )
+                .is_err()
+            );
+            assert_eq!(
+                outbox::pending(
+                    &mut store,
+                    &SigningKey::from_bytes(&[10; 32]).verifying_key()
+                )
+                .unwrap()
+                .len(),
+                1
+            );
+            store
+                .write(|tx| {
+                    tx.execute_batch("DROP TRIGGER deny_ready")?;
+                    Ok(storage::Commit::new(
+                        (),
+                        b"restore readiness writer".to_vec(),
+                    ))
+                })
+                .unwrap();
+        } else {
+            let mut query = original.action().clone();
+            query.operation_id.operation = id(33);
+            query.operation = Operation::OperationResolve;
+            query.target = Target::Service;
+            query.body = Value::serialized(&home::Resolve {
+                operation_id: original.action().operation_id,
+                action_digest: original.digest(),
+            })
+            .unwrap();
+            let query = signed(&query);
+            let result = reply(
+                &query,
+                Outcome::Result {
+                    body: Value::serialized(&home::ResolveResult {
+                        operation_id: original.action().operation_id,
+                        action_digest: original.digest(),
+                        outcome: if mode == 1 {
+                            committed.clone()
+                        } else {
+                            Outcome::Absent
+                        },
+                    })
+                    .unwrap(),
+                },
+            );
+            outbox::record_resolution(&mut store, &original, &query, &result, now).unwrap();
+            if mode == 2 {
+                assert!(!cache::preferences::<bool>(&mut store, &marker).unwrap());
+                assert_eq!(
+                    outbox::pending(
+                        &mut store,
+                        &SigningKey::from_bytes(&[10; 32]).verifying_key()
+                    )
+                    .unwrap()[0]
+                        .action
+                        .signed_bytes(),
+                    original.signed_bytes()
+                );
+            }
+        }
+        if mode != 1 {
+            outbox::record(&mut store, &original, &reply(&original, committed), now).unwrap();
+        }
+        assert!(cache::preferences::<bool>(&mut store, &marker).unwrap());
+        assert!(
+            outbox::pending(
+                &mut store,
+                &SigningKey::from_bytes(&[10; 32]).verifying_key()
+            )
+            .unwrap()
+            .is_empty()
+        );
+        drop(store);
+        let mut store = fixture.open();
+        assert!(cache::preferences::<bool>(&mut store, &marker).unwrap());
+    }
+}
+
 #[path = "PresentationFixture.rs"]
 mod presentation_fixture;
 

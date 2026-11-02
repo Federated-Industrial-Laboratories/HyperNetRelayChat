@@ -105,32 +105,98 @@ pub fn run(command: Command) -> Result<Json, &'static str> {
             profile,
             room,
             recover,
-        } => json_value(
-            open(&profile)?
+        } => {
+            let mut client = open(&profile)?;
+            let response = client
                 .crypto_initialise(room, recover)
-                .map_err(|e| e.code())?,
-        ),
+                .map_err(|e| e.code())?;
+            membership(&mut client, room, response)
+        }
         Command::Commit {
             profile,
             room,
             add,
             remove,
-        } => json_value(
-            open(&profile)?
+        } => {
+            let mut client = open(&profile)?;
+            let response = client
                 .crypto_commit(room, &add, &remove, None)
-                .map_err(|e| e.code())?,
-        ),
+                .map_err(|e| e.code())?;
+            membership(&mut client, room, response)
+        }
         Command::Sync(access) => {
             let mut client = open(&access.profile)?;
             let grant = access.grant()?;
-            client
-                .crypto_sync(access.room, grant.as_ref())
-                .map_err(|e| e.code())?;
             json_value(
                 client
-                    .crypto_inspect(access.room, grant.as_ref())
+                    .crypto_sync(access.room, grant.as_ref())
                     .map_err(|e| e.code())?,
             )
         }
     }
+}
+fn membership(
+    client: &mut client::Client,
+    room: RoomId,
+    response: Response,
+) -> Result<Json, &'static str> {
+    if !matches!(response.outcome, Outcome::Committed { .. }) {
+        return Ok(json!({"response":json_value(response)?,"readiness":{"status":"NotStarted"}}));
+    }
+    let readiness = client.crypto_sync(room, None);
+    let pending = client.pending().map(|pending| {
+        pending
+            .into_iter()
+            .filter(|entry| {
+                entry.action.action().operation == Operation::CryptoEpochReady
+                    && entry.action.action().target == Target::Room(room)
+            })
+            .collect()
+    });
+    membership_report(response, readiness, pending)
+}
+fn problem(error: client::Error) -> Json {
+    match error {
+        client::Error::Rejected { code, detail } => json!({"code":code,"detail":detail}),
+        client::Error::Refused {
+            code,
+            detail,
+            retry_after_ms,
+        } => json!({"code":code,"detail":detail,"retryAfterMs":retry_after_ms}),
+        error => json!({"code":error.code()}),
+    }
+}
+pub(crate) fn membership_report(
+    response: Response,
+    readiness: client::Result<client::CryptoView>,
+    pending: client::Result<Vec<client::outbox::Pending>>,
+) -> Result<Json, &'static str> {
+    let readiness = match readiness {
+        Ok(view) => {
+            let ready = !view.remote.frozen
+                && !view.remote.send_barrier
+                && view.local.as_ref().is_some_and(|state| {
+                    state.active && !state.frozen && state.epoch == view.remote.epoch
+                });
+            json!({"status":if ready {"Ready"} else {"Pending"},"view":json_value(view)?})
+        }
+        Err(error) => json!({"status":"Incomplete","error":problem(error),"resume":"crypto sync"}),
+    };
+    let pending = match pending {
+        Ok(entries) => Json::Array(
+            entries
+                .into_iter()
+                .map(|entry| {
+                    Ok(
+                        json!({"operationId":json_value(entry.action.action().operation_id)?,
+                "actionDigest":entry.action.digest().as_hex(),
+                "abandoned":entry.abandoned,
+                "lastResponse":json_value(entry.last_response)?}),
+                    )
+                })
+                .collect::<Result<Vec<_>, &'static str>>()?,
+        ),
+        Err(error) => json!({"unavailable":problem(error)}),
+    };
+    Ok(json!({"response":json_value(response)?,"readiness":readiness,"pendingReadiness":pending}))
 }

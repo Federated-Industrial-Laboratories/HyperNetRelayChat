@@ -221,7 +221,13 @@ approval copies expire when their authenticated retry window is closed under the
 client retention policy. Pending or explicitly abandoned unknown operations and
 unresolved approval previews remain bounded, inspectable records until resolution;
 expiry never rewinds a sender ratchet or invents a rejection. The ordinary and
-crypto outboxes settle accepted/rejected outcomes in one transaction.
+crypto outboxes settle accepted/rejected outcomes in one transaction. An accepted
+`CryptoEpochReady` also records the exact group, epoch and commit readiness marker
+in that transaction, including outcomes recovered by exact resolution. A temporary
+refusal preserves the pending acknowledgement; a verified absence permits only
+its original bytes to be retried. Membership commit responses are returned before
+this separate synchronisation/readiness operation, so a later readiness failure
+cannot replace an already committed membership outcome.
 
 The local client checks current membership, grant history bounds and recipient
 filters before online encrypted search/context. It never requests server plaintext

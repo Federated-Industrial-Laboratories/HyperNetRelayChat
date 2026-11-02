@@ -35,6 +35,9 @@ impl CryptoView {
                 .any(|account| self.remote.ignored.contains(account)))
     }
 }
+pub(super) fn ready_key(group: Id, epoch: u64, commit: Id) -> String {
+    format!("ready:{group}:{epoch}:{commit}")
+}
 // Independently bounded objects avoid coupling a maximum filter list to the
 // recursive-node cost of an unrelated maximum contact list.
 #[derive(Serialize, Deserialize)]

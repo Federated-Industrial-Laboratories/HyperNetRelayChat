@@ -172,17 +172,34 @@ fn exact(
                     ensure(r.action_digest == digest, "ResponseDigest")?;
                     r.outcome
                 } else {
-                    let Outcome::Result { body } = r.outcome else {
-                        return Err("ResolutionShape".into());
-                    };
-                    let resolved: home::ResolveResult =
-                        body.deserialized().map_err(|_| "ResolutionShape")?;
-                    ensure(
-                        resolved.operation_id == action.operation_id
-                            && resolved.action_digest == digest,
-                        "ResolutionBinding",
-                    )?;
-                    resolved.outcome
+                    match r.outcome {
+                        Outcome::Result { body } => {
+                            let resolved: home::ResolveResult =
+                                body.deserialized().map_err(|_| "ResolutionShape")?;
+                            ensure(
+                                resolved.operation_id == action.operation_id
+                                    && resolved.action_digest == digest,
+                                "ResolutionBinding",
+                            )?;
+                            resolved.outcome
+                        }
+                        Outcome::Refused {
+                            code:
+                                ErrorCode::Unavailable | ErrorCode::RateLimited | ErrorCode::Overloaded,
+                            retry_after_ms,
+                            ..
+                        } => {
+                            pause(end, retry_after_ms.unwrap_or(1000))?;
+                            attempted = true;
+                            *replays += 1;
+                            continue;
+                        }
+                        Outcome::Rejected { code, detail }
+                        | Outcome::Refused { code, detail, .. } => {
+                            return Err(format!("ResolutionRefused:{code:?}:{detail}"));
+                        }
+                        _ => return Err("ResolutionUnknown".into()),
+                    }
                 };
                 if let Outcome::Refused {
                     code: ErrorCode::Unavailable | ErrorCode::RateLimited | ErrorCode::Overloaded,
@@ -277,6 +294,47 @@ fn search(c: &mut Client, room: RoomId, offline: bool) -> Result<client::Convers
         net(c.search_messages(room, &query, None, &cancel))
     }
 }
+fn synchronise(
+    c: &mut Client,
+    room: RoomId,
+    grant: Option<&delegation::Grant>,
+    end: Instant,
+) -> Result<client::CryptoView> {
+    loop {
+        ensure(Instant::now() < end, "SynchronisationDeadline")?;
+        let result = if c.session().is_err() {
+            c.connect().and_then(|_| c.crypto_sync(room, grant))
+        } else {
+            c.crypto_sync(room, grant)
+        };
+        match result {
+            Ok(view) => return Ok(view),
+            Err(error) => {
+                let delay = retry_delay(&error).ok_or_else(|| error.code().to_string())?;
+                if matches!(error, client::Error::Network(_)) {
+                    c.disconnect();
+                }
+                pause(end, delay)?;
+            }
+        }
+    }
+}
+fn membership_ready(
+    c: &mut Client,
+    room: RoomId,
+    response: Response,
+    end: Instant,
+) -> Result<(Option<Id>, Value)> {
+    let outcome = completed(response)?;
+    let view = synchronise(c, room, None, end)?;
+    ensure(
+        view.local
+            .as_ref()
+            .is_some_and(|state| state.active && !state.frozen && state.epoch == view.remote.epoch),
+        "MembershipAuthorNotCurrent",
+    )?;
+    Ok(outcome)
+}
 fn await_ready(run: &mut Run, alice: &mut Client, room: RoomId) -> Result<client::CryptoView> {
     run.step("Alice", "CurrentRecipientFreshness", |end| {
         loop {
@@ -306,8 +364,9 @@ fn pair(
         &home::Empty {},
     )?)?;
     run.step("Alice", "TrustInitialRoster", |_| pin(alice, room, None))?;
-    run.step("Alice", "InitialiseMls", |_| {
-        completed(net(alice.crypto_initialise(room, false))?)
+    run.step("Alice", "InitialiseMls", |end| {
+        let response = net(alice.crypto_initialise(room, false))?;
+        membership_ready(alice, room, response, end)
     })?;
     run.step("Bob", "PublishOriginKeyPackage", |_| {
         completed(net(bob.crypto_publish(room, None))?)
@@ -321,12 +380,13 @@ fn pair(
         .find(|p| p.member.credential.actor.endpoint == ep)
         .ok_or("OriginPackageMissing")?
         .digest;
-    run.step("Alice", "CommitForeignLeaf", |_| {
-        completed(net(alice.crypto_commit(room, &[package], &[], None))?)
+    run.step("Alice", "CommitForeignLeaf", |end| {
+        let response = net(alice.crypto_commit(room, &[package], &[], None))?;
+        membership_ready(alice, room, response, end)
     })?;
     run.step("Bob", "PinWelcomeRoster", |_| pin(bob, room, None))?;
-    run.step("Bob", "VerifyWelcomeAndReady", |_| {
-        net(bob.crypto_sync(room, None))
+    run.step("Bob", "VerifyWelcomeAndReady", |end| {
+        synchronise(bob, room, None, end)
     })?;
     let v = await_ready(run, alice, room)?;
     ensure(v.remote.members.len() == 2, "PairRosterSize")?;
@@ -371,13 +431,10 @@ fn readmit_encrypted_room(
         before.local.is_none(),
         "RecoveredForeignEndpointInheritedKeys",
     )?;
-    run.step("Alice", "RemoveRecoveredForeignOldLeaf", |_| {
-        completed(net(alice.crypto_commit(
-            scenario.room,
-            &[],
-            &[scenario.old_actor.endpoint],
-            None,
-        ))?)
+    run.step("Alice", "RemoveRecoveredForeignOldLeaf", |end| {
+        let response =
+            net(alice.crypto_commit(scenario.room, &[], &[scenario.old_actor.endpoint], None))?;
+        membership_ready(alice, scenario.room, response, end)
     })?;
     run.step("RecoveredBob", "PublishFutureForeignKeyPackage", |_| {
         completed(net(recovered.crypto_publish(scenario.room, None))?)
@@ -406,13 +463,9 @@ fn readmit_encrypted_room(
         "RecoveredForeignMlsKeyNotIndependent",
     )?;
     let digest = package.digest;
-    run.step("Alice", "ExplicitRecoveredForeignMlsAdmission", |_| {
-        completed(net(alice.crypto_commit(
-            scenario.room,
-            &[digest],
-            &[],
-            None,
-        ))?)
+    run.step("Alice", "ExplicitRecoveredForeignMlsAdmission", |end| {
+        let response = net(alice.crypto_commit(scenario.room, &[digest], &[], None))?;
+        membership_ready(alice, scenario.room, response, end)
     })?;
     run.step("RecoveredBob", "TrustRecoveredForeignWelcome", |_| {
         pin(recovered, scenario.room, None)
@@ -420,7 +473,7 @@ fn readmit_encrypted_room(
     let ready = run.step(
         "RecoveredBob",
         "VerifyRecoveredForeignWelcomeAndReady",
-        |_| net(recovered.crypto_sync(scenario.room, None)),
+        |end| synchronise(recovered, scenario.room, None, end),
     )?;
     ensure(
         ready
@@ -900,17 +953,18 @@ fn workflow(run: &mut Run, r: &Request) -> Result<serde_json::Value> {
         })
         .ok_or("DelegatedPackage")?
         .digest;
-    run.step("Alice", "AddForeignDelegatedLeaf", |_| {
-        completed(net(alice.crypto_commit(r.private, &[package], &[], None))?)
+    run.step("Alice", "AddForeignDelegatedLeaf", |end| {
+        let response = net(alice.crypto_commit(r.private, &[package], &[], None))?;
+        membership_ready(&mut alice, r.private, response, end)
     })?;
     run.step("Agent", "PinDelegatedWelcome", |_| {
         pin(&mut agent, r.private, Some(&grant))
     })?;
-    let ready = run.step("Agent", "DelegatedWelcomeAndReady", |_| {
-        net(agent.crypto_sync(r.private, Some(&grant)))
+    let ready = run.step("Agent", "DelegatedWelcomeAndReady", |end| {
+        synchronise(&mut agent, r.private, Some(&grant), end)
     })?;
-    run.step("Bob", "AdvanceAfterAgentAdmission", |_| {
-        net(bob.crypto_sync(r.private, None))
+    run.step("Bob", "AdvanceAfterAgentAdmission", |end| {
+        synchronise(&mut bob, r.private, None, end)
     })?;
     ensure(
         ready
@@ -968,16 +1022,12 @@ fn workflow(run: &mut Run, r: &Request) -> Result<serde_json::Value> {
                 .contains(&agent_actor.endpoint),
         "RemoteGrantBarrier",
     )?;
-    run.step("Alice", "RemoveRevokedForeignLeaf", |_| {
-        completed(net(alice.crypto_commit(
-            r.private,
-            &[],
-            &[agent_actor.endpoint],
-            None,
-        ))?)
+    run.step("Alice", "RemoveRevokedForeignLeaf", |end| {
+        let response = net(alice.crypto_commit(r.private, &[], &[agent_actor.endpoint], None))?;
+        membership_ready(&mut alice, r.private, response, end)
     })?;
-    run.step("Bob", "VerifyForeignLeafRemoval", |_| {
-        net(bob.crypto_sync(r.private, None))
+    run.step("Bob", "VerifyForeignLeafRemoval", |end| {
+        synchronise(&mut bob, r.private, None, end)
     })?;
     await_ready(run, &mut alice, r.private)?;
     let expiring = create_grant(
