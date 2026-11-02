@@ -261,6 +261,7 @@ fn encrypted_cursor_restart_preserves_plaintext_pending_mls_and_drafts_after_reo
     let room = e.room;
     cache::save_rooms(
         &mut client.store,
+        e.home,
         &[conversations::Summary {
             room,
             name: "private".into(),
