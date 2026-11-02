@@ -603,7 +603,7 @@ fn workflow(run: &mut Run, request: &Request) -> Result<serde_json::Value> {
         net(alice.inspect_grant(reference)).map(|p| p.inspection.grant)
     })?;
     run.step("Agent", "PublishDelegatedPackage", |end| {
-        // The agent was idle during the human workflow. Renew the session before
+        // The agent was idle during the human workflow. Open a fresh session before
         // crypto_publish's read preflight, and invoke the publication only once.
         net(agent.connect())?;
         ensure(Instant::now() < end, "PublicationPreparationDeadline")?;
@@ -665,7 +665,10 @@ fn workflow(run: &mut Run, request: &Request) -> Result<serde_json::Value> {
     )?;
     let delegated = message("native delegated encrypted reply", vec![]);
     let (agent_event, _) = send(run, "Agent", &mut agent, private, &delegated, Some(&grant))?;
-    run.step("Bob", "TrustDelegatedContact", |_| {
+    run.step("Bob", "TrustDelegatedContact", |end| {
+        // Bob returns after the delegated endpoint's admission and sending workflow.
+        net(bob.connect())?;
+        ensure(Instant::now() < end, "RecipientReturnDeadline")?;
         pin(&mut bob, private, None)
     })?;
     let page = run.step("Bob", "ReadDelegatedCiphertext", |_| {
@@ -676,7 +679,9 @@ fn workflow(run: &mut Run, request: &Request) -> Result<serde_json::Value> {
         "DelegatedDecryptionMismatch",
     )?;
     ensure(page.events.iter().any(|e|e.event==agent_event && matches!(e.actor,Actor::Delegated{represented,grant:g,..} if represented==alice_id && g==reference)),"DelegatedAttributionMismatch")?;
-    let queued = run.step("Alice", "PrepareBeforeRevocation", |_| {
+    let queued = run.step("Alice", "PrepareBeforeRevocation", |end| {
+        net(alice.connect())?;
+        ensure(Instant::now() < end, "OwnerReturnDeadline")?;
         net(alice.prepare_send(
             private,
             &message("revocation queued effect", vec![]),
@@ -740,7 +745,10 @@ fn workflow(run: &mut Run, request: &Request) -> Result<serde_json::Value> {
             _ => Err("FreshSendBarrierNotEnforced".into()),
         }
     })?;
-    run.step("Agent", "RevokedGrantReadRefusal", |_| {
+    run.step("Agent", "RevokedGrantReadRefusal", |end| {
+        // The independent endpoint reconnects; the revoked delegated read must fail.
+        net(agent.connect())?;
+        ensure(Instant::now() < end, "RevokedReadDeadline")?;
         match agent.crypto_inspect(private, Some(&grant)) {
             Err(
                 client::Error::Rejected {
