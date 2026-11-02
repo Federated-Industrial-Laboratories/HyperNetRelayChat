@@ -456,8 +456,16 @@ fn open_controllers(
 ) -> Result<Vec<Interactive>> {
     let end = overall.min(Instant::now() + Duration::from_secs(45));
     let mut controllers = Vec::new();
+    emit(
+        json!({"case":"NativeLoadControllerStartup", "bootMs":hrc::clock::boot_ms().ok(),
+        "stage":"Begin", "maximumMilliseconds":millis(end.saturating_duration_since(Instant::now()))}),
+    );
     for (index, path) in paths.iter().take(8).enumerate() {
         let controller = net(Controller::open(path))?;
+        emit(
+            json!({"case":"NativeLoadControllerStartup", "endpoint":index,
+            "bootMs":hrc::clock::boot_ms().ok(), "stage":"ConnectDispatch"}),
+        );
         controller
             .dispatch(Command::Connect)
             .map_err(|_| "ControllerConnectDispatch")?;
@@ -468,11 +476,30 @@ fn open_controllers(
         });
     }
     let mut selected = [false; 8];
+    let mut previous = vec![None; 8];
+    let mut observations = [0u8; 8];
     let mut last_health = Instant::now();
     loop {
         let mut ready = 0;
         for ui in &controllers {
             let v = ui.controller.snapshot();
+            let state = (
+                v.connection.clone(),
+                v.inspection.stale,
+                v.privacy.is_some(),
+                current(&v, room),
+                v.status.as_ref().map(|s| bounded_reason(&s.code)),
+            );
+            if observations[ui.index] < 8 && previous[ui.index].as_ref() != Some(&state) {
+                emit(
+                    json!({"case":"NativeLoadControllerStartup", "endpoint":ui.index,
+                    "bootMs":hrc::clock::boot_ms().ok(), "stage":"ObservedState",
+                    "connection":format!("{:?}",state.0), "inspectionStale":state.1,
+                    "privacyPresent":state.2, "selectedCurrent":state.3, "status":state.4}),
+                );
+                observations[ui.index] += 1;
+                previous[ui.index] = Some(state);
+            }
             if !selected[ui.index]
                 && v.connection == ConnectionState::Online
                 && !v.inspection.stale
@@ -486,6 +513,10 @@ fn open_controllers(
             ready += usize::from(current(&v, room));
         }
         if ready == 8 {
+            emit(
+                json!({"case":"NativeLoadControllerStartup", "bootMs":hrc::clock::boot_ms().ok(),
+                "stage":"AllCurrent"}),
+            );
             return Ok(controllers);
         }
         if Instant::now() >= end {

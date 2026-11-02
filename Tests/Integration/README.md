@@ -91,6 +91,14 @@ or unknown result fails setup with a separate bounded diagnostic; it cannot be
 reported as the original effect's completion. Only the production client can
 resubmit the original bytes after a verified absence result.
 
+Startup emits connection-dispatch times and at most eight observed state changes
+per Controller, using host boot milliseconds for correlation with transport
+logs. These are published snapshot observations, not internal request timings.
+They include connection state, inspection staleness, privacy presence and whether
+the selected room is current. They contain no account IDs, room IDs, message
+content or keys. Startup logging does not change admission, polling cadence,
+retries or measurement bounds.
+
 Deliberately hostile protocol offers
 use the authenticated Session submission API without a durable retry loop.
 Recovery waits for the original offered effects to resolve, then submits one new
