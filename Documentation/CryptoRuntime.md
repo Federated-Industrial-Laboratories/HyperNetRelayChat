@@ -196,6 +196,15 @@ Delegated leaves additionally carry the owner's exact signed grant-creation
 scope. The home can restrict current access but cannot fabricate a broader signed
 scope or substitute an MLS key using only its own signature.
 
+Contact inspection requests at most four continuity records per page and retains
+the existing 1,024-record chain limit. Record indices must be contiguous after the
+requested cursor. A continuation names the last returned record and requires a
+nonempty page with room for another record. Short pages remain valid when the
+response byte limit applies. Each continuation consumes the remaining record
+budget, so one chain inspection uses at most 1,024 requests. An unchanged retained
+chain can finish with an empty terminal page. Malformed pagination fails before
+the fetched chain can update stored contacts or trust.
+
 Historical roster verification may request one exact retained transition or the
 endpoint's selected unexpired Welcome as evidence. Current shared-room authority
 still governs that read. A past-only grant may inspect locally decrypted retained
