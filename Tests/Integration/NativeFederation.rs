@@ -247,15 +247,18 @@ fn history(
     c: &mut Client,
     room: RoomId,
     grant: Option<&delegation::Grant>,
+    end: Instant,
 ) -> Result<client::ConversationPage> {
-    net(c.history_messages(
-        room,
-        &messaging::Page {
-            cursor: None,
-            limit: 50,
-        },
-        grant,
-    ))
+    current_read(c, end, |c| {
+        c.history_messages(
+            room,
+            &messaging::Page {
+                cursor: None,
+                limit: 50,
+            },
+            grant,
+        )
+    })
 }
 fn visible(page: &client::ConversationPage, event: Id, text: &messaging::Send) -> bool {
     matches!(page.content.get(&event),Some(MessageContent::Decrypted(v)) if v.text==text.text&&v.mentions==text.mentions)
@@ -264,8 +267,9 @@ fn pin(
     c: &mut Client,
     room: RoomId,
     grant: Option<&delegation::Grant>,
+    end: Instant,
 ) -> Result<client::CryptoView> {
-    let view = net(c.crypto_inspect(room, grant))?;
+    let view = current_read(c, end, |c| c.crypto_inspect(room, grant))?;
     for contact in &view.contacts {
         match contact.state {
             client::trust::TrustState::UntrustedRegistration => {
@@ -277,7 +281,12 @@ fn pin(
     }
     Ok(view)
 }
-fn search(c: &mut Client, room: RoomId, offline: bool) -> Result<client::ConversationPage> {
+fn search(
+    c: &mut Client,
+    room: RoomId,
+    offline: bool,
+    end: Instant,
+) -> Result<client::ConversationPage> {
     let query = messaging::Search {
         terms: vec!["federatedcafé".into()],
         sender: None,
@@ -291,24 +300,23 @@ fn search(c: &mut Client, room: RoomId, offline: bool) -> Result<client::Convers
     if offline {
         net(c.search_retained(room, &query, &cancel))
     } else {
-        net(c.search_messages(room, &query, None, &cancel))
+        current_read(c, end, |c| c.search_messages(room, &query, None, &cancel))
     }
 }
-fn synchronise(
+fn current_read<T>(
     c: &mut Client,
-    room: RoomId,
-    grant: Option<&delegation::Grant>,
     end: Instant,
-) -> Result<client::CryptoView> {
+    mut read: impl FnMut(&mut Client) -> client::Result<T>,
+) -> Result<T> {
     loop {
-        ensure(Instant::now() < end, "SynchronisationDeadline")?;
+        ensure(Instant::now() < end, "CurrentReadDeadline")?;
         let result = if c.session().is_err() {
-            c.connect().and_then(|_| c.crypto_sync(room, grant))
+            c.connect().and_then(|_| read(c))
         } else {
-            c.crypto_sync(room, grant)
+            read(c)
         };
         match result {
-            Ok(view) => return Ok(view),
+            Ok(value) => return Ok(value),
             Err(error) => {
                 let delay = retry_delay(&error).ok_or_else(|| error.code().to_string())?;
                 if matches!(error, client::Error::Network(_)) {
@@ -318,6 +326,14 @@ fn synchronise(
             }
         }
     }
+}
+fn synchronise(
+    c: &mut Client,
+    room: RoomId,
+    grant: Option<&delegation::Grant>,
+    end: Instant,
+) -> Result<client::CryptoView> {
+    current_read(c, end, |c| c.crypto_sync(room, grant))
 }
 fn membership_ready(
     c: &mut Client,
@@ -338,7 +354,7 @@ fn membership_ready(
 fn await_ready(run: &mut Run, alice: &mut Client, room: RoomId) -> Result<client::CryptoView> {
     run.step("Alice", "CurrentRecipientFreshness", |end| {
         loop {
-            let v = net(alice.crypto_inspect(room, None))?;
+            let v = current_read(alice, end, |c| c.crypto_inspect(room, None))?;
             if !v.remote.send_barrier {
                 return Ok(v);
             }
@@ -363,7 +379,9 @@ fn pair(
         Target::Room(room),
         &home::Empty {},
     )?)?;
-    run.step("Alice", "TrustInitialRoster", |_| pin(alice, room, None))?;
+    run.step("Alice", "TrustInitialRoster", |end| {
+        pin(alice, room, None, end)
+    })?;
     run.step("Alice", "InitialiseMls", |end| {
         let response = net(alice.crypto_initialise(room, false))?;
         membership_ready(alice, room, response, end)
@@ -371,7 +389,9 @@ fn pair(
     run.step("Bob", "PublishOriginKeyPackage", |_| {
         completed(net(bob.crypto_publish(room, None))?)
     })?;
-    let v = run.step("Alice", "PinOriginContact", |_| pin(alice, room, None))?;
+    let v = run.step("Alice", "PinOriginContact", |end| {
+        pin(alice, room, None, end)
+    })?;
     let ep = net(bob.session())?.ready.acting.endpoint;
     let package = v
         .remote
@@ -384,7 +404,7 @@ fn pair(
         let response = net(alice.crypto_commit(room, &[package], &[], None))?;
         membership_ready(alice, room, response, end)
     })?;
-    run.step("Bob", "PinWelcomeRoster", |_| pin(bob, room, None))?;
+    run.step("Bob", "PinWelcomeRoster", |end| pin(bob, room, None, end))?;
     run.step("Bob", "VerifyWelcomeAndReady", |end| {
         synchronise(bob, room, None, end)
     })?;
@@ -424,8 +444,8 @@ fn readmit_encrypted_room(
         .ok_or("OriginalMlsLeafMissing")?
         .credential
         .mls_key;
-    let before = run.step("RecoveredBob", "NoInheritedForeignRoomKeys", |_| {
-        net(recovered.crypto_inspect(scenario.room, None))
+    let before = run.step("RecoveredBob", "NoInheritedForeignRoomKeys", |end| {
+        current_read(recovered, end, |c| c.crypto_inspect(scenario.room, None))
     })?;
     ensure(
         before.local.is_none(),
@@ -439,8 +459,8 @@ fn readmit_encrypted_room(
     run.step("RecoveredBob", "PublishFutureForeignKeyPackage", |_| {
         completed(net(recovered.crypto_publish(scenario.room, None))?)
     })?;
-    let inspected = run.step("Alice", "VerifyPinnedForeignRecoveryContinuity", |_| {
-        pin(alice, scenario.room, None)
+    let inspected = run.step("Alice", "VerifyPinnedForeignRecoveryContinuity", |end| {
+        pin(alice, scenario.room, None, end)
     })?;
     ensure(
         inspected.contacts.iter().any(|contact| {
@@ -467,8 +487,8 @@ fn readmit_encrypted_room(
         let response = net(alice.crypto_commit(scenario.room, &[digest], &[], None))?;
         membership_ready(alice, scenario.room, response, end)
     })?;
-    run.step("RecoveredBob", "TrustRecoveredForeignWelcome", |_| {
-        pin(recovered, scenario.room, None)
+    run.step("RecoveredBob", "TrustRecoveredForeignWelcome", |end| {
+        pin(recovered, scenario.room, None, end)
     })?;
     let ready = run.step(
         "RecoveredBob",
@@ -496,7 +516,7 @@ fn readmit_encrypted_room(
     let old = run.step(
         "RecoveredBob",
         "RetainedForeignCiphertextWithoutOldPlaintext",
-        |_| history(recovered, scenario.room, None),
+        |end| history(recovered, scenario.room, None, end),
     )?;
     ensure(
         old.events
@@ -511,15 +531,15 @@ fn readmit_encrypted_room(
     let future = message("future-only foreign recovered endpoint");
     let (event, prepared) = run.send("Alice", alice, scenario.room, &future, None)?;
     ensure(prepared.encrypted, "RecoveredForeignPlaintextDowngrade")?;
-    let received = run.step("RecoveredBob", "DecryptNewForeignRoomMessage", |_| {
-        history(recovered, scenario.room, None)
+    let received = run.step("RecoveredBob", "DecryptNewForeignRoomMessage", |end| {
+        history(recovered, scenario.room, None, end)
     })?;
     ensure(
         visible(&received, event, &future),
         "RecoveredForeignFutureDecryption",
     )?;
-    run.step("Alice", "SettleRecoveredForeignRoomSend", |_| {
-        history(alice, scenario.room, None)
+    run.step("Alice", "SettleRecoveredForeignRoomSend", |end| {
+        history(alice, scenario.room, None, end)
     })?;
     Ok(())
 }
@@ -578,8 +598,8 @@ fn create_grant(
         &scope,
     )?)?;
     let reference = body.deserialized().map_err(|_| "GrantReference")?;
-    run.step("Bob", "InspectOwnerSignedGrant", |_| {
-        net(bob.inspect_grant(reference)).map(|v| v.inspection.grant)
+    run.step("Bob", "InspectOwnerSignedGrant", |end| {
+        current_read(bob, end, |c| c.inspect_grant(reference)).map(|v| v.inspection.grant)
     })
 }
 fn denied(outcome: Outcome) -> Result<()> {
@@ -674,8 +694,8 @@ fn workflow(run: &mut Run, r: &Request) -> Result<serde_json::Value> {
         &message("independent origin bot"),
         None,
     )?;
-    let page = run.step("Alice", "InspectForeignAttribution", |_| {
-        history(&mut alice, r.community, None)
+    let page = run.step("Alice", "InspectForeignAttribution", |end| {
+        history(&mut alice, r.community, None, end)
     })?;
     ensure(
         page.events
@@ -734,8 +754,8 @@ fn workflow(run: &mut Run, r: &Request) -> Result<serde_json::Value> {
     run.step("Bob", "ReconnectAfterAdversarialFrame", |_| {
         net(bob.connect())
     })?;
-    let page = run.step("Alice", "NoSubstitutionEffect", |_| {
-        history(&mut alice, r.community, None)
+    let page = run.step("Alice", "NoSubstitutionEffect", |end| {
+        history(&mut alice, r.community, None, end)
     })?;
     ensure(
         page.events
@@ -767,8 +787,8 @@ fn workflow(run: &mut Run, r: &Request) -> Result<serde_json::Value> {
     };
     let (first, prepared) = run.send("Alice", &mut alice, r.private, &original, None)?;
     ensure(prepared.encrypted, "PrivatePlaintextDowngrade")?;
-    let page = run.step("Bob", "DecryptForeignCiphertext", |_| {
-        history(&mut bob, r.private, None)
+    let page = run.step("Bob", "DecryptForeignCiphertext", |end| {
+        history(&mut bob, r.private, None, end)
     })?;
     ensure(
         visible(&page, first, &original),
@@ -790,32 +810,33 @@ fn workflow(run: &mut Run, r: &Request) -> Result<serde_json::Value> {
     )?;
     let mut replays = 0;
     let again = run.step("Alice", "ExactCiphertextRetry", |end| {
-        exact(
+        let outcome = exact(
             &mut alice,
             &prepared.action,
             &prepared.signed,
             end,
             &mut replays,
-        )
+        )?;
+        history(&mut alice, r.private, None, end)?;
+        Ok(outcome)
     })?;
     run.replays += replays;
     ensure(commit(again)?.0 == Some(first), "DuplicateCiphertextEffect")?;
-    history(&mut alice, r.private, None)?;
     bob.disconnect();
     drop(bob);
     let mut bob = run.step("Bob", "RestartOfflineArchive", |_| {
         net(Client::open_offline(&r.bob))
     })?;
-    let retained = run.step("Bob", "RestartEncryptedIndex", |_| {
-        search(&mut bob, r.private, true)
+    let retained = run.step("Bob", "RestartEncryptedIndex", |end| {
+        search(&mut bob, r.private, true, end)
     })?;
     ensure(
         retained.stale && visible(&retained, first, &original),
         "RetainedCiphertextArchive",
     )?;
     run.step("Bob", "ReconnectCurrentRead", |_| net(bob.connect()))?;
-    let current = run.step("Bob", "CurrentLocalDecryptedSearch", |_| {
-        search(&mut bob, r.private, false)
+    let current = run.step("Bob", "CurrentLocalDecryptedSearch", |end| {
+        search(&mut bob, r.private, false, end)
     })?;
     ensure(
         !current.stale && visible(&current, first, &original),
@@ -831,8 +852,8 @@ fn workflow(run: &mut Run, r: &Request) -> Result<serde_json::Value> {
             enabled: true,
         },
     )?)?;
-    let ignored = run.step("Bob", "CurrentIgnoreFiltersLocalSearch", |_| {
-        search(&mut bob, r.private, false)
+    let ignored = run.step("Bob", "CurrentIgnoreFiltersLocalSearch", |end| {
+        search(&mut bob, r.private, false, end)
     })?;
     ensure(
         !ignored.events.iter().any(|e| e.event == first),
@@ -854,15 +875,16 @@ fn workflow(run: &mut Run, r: &Request) -> Result<serde_json::Value> {
     ensure(encrypted.encrypted, "DirectPlaintextDowngrade")?;
     ensure(
         visible(
-            &run.step("Alice", "DecryptForeignDirect", |_| {
-                history(&mut alice, r.direct, None)
+            &run.step("Alice", "DecryptForeignDirect", |end| {
+                let page = history(&mut alice, r.direct, None, end)?;
+                history(&mut bob, r.direct, None, end)?;
+                Ok(page)
             })?,
             dm,
             &direct_text,
         ),
         "DirectDecryption",
     )?;
-    history(&mut bob, r.direct, None)?;
     // Only the running origin publishes leases. Stopping it must not remove valid MLS leaves.
     let pending = run.step("Alice", "PrepareBeforeLeaseLoss", |_| {
         net(alice.prepare_send(
@@ -878,8 +900,8 @@ fn workflow(run: &mut Run, r: &Request) -> Result<serde_json::Value> {
         pause(end, 6000)?;
         Ok(())
     })?;
-    let barrier = run.step("Alice", "InspectAvailabilityBarrier", |_| {
-        net(alice.crypto_inspect(r.private, None))
+    let barrier = run.step("Alice", "InspectAvailabilityBarrier", |end| {
+        current_read(&mut alice, end, |c| c.crypto_inspect(r.private, None))
     })?;
     ensure(
         barrier.remote.send_barrier && barrier.remote.required_removals.is_empty(),
@@ -918,8 +940,10 @@ fn workflow(run: &mut Run, r: &Request) -> Result<serde_json::Value> {
     run.step("Agent", "ReconnectAfterOriginRestart", |_| {
         net(agent.connect())
     })?;
-    let page = run.step("Bob", "OneResumedCiphertextEvent", |_| {
-        history(&mut bob, r.private, None)
+    let page = run.step("Bob", "OneResumedCiphertextEvent", |end| {
+        let page = history(&mut bob, r.private, None, end)?;
+        history(&mut alice, r.private, None, end)?;
+        Ok(page)
     })?;
     ensure(
         page.events
@@ -929,7 +953,6 @@ fn workflow(run: &mut Run, r: &Request) -> Result<serde_json::Value> {
             == 1,
         "ResumeDuplicate",
     )?;
-    history(&mut alice, r.private, None)?;
     let grant = create_grant(
         run,
         &mut bob,
@@ -940,8 +963,8 @@ fn workflow(run: &mut Run, r: &Request) -> Result<serde_json::Value> {
     run.step("Agent", "PublishDelegatedForeignPackage", |_| {
         completed(net(agent.crypto_publish(r.private, Some(&grant)))?)
     })?;
-    let view = run.step("Alice", "PinOwnerAuthorizedForeignDelegation", |_| {
-        pin(&mut alice, r.private, None)
+    let view = run.step("Alice", "PinOwnerAuthorizedForeignDelegation", |end| {
+        pin(&mut alice, r.private, None, end)
     })?;
     let package = view
         .remote
@@ -957,8 +980,8 @@ fn workflow(run: &mut Run, r: &Request) -> Result<serde_json::Value> {
         let response = net(alice.crypto_commit(r.private, &[package], &[], None))?;
         membership_ready(&mut alice, r.private, response, end)
     })?;
-    run.step("Agent", "PinDelegatedWelcome", |_| {
-        pin(&mut agent, r.private, Some(&grant))
+    run.step("Agent", "PinDelegatedWelcome", |end| {
+        pin(&mut agent, r.private, Some(&grant), end)
     })?;
     let ready = run.step("Agent", "DelegatedWelcomeAndReady", |end| {
         synchronise(&mut agent, r.private, Some(&grant), end)
@@ -977,8 +1000,8 @@ fn workflow(run: &mut Run, r: &Request) -> Result<serde_json::Value> {
             == 3,
         "DistinctMlsKeys",
     )?;
-    let old = run.step("Agent", "FutureOnlyDelegatedHistory", |_| {
-        history(&mut agent, r.private, Some(&grant))
+    let old = run.step("Agent", "FutureOnlyDelegatedHistory", |end| {
+        history(&mut agent, r.private, Some(&grant), end)
     })?;
     ensure(
         !matches!(old.content.get(&first), Some(MessageContent::Decrypted(_))),
@@ -988,11 +1011,12 @@ fn workflow(run: &mut Run, r: &Request) -> Result<serde_json::Value> {
     let reply = message("foreign delegated encrypted reply");
     let (reply_id, cipher) = run.send("Agent", &mut agent, r.private, &reply, Some(&grant))?;
     ensure(cipher.encrypted, "DelegatedPlaintextDowngrade")?;
-    let page = run.step("Alice", "DecryptForeignDelegatedAttribution", |_| {
-        history(&mut alice, r.private, None)
+    let page = run.step("Alice", "DecryptForeignDelegatedAttribution", |end| {
+        let page = history(&mut alice, r.private, None, end)?;
+        history(&mut agent, r.private, Some(&grant), end)?;
+        Ok(page)
     })?;
     ensure(visible(&page,reply_id,&reply)&&page.events.iter().any(|e|e.event==reply_id&&matches!(&e.actor,Actor::Delegated{acting,represented,grant:reference,..} if acting==&agent_actor&&*represented==bob_actor.account&&*reference==grant.reference)),"ForeignDelegationAttribution")?;
-    history(&mut agent, r.private, Some(&grant))?;
     let scope = run.step("Agent", "RefuseDelegatedOutOfScope", |end| {
         let action = net(agent.prepare_as(
             Operation::MessageAction,
@@ -1011,8 +1035,8 @@ fn workflow(run: &mut Run, r: &Request) -> Result<serde_json::Value> {
         Target::Delegation(grant.reference),
         &home::Empty {},
     )?)?;
-    let barrier = run.step("Alice", "RemoteRevocationBarrier", |_| {
-        net(alice.crypto_inspect(r.private, None))
+    let barrier = run.step("Alice", "RemoteRevocationBarrier", |end| {
+        current_read(&mut alice, end, |c| c.crypto_inspect(r.private, None))
     })?;
     ensure(
         barrier.remote.send_barrier
@@ -1100,7 +1124,7 @@ fn workflow(run: &mut Run, r: &Request) -> Result<serde_json::Value> {
     )?;
     let changed = run.step("Alice", "AutomaticRunningOriginRecoveryFence", |end| {
         loop {
-            let view = net(alice.crypto_inspect(r.private, None))?;
+            let view = current_read(&mut alice, end, |c| c.crypto_inspect(r.private, None))?;
             if view.remote.required_removals.contains(&bob_actor.endpoint) {
                 return Ok(view);
             }
@@ -1111,8 +1135,8 @@ fn workflow(run: &mut Run, r: &Request) -> Result<serde_json::Value> {
     run.step("Bob", "OldGenerationQueuedEffectRefused", |end| {
         denied_send(&mut bob, &queued.0, &queued.1, end)
     })?;
-    let page = run.step("Alice", "NoExpiredOrRecoveredEffect", |_| {
-        history(&mut alice, r.community, None)
+    let page = run.step("Alice", "NoExpiredOrRecoveredEffect", |end| {
+        history(&mut alice, r.community, None, end)
     })?;
     ensure(
         !page.events.iter().any(|e| {
@@ -1206,12 +1230,14 @@ fn workflow(run: &mut Run, r: &Request) -> Result<serde_json::Value> {
             // Human device recovery leaves this independent endpoint idle.
             net(agent.connect())?;
             ensure(Instant::now() < end, "IndependentEndpointReadDeadline")?;
-            net(agent.read_as::<hrc::conversations::Inspection, _>(
-                Operation::RoomInspect,
-                Target::Room(r.community),
-                &home::Empty {},
-                None,
-            ))
+            current_read(&mut agent, end, |c| {
+                c.read_as::<hrc::conversations::Inspection, _>(
+                    Operation::RoomInspect,
+                    Target::Room(r.community),
+                    &home::Empty {},
+                    None,
+                )
+            })
         },
     )?;
     run.step("Agent", "PreserveExactWithdrawalDraft", |_| {
@@ -1276,8 +1302,8 @@ fn withdrawn(run: &mut Run, r: &Request) -> Result<serde_json::Value> {
     let mut alice = run.step("Alice", "InspectWithdrawalHistory", |_| {
         net(Client::open(&r.alice))
     })?;
-    let page = run.step("Alice", "NoWithdrawnPublication", |_| {
-        history(&mut alice, r.community, None)
+    let page = run.step("Alice", "NoWithdrawnPublication", |end| {
+        history(&mut alice, r.community, None, end)
     })?;
     ensure(
         !page
