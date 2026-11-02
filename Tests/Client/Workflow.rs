@@ -824,8 +824,8 @@ fn epoch_ready_settlement_survives_refusal_resolution_restart_and_atomic_failure
     for mode in 0..3 {
         let fixture = Fixture::new();
         let mut store = fixture.create();
-        cache::initialize(&mut store).unwrap();
         let mut original = action();
+        cache::initialize(&mut store, original.home).unwrap();
         original.operation = Operation::CryptoEpochReady;
         let ready = crate::confidential::Ready {
             group: id(31),
