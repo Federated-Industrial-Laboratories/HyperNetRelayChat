@@ -492,6 +492,16 @@ fn wait_command(controller: &Controller, request: u64, end: Instant) -> Result<(
         thread::sleep(Duration::from_millis(20));
     }
 }
+fn readiness_state(index: usize, view: &Snapshot, room: RoomId) -> serde_json::Value {
+    json!({"endpoint":index,"connection":format!("{:?}",view.connection),
+        "inspectionStale":view.inspection.stale,"privacyPresent":view.privacy.is_some(),
+        "selectedCurrent":current(view,room),
+        "selectedStale":view.selected.as_ref().map(|v|v.stale),
+        "selectedGap":view.selected.as_ref().and_then(|v|v.gap.as_deref()).map(bounded_reason),
+        "selectedHasMore":view.selected.as_ref().map(|v|v.has_more),
+        "status":view.status.as_ref().map(|s|bounded_reason(&s.code)),
+        "statusRequest":view.status.as_ref().and_then(|s|s.request_id)})
+}
 fn open_controllers(
     paths: &[PathBuf],
     room: RoomId,
@@ -541,20 +551,13 @@ fn open_controllers(
             let mut ready = 0;
             for ui in &controllers {
                 let v = ui.controller.snapshot();
-                let state = (
-                    v.connection.clone(),
-                    v.inspection.stale,
-                    v.privacy.is_some(),
-                    current(&v, room),
-                    v.status.as_ref().map(|s| bounded_reason(&s.code)),
-                );
+                let state = readiness_state(ui.index, &v, room);
                 if observations[ui.index] < 8 && previous[ui.index].as_ref() != Some(&state) {
-                    emit(
-                        json!({"case":"NativeLoadControllerStartup", "endpoint":ui.index,
-                    "bootMs":hrc::clock::boot_ms().ok(), "stage":"ObservedState",
-                    "connection":format!("{:?}",state.0), "inspectionStale":state.1,
-                    "privacyPresent":state.2, "selectedCurrent":state.3, "status":state.4}),
-                    );
+                    let mut observed = state.clone();
+                    observed["case"] = json!("NativeLoadControllerStartup");
+                    observed["bootMs"] = json!(hrc::clock::boot_ms().ok());
+                    observed["stage"] = json!("ObservedState");
+                    emit(observed);
                     observations[ui.index] += 1;
                     previous[ui.index] = Some(state);
                 }
@@ -569,6 +572,9 @@ fn open_controllers(
                                 .dispatch(Command::Join(room))
                                 .map_err(|_| "ControllerJoinDispatch")?,
                         );
+                        emit(json!({"case":"NativeLoadControllerStartup","endpoint":ui.index,
+                            "bootMs":hrc::clock::boot_ms().ok(),"stage":"JoinDispatch",
+                            "request":joined[ui.index]}));
                         continue;
                     };
                     if !command_completed(&v, join)? {
@@ -585,15 +591,20 @@ fn open_controllers(
                                     })
                                     .map_err(|_| "ControllerFilterDispatch")?,
                             );
+                            emit(json!({"case":"NativeLoadControllerStartup","endpoint":ui.index,
+                                "bootMs":hrc::clock::boot_ms().ok(),"stage":"FilterDispatch",
+                                "request":filter}));
                             continue;
                         };
                         if !command_completed(&v, request)? {
                             continue;
                         }
                     }
-                    ui.controller
+                    let request = ui.controller
                         .dispatch(Command::SelectRoom(room))
                         .map_err(|_| "ControllerSelectDispatch")?;
+                    emit(json!({"case":"NativeLoadControllerStartup","endpoint":ui.index,
+                        "bootMs":hrc::clock::boot_ms().ok(),"stage":"SelectDispatch","request":request}));
                     selected[ui.index] = true;
                 }
                 if ui.index == 7 && selected[ui.index] {
@@ -608,7 +619,8 @@ fn open_controllers(
                         resynchronise = Some(ui.controller.dispatch(Command::Resynchronise)
                             .map_err(|_| "ControllerResynchroniseDispatch")?);
                         emit(json!({"case":"NativeLoadControllerStartup", "endpoint":ui.index,
-                            "bootMs":hrc::clock::boot_ms().ok(), "stage":"ResynchroniseDispatch"}));
+                            "bootMs":hrc::clock::boot_ms().ok(), "stage":"ResynchroniseDispatch",
+                            "request":resynchronise}));
                         continue;
                     }
                 }
@@ -623,9 +635,9 @@ fn open_controllers(
             }
             if Instant::now() >= end {
                 emit(
-                    json!({"case":"NativeLoadControllerReadiness","passed":false,"states":controllers.iter().map(|u| {
-                let v=u.controller.snapshot(); json!({"endpoint":u.index,"connection":format!("{:?}",v.connection),
-                    "selectedCurrent":current(&v,room),"status":v.status.as_ref().map(|s|&s.code)})
+                    json!({"case":"NativeLoadControllerReadiness","passed":false,
+                    "bootMs":hrc::clock::boot_ms().ok(),"states":controllers.iter().map(|u| {
+                let v=u.controller.snapshot(); readiness_state(u.index,&v,room)
             }).collect::<Vec<_>>()}),
                 );
                 return Err("EightControllerReadinessDeadline".into());
@@ -1507,11 +1519,11 @@ fn run(args: &Arguments) -> Result<bool> {
     for ui in &controllers {
         let view = ui.controller.snapshot();
         if !current(&view, room) {
-            emit(
-                json!({"case":"NativeLoadControllerReadiness","passed":false,"endpoint":ui.index,
-                "connection":format!("{:?}",view.connection),"selectedCurrent":false,
-                "status":view.status.as_ref().map(|s|bounded_reason(&s.code))}),
-            );
+            let mut state = readiness_state(ui.index, &view, room);
+            state["case"] = json!("NativeLoadControllerReadiness");
+            state["passed"] = json!(false);
+            state["bootMs"] = json!(hrc::clock::boot_ms().ok());
+            emit(state);
             return Err(format!("PilotControllerNotCurrent:endpoint={}", ui.index));
         }
     }
