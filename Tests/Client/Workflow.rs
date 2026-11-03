@@ -850,7 +850,7 @@ fn epoch_ready_settlement_survives_refusal_resolution_restart_and_atomic_failure
                 retry_after_ms: Some(1000),
             },
         );
-        outbox::record(&mut store, &original, &refused, now).unwrap();
+        outbox::record(&mut store, &original, &refused, TimeBounds::test_now()).unwrap();
         let marker = archive::ready_key(ready.group, ready.epoch, ready.commit_digest);
         assert!(!cache::preferences::<bool>(&mut store, &marker).unwrap());
         drop(store);
@@ -868,6 +868,30 @@ fn epoch_ready_settlement_survives_refusal_resolution_restart_and_atomic_failure
             body: Value::Null,
         };
         if mode == 0 {
+            // A response after restart needs a fresh observation, as in the real client.
+            // Keep the original retry window; an expired observation must not settle it.
+            std::thread::sleep(std::time::Duration::from_millis(1100));
+            assert!(now.refresh().is_err());
+            assert!(
+                outbox::record(
+                    &mut store,
+                    &original,
+                    &reply(&original, committed.clone()),
+                    now
+                )
+                .is_err()
+            );
+            assert!(!cache::preferences::<bool>(&mut store, &marker).unwrap());
+            let still_pending = outbox::pending(
+                &mut store,
+                &SigningKey::from_bytes(&[10; 32]).verifying_key(),
+            )
+            .unwrap();
+            assert_eq!(still_pending.len(), 1);
+            assert_eq!(
+                still_pending[0].action.signed_bytes(),
+                original.signed_bytes()
+            );
             store.write(|tx| {
                 tx.execute_batch("CREATE TRIGGER deny_ready BEFORE INSERT ON client_preferences BEGIN SELECT RAISE(ABORT,'ready write failed'); END;")?;
                 Ok(storage::Commit::new((), b"atomic readiness failure".to_vec()))
@@ -877,7 +901,7 @@ fn epoch_ready_settlement_survives_refusal_resolution_restart_and_atomic_failure
                     &mut store,
                     &original,
                     &reply(&original, committed.clone()),
-                    now
+                    TimeBounds::test_now()
                 )
                 .is_err()
             );
@@ -925,7 +949,14 @@ fn epoch_ready_settlement_survives_refusal_resolution_restart_and_atomic_failure
                     .unwrap(),
                 },
             );
-            outbox::record_resolution(&mut store, &original, &query, &result, now).unwrap();
+            outbox::record_resolution(
+                &mut store,
+                &original,
+                &query,
+                &result,
+                TimeBounds::test_now(),
+            )
+            .unwrap();
             if mode == 2 {
                 assert!(!cache::preferences::<bool>(&mut store, &marker).unwrap());
                 assert_eq!(
@@ -941,7 +972,13 @@ fn epoch_ready_settlement_survives_refusal_resolution_restart_and_atomic_failure
             }
         }
         if mode != 1 {
-            outbox::record(&mut store, &original, &reply(&original, committed), now).unwrap();
+            outbox::record(
+                &mut store,
+                &original,
+                &reply(&original, committed),
+                TimeBounds::test_now(),
+            )
+            .unwrap();
         }
         assert!(cache::preferences::<bool>(&mut store, &marker).unwrap());
         assert!(
