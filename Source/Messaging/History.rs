@@ -303,7 +303,8 @@ pub(super) fn search(
     let start = after(&body.cursor, &access, action, now, signer, context)?;
     let expression = crate::text::match_expression(&terms);
     let from = if expression.is_some() {
-        "hrc_search s JOIN hrc_events e ON e.position=s.rowid"
+        // Keep FTS as the outer loop: a room-first plan rebuilds MATCH for every event.
+        "hrc_search s CROSS JOIN hrc_events e ON e.position=s.rowid"
     } else {
         "hrc_events e"
     };
