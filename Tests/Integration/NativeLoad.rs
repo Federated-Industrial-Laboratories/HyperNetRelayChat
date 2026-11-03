@@ -851,7 +851,8 @@ fn interactive(
     emit(
         json!({"case":"NativeLoadControllerObservation","phase":phase,"endpoint":ui.index,
         "freshRemoteEvents":received.len(),"ignoredEventLeak":ignored_leak,"currentAtEnd":current(&view,room),"observedSnapshotRevisions":revisions.len(),
-        "stateDurationMs":state_ms,"status":view.status.as_ref().map(|s|&s.code),"freshnessPassed":fresh}),
+        "stateDurationMs":state_ms,"status":view.status.as_ref().map(|s|&s.code),
+        "statusDetail":view.status.as_ref().map(|s|&s.detail),"connection":format!("{:?}",view.connection),"freshnessPassed":fresh}),
     );
     (ui, m)
 }
