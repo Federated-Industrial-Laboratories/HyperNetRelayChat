@@ -94,6 +94,20 @@ must still be currently permitted at every existing admission and commit check.
 This scheduling does not extend a receipt, reuse authority, retry an effect, or
 conceal a Core busy or unavailable result.
 
+Ordinary, device and gateway handshakes can obtain at most three fresh authority
+observations on the same stream for their unchanged proof digest. A temporary
+unavailable or expired observation, or busy authority admission, allows a backoff
+of at most 50 ms before another check. Each check retains the existing admission
+and exchange limits; all attempts also fit the original handshake deadline and
+signed challenge expiry. The challenge and transport identity do not change.
+The initial conservative clock sample can shorten the boot deadline to fit the
+signed expiry; later samples cannot extend it. A successful observation retains
+that shortened deadline and rechecks the current clock before an effect or Ready.
+Denied or inactive results, invalid evidence, clock errors and shutdown stop
+recovery immediately. A certified denial remains terminal after its receipt
+expires. Device activation and session-window effects remain outside this retry
+loop and require a current observation at their original effect boundary.
+
 If transport handoff closes before session setup finishes, the client can obtain
 up to three fresh streams and challenges within one 30-second setup budget,
 with bounded jitter between attempts. Invalid identities and frames fail at once.
