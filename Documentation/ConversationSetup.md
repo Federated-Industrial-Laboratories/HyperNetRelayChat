@@ -83,9 +83,11 @@ five-second bound; acceptance never extends an authority observation's validity.
 
 The service admits authority checks through one bounded FIFO shared by session
 setup, actions and exact search cancellation. At most 32 callers can hold or wait
-for its single exchange slot; each admission wait is at most one second. A queued
-control cannot be overtaken by later ordinary reads. Queue saturation or an
-admission timeout reports `AuthorityAdmissionBusy` (an `Overloaded` pre-admission
+for four concurrent exchange slots; each admission wait is at most one second.
+Slots admit callers in FIFO order, including queued controls. Independent checks
+can finish out of order; every reply retains its exact stream, action and nonce
+binding. The companion retains its single pending check per stream. Queue
+saturation or an admission timeout reports `AuthorityAdmissionBusy` (an `Overloaded` pre-admission
 action refusal), separately from a failed transport authority check. Shutdown,
 stream invalidation or query cancellation removes a waiter.
 

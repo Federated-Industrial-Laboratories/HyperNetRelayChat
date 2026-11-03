@@ -95,6 +95,15 @@ acceptance. This correction neither caches authority nor expands read capacity.
 
 There is at most one pending check per connection and four per companion. The endpoint executes one authority read at a time with bounded request/frame queues. The control channel consumes none of the sixteen application connection slots. These are implementation bounds, not evidence that the accepted HRC pilot meets latency or fairness targets.
 
+The Core 0.10.2 and Suite 0.10.1 release candidates keep the four-check total and
+one-check-per-connection bounds while overlapping independent network exchanges.
+One endpoint owner still validates each result against current authority state
+and publishes its consumed challenge before a receipt can permit an effect.
+Replies retain exact request correlation and their original deadlines. HRC
+admits up to four exchanges within its existing 32-caller queue. These candidate
+changes still require native capacity qualification; the published-revision
+evidence above retains its original scope.
+
 Version-2 outgoing context records actual authenticated nested TLS 1.3 and the selected/configured route settings. When the certified lookup matches the actual TLS destination, it includes bounded destination-profile provenance. Incoming context requires an exact-session endpoint observation: public mode 2 reports unknown upstream relay transit; attached mode 3 attests its approved attachment, relay service and profile digest. Missing evidence remains unknown. No saved profile or attachment proves physical operator independence or current profile validity; the corresponding assertions remain false. Message encryption is application-defined.
 
 Sources: [Core check contract](https://github.com/Federated-Industrial-Laboratories/HyperNet/blob/f3b95f798def698087bd229dca9dcd0ec2c513e4/Documentation/ApplicationChecks.md), [canonical endpoint control schema](https://github.com/Federated-Industrial-Laboratories/HyperNet/blob/f3b95f798def698087bd229dca9dcd0ec2c513e4/Source/Authority/Domains/ApplicationStreamControl.rs), [Suite context contract](https://github.com/Federated-Industrial-Laboratories/HyperNetSuite/blob/3055f06a691fbc2f0214b4d9bb706a004d5c22ad/Documentation/ApplicationContext.md) and [check verification](https://github.com/Federated-Industrial-Laboratories/HyperNetSuite/blob/3055f06a691fbc2f0214b4d9bb706a004d5c22ad/Source/Applications/ApplicationStreamChecks.rs).
