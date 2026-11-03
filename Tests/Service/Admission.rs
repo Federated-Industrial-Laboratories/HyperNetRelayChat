@@ -21,10 +21,16 @@ fn queued(admission: &Admission, count: usize) {
     }
 }
 
+fn fill(admission: &Admission) -> Vec<Permit<'_>> {
+    (0..MAXIMUM_ACTIVE)
+        .map(|_| admission.acquire(None, || false).unwrap())
+        .collect()
+}
+
 #[test]
 fn queued_checks_start_after_admission_and_control_is_not_overtaken() {
     let admission = Admission::default();
-    let first = admission.acquire(None, || false).unwrap();
+    let mut active = fill(&admission);
     let (events, received) = mpsc::channel();
     let (release, released) = mpsc::channel();
     thread::scope(|scope| {
@@ -47,7 +53,7 @@ fn queued_checks_start_after_admission_and_control_is_not_overtaken() {
         queued(&admission, 2);
         // Real queued time is not charged to the later authority check's lifetime.
         assert!(received.recv_timeout(Duration::from_millis(30)).is_err());
-        drop(first);
+        drop(active.pop());
         let (name, end) = received.recv_timeout(Duration::from_secs(1)).unwrap();
         assert_eq!(name, "control");
         assert!(end > clock::boot_ms().unwrap() + 1000);
@@ -59,13 +65,41 @@ fn queued_checks_start_after_admission_and_control_is_not_overtaken() {
         assert!(end > clock::boot_ms().unwrap() + 1000);
         assert!(end <= clock::boot_ms().unwrap() + 5000);
     });
+    drop(active);
     assert!(admission.acquire(None, || false).is_ok());
+}
+
+#[test]
+fn independent_exchanges_release_only_their_own_slot_out_of_order() {
+    let admission = Admission::default();
+    let mut active = fill(&admission);
+    let original_end = active[0].check_deadline().unwrap();
+    drop(active.remove(1));
+    let replacement = admission.acquire(Some(original_end), || false).unwrap();
+    assert_eq!(replacement.check_deadline().unwrap(), original_end);
+    assert!(matches!(
+        admission.acquire(Some(clock::boot_ms().unwrap() + 25), || false),
+        Err(Error::Expired)
+    ));
+    // Completing another exchange does not cancel the remaining observations
+    // or grant more than one replacement admission.
+    drop(active.pop());
+    let next = admission.acquire(None, || false).unwrap();
+    assert!(matches!(
+        admission.acquire(Some(clock::boot_ms().unwrap() + 25), || false),
+        Err(Error::Expired)
+    ));
+    drop(replacement);
+    drop(active);
+    drop(next);
+    assert!(admission.state.lock().unwrap().active.is_empty());
+    assert!(admission.state.lock().unwrap().waiting.is_empty());
 }
 
 #[test]
 fn stopped_waiter_releases_its_place_without_starting_a_check() {
     let admission = Admission::default();
-    let first = admission.acquire(None, || false).unwrap();
+    let first = fill(&admission);
     let stopped = AtomicBool::new(false);
     let (done, received) = mpsc::channel();
     thread::scope(|scope| {
@@ -88,7 +122,7 @@ fn stopped_waiter_releases_its_place_without_starting_a_check() {
 #[test]
 fn admission_is_bounded_and_preserves_the_original_enclosing_deadline() {
     let admission = Admission::default();
-    let first = admission.acquire(None, || false).unwrap();
+    let first = fill(&admission);
     let end = clock::boot_ms().unwrap() + 40;
     assert!(matches!(
         admission.acquire(Some(end), || false),
@@ -115,11 +149,11 @@ fn admission_is_bounded_and_preserves_the_original_enclosing_deadline() {
 #[test]
 fn capacity_refuses_before_authority_work_and_shutdown_releases_waiters() {
     let admission = Arc::new(Admission::default());
-    let first = admission.acquire(None, || false).unwrap();
+    let first = fill(&admission);
     let stopped = Arc::new(AtomicBool::new(false));
     thread::scope(|scope| {
         let mut workers = Vec::new();
-        for _ in 1..MAXIMUM_PENDING {
+        for _ in MAXIMUM_ACTIVE..MAXIMUM_PENDING {
             let admission = admission.clone();
             let stopped = stopped.clone();
             workers.push(scope.spawn(move || {
@@ -128,7 +162,7 @@ fn capacity_refuses_before_authority_work_and_shutdown_releases_waiters() {
                     .err()
             }));
         }
-        queued(&admission, MAXIMUM_PENDING - 1);
+        queued(&admission, MAXIMUM_PENDING - MAXIMUM_ACTIVE);
         assert!(matches!(
             admission.acquire(None, || false),
             Err(Error::Busy)
@@ -163,7 +197,7 @@ fn unwind_releases_the_slot_and_poison_remains_fail_closed() {
     );
     drop(permit);
     let poisoned = admission.state.lock().err().unwrap().into_inner();
-    assert!(poisoned.active.is_none());
+    assert!(poisoned.active.is_empty());
     assert!(poisoned.waiting.is_empty());
     drop(poisoned);
     assert!(matches!(

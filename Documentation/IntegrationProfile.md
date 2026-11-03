@@ -41,6 +41,15 @@ The companion deadline crosses Core's queue and authority read unchanged. Its au
 
 Implemented bounds are one pending check per connection, four per companion and one authority read executing at the endpoint, with bounded request/frame queues. The channel consumes no application connection slot. HRC must still charge control work to its actor/service budgets and measure the accepted pilot's latency and fairness. Limits alone are not a capacity qualification.
 
+The Core 0.10.2 and Suite 0.10.1 release candidates keep the four-check total and
+one-check-per-connection bounds while overlapping independent network exchanges.
+One endpoint owner still validates each result against current authority state
+and publishes its consumed challenge before a receipt can permit an effect.
+Replies retain exact request correlation and their original deadlines. HRC
+admits up to four exchanges within its existing 32-caller queue. These candidate
+changes still require native capacity qualification; the published-revision
+evidence above retains its original scope.
+
 ## 3. HRC authorisation and durable outcomes
 
 An operation has separate stages: queued, authorised for evaluation, durably committed, and acknowledged. A fresh HyperNet check is required at the effect boundary, not only at session establishment.
