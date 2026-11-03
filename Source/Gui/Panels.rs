@@ -123,7 +123,7 @@ impl App {
             ui.separator(); ui.heading("Filters and moderation");
             if ui.button("Refresh current inspection").clicked() { self.model.dispatch(Command::Inspect); }
             if snapshot.inspection.stale { ui.label("Retained inspection; current authority is not confirmed"); }
-            for filter in &snapshot.inspection.filters { ui.label(format!("{} · ignored={} · muted={}",filter.subject,filter.ignored,filter.muted)); }
+            for line in display::filters(&snapshot) { ui.label(line); }
             for line in display::restrictions(&snapshot) { ui.label(line); }
         });
     }

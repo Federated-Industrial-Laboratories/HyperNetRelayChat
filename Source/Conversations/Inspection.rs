@@ -12,7 +12,7 @@ pub struct Inspection {
     #[serde(default)]
     pub confidentiality: RoomConfidentiality,
 }
-pub(super) fn read(db: &Connection, action: &Action, now: TimeBounds) -> Domain<Outcome> {
+pub(crate) fn read(db: &Connection, action: &Action, now: TimeBounds) -> Domain<Outcome> {
     empty(&action.body)?;
     let a = access(db, action, now)?;
     let read_sequence = db

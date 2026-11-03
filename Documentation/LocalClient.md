@@ -18,6 +18,11 @@ not rewrite that completion as success. Current-query errors remain explicit.
 The five-second metadata refresh interval starts after a successful full refresh
 finishes, including initial connection and commands that change membership or
 policy. Due metadata work runs between command turns, even with a busy queue.
+With the negotiated bounded-view capability, each periodic turn performs one
+finite group or continuation page before yielding to queued command work. A full
+metadata refresh cannot occupy every intervening command turn. Initial connection
+and membership or policy changes still complete their required refresh before
+reporting readiness.
 Room selection and targeted post-send reads do not postpone that deadline.
 A slow full refresh does not schedule an immediate second full refresh.
 A failed full attempt also waits that interval before another metadata attempt;
@@ -43,6 +48,32 @@ failures still invalidate the full view and privacy observation. Existing denial
 history-gap and encrypted-history protections still apply. Neither a synchronized
 view nor a retained privacy observation grants authority: the service checks
 current authority on every read and effect.
+
+For local nondelegated community views, `bounded-client-views-v1` groups related
+reads through the same server policy owners. Account metadata and community-room
+synchronization have separate fixed contracts. Each group receives a fresh
+authority check and retains the summed operation costs and ordinary frame limit.
+Incomplete filter or restriction pages cannot admit history or notifications;
+changed context discards the partial assembly. Failures invalidate the requested
+view scopes. Remote, encrypted and delegated paths retain their existing reads.
+See [bounded client views](WireProtocol.md#bounded-client-views).
+
+Recipient-filter freshness is separate from grant and agent metadata freshness.
+`inspection.filters_stale` remains true until complete current filter assembly;
+`inspection.stale` covers the metadata refresh. A grouped community-read failure
+invalidates filter-dependent room, search and notification state without making
+unrelated grant or agent metadata stale. Global terminal and transport failures
+invalidate both scopes. Current presentation and pilot readiness require both
+flags to be clear; completing filters alone cannot refresh metadata.
+
+An explicitly authenticated community classification can supply private,
+in-memory room-mode evidence for an exact prepared message. It binds the room,
+home and pinned service key, and requires the negotiated immutable-mode contract.
+It is not an access grant. Current service authority and room or delegation
+checks remain mandatory on submission. A caller-supplied room summary, missing
+mode field or mutable prepared object cannot provide that evidence. Raw API
+submissions, unknown-room preparation, encrypted messages and persisted retries
+retain their validation paths.
 
 Session setup allows at most three attempts within one original 30-second
 deadline. Each HyperNet preparation wait is at most 10 seconds; each HRC

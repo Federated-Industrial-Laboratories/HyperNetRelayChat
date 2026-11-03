@@ -83,6 +83,7 @@ impl Error {
 pub type Result<T> = std::result::Result<T, Error>;
 
 const CAPABILITIES: &[&str] = &[
+    CLIENT_VIEWS_CAPABILITY,
     "community-rooms",
     "delegation",
     "history",

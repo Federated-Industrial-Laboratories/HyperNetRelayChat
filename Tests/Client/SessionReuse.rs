@@ -64,7 +64,7 @@ fn only_authenticated_temporary_refusals_preserve_the_session() {
 
 // A local companion handoff supplies a real closeable adapter stream. This fixture
 // does not assert HyperNet authority or authenticate an HRC foreign session.
-pub(super) fn retained_handle(
+pub(in crate::client) fn retained_handle(
     root: &Path,
 ) -> (crate::hypernet::Companion, Arc<crate::hypernet::Stream>) {
     let path = root.join("Companion");

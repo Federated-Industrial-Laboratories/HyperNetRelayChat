@@ -34,7 +34,9 @@ struct RetainedOperation {
 pub fn read_operation(op: Operation) -> bool {
     matches!(
         op,
-        Operation::RoomList
+        Operation::ClientMetadata
+            | Operation::CommunitySync
+            | Operation::RoomList
             | Operation::ServiceInspect
             | Operation::RoomInspect
             | Operation::AccountInspect
@@ -223,6 +225,16 @@ fn dispatch(
     let action = verified.action();
     use Operation::*;
     match action.operation {
+        ClientMetadata | CommunitySync => {
+            if !matches!(context, ExecutionContext::Local(_)) {
+                return deny("LocalViewOnly");
+            }
+            if action.operation == ClientMetadata {
+                super::views::metadata(db, action, now, information, signer)
+            } else {
+                super::views::community(db, action, now, permit, signer, cancel)
+            }
+        }
         AccountEnrolEndpoint
         | AccountDisableEndpoint
         | AccountRotateRecovery

@@ -19,7 +19,7 @@ pub(super) fn admit(db: &Transaction<'_>, action: &Action, now: u64) -> Domain<b
         let (capacity, rate, cost) = if sends {
             (8000, 2000, 1000)
         } else {
-            (32000, 8000, 1000)
+            (32000, 8000, 1000 * super::views::cost(action))
         };
         budgets.push(Budget {
             key: format!("{}:{id}", if sends { "send" } else { "operation" }),

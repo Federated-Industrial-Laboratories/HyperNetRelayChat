@@ -91,10 +91,16 @@ struct PageContext<'a> {
     access: &'a Access,
     digest: Id,
     start: u64,
+    bytes: usize,
+    include_members: bool,
 }
 impl PageContext<'_> {
     fn finish(self, mut events: Vec<Event>, mut last: u64, mut more: bool) -> Domain<Outcome> {
-        let members = conversations::members(self.db, self.access.room, self.now)?;
+        let members = if self.include_members {
+            conversations::members(self.db, self.access.room, self.now)?
+        } else {
+            Vec::new()
+        };
         loop {
             let cursor = HistoryCursor {
                 home: self.action.home,
@@ -130,7 +136,7 @@ impl PageContext<'_> {
             } else {
                 sign_response(&response, self.signer)
             };
-            if representation.is_ok() {
+            if representation.is_ok() && canonical_encode(&value(&outcome)?, self.bytes).is_ok() {
                 return Ok(outcome);
             }
             if events.pop().is_none() {
@@ -154,6 +160,28 @@ pub(super) fn page(
     permit: Permit,
     signer: &SigningKey,
     cancel: &Cancellation,
+) -> Domain<Outcome> {
+    page_bounded(
+        db,
+        action,
+        now,
+        permit,
+        signer,
+        cancel,
+        CRYPTO_FRAME_BYTES,
+        true,
+    )
+}
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn page_bounded(
+    db: &Transaction<'_>,
+    action: &Action,
+    now: TimeBounds,
+    permit: Permit,
+    signer: &SigningKey,
+    cancel: &Cancellation,
+    representation_bytes: usize,
+    include_members: bool,
 ) -> Domain<Outcome> {
     let body: Page = unpack(&action.body)?;
     let limit = page_limit(body.limit)?;
@@ -222,6 +250,8 @@ pub(super) fn page(
         access: &access,
         digest: context,
         start,
+        bytes: representation_bytes,
+        include_members,
     }
     .finish(result, last, more)
 }
@@ -342,6 +372,8 @@ pub(super) fn search(
         access: &access,
         digest: context,
         start,
+        bytes: CRYPTO_FRAME_BYTES,
+        include_members: true,
     }
     .finish(result, last, more)
 }

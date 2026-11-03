@@ -10,6 +10,8 @@ mod execution;
 mod retention;
 #[path = "Schema.rs"]
 mod schema;
+#[path = "Views.rs"]
+pub mod views;
 pub(crate) use devices::DeviceTransport;
 #[path = "Types.rs"]
 pub(crate) mod types;

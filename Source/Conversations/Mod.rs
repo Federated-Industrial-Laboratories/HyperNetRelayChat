@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Membership, room metadata and the current history-access boundary.
 #[path = "Inspection.rs"]
-mod inspection;
+pub(crate) mod inspection;
 use crate::{
     clock::TimeBounds,
     home::{self, types::*},
@@ -408,8 +408,20 @@ pub(crate) fn list(
     db: &Transaction<'_>,
     action: &Action,
     now: TimeBounds,
-    mut room_access: impl FnMut(RoomId) -> Domain<()>,
+    room_access: impl FnMut(RoomId) -> Domain<()>,
 ) -> Domain<Outcome> {
+    let (items, _) = list_bounded(db, action, now, room_access, ORDINARY_FRAME_BYTES - 4096)?;
+    Ok(Outcome::Result {
+        body: value(&items)?,
+    })
+}
+pub(crate) fn list_bounded(
+    db: &Transaction<'_>,
+    action: &Action,
+    now: TimeBounds,
+    mut room_access: impl FnMut(RoomId) -> Domain<()>,
+    bytes: usize,
+) -> Domain<(Vec<Summary>, Option<RoomId>)> {
     if action.target != Target::Service {
         return invalid("ServiceTarget");
     }
@@ -446,6 +458,7 @@ pub(crate) fn list(
         },
     )?;
     let mut result = Vec::new();
+    let mut more = false;
     for row in rows {
         let (room, name, topic, revision, sequence, joined, read, history_from, mode, invited) =
             row?;
@@ -473,15 +486,19 @@ pub(crate) fn list(
             confidentiality: mode_value(mode)?,
             invited,
         });
-        if canonical_encode(&value(&result)?, ORDINARY_FRAME_BYTES - 4096).is_err() {
+        if canonical_encode(&value(&result)?, bytes).is_err() {
             result.pop();
+            if result.is_empty() {
+                return Err(Fault::Reject(ErrorCode::Overloaded, "RoomListItemSize"));
+            }
+            more = true;
             break;
         }
         if result.len() >= body.limit as usize {
+            more = true;
             break;
         }
     }
-    Ok(Outcome::Result {
-        body: value(&result)?,
-    })
+    let next = more.then(|| result.last().map(|r| r.room)).flatten();
+    Ok((result, next))
 }

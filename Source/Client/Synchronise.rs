@@ -3,6 +3,7 @@
 use super::*;
 impl Worker {
     pub(super) fn refresh(&mut self) -> Result<()> {
+        self.refresh_cycle = None;
         let result = self.update_view(Self::refresh_current);
         // Failed nonretryable reads also get a finite interval before another full attempt.
         self.poll = std::time::Instant::now();
@@ -10,6 +11,9 @@ impl Worker {
     }
     fn refresh_current(&mut self) -> Result<()> {
         cache::maintain(&mut self.client.store).map_err(|_| Error::Storage)?;
+        if self.client.bounded_views() {
+            return self.grouped_refresh();
+        }
         let mut rooms = Vec::new();
         let mut after = None;
         for _ in 0..32 {
@@ -83,6 +87,20 @@ impl Worker {
     }
     pub(super) fn refresh_after_send(&mut self, room: RoomId) -> Result<()> {
         self.update_view(|worker| {
+            if worker.grouped_room(room) {
+                worker.grouped_pull(room)?;
+                if let Some(event) = worker
+                    .snapshot
+                    .selected
+                    .as_ref()
+                    .filter(|v| v.summary.room == room)
+                    .and_then(|v| v.focus)
+                {
+                    worker.open_event(room, event)?;
+                }
+                worker.snapshot.privacy = Some(worker.client.session()?.refresh_privacy()?);
+                return Ok(());
+            }
             // Recipient filtering remains current before admitting history or notifications.
             let filters = worker.pages(
                 Operation::ModerationFilters,
@@ -148,6 +166,7 @@ impl Worker {
     }
     pub(super) fn install_filters(&mut self, filters: Vec<moderation::FilterState>) -> Result<()> {
         self.snapshot.inspection.filters = filters;
+        self.snapshot.inspection.filters_stale = false;
         let filters = &self.snapshot.inspection.filters;
         if let Some(view) = &mut self.snapshot.selected {
             view.events
@@ -260,6 +279,9 @@ impl Worker {
         if cached.gap.is_some() {
             return Ok(());
         }
+        if self.grouped_room(room) {
+            return self.grouped_pull(room);
+        }
         let current: conversations::Inspection =
             match self.read(Operation::RoomInspect, Target::Room(room), &home::Empty {}) {
                 Ok(view) => view,
@@ -360,7 +382,7 @@ impl Worker {
                     .collect();
             }
             view.members = page.members;
-            view.stale = false;
+            view.stale = self.snapshot.inspection.filters_stale;
             view.has_more = page.has_more;
             view.read_sequence = current.read_sequence;
             if let Some(summary) = self.snapshot.rooms.iter().find(|s| s.room == room) {
@@ -469,6 +491,9 @@ impl Worker {
         Ok(())
     }
     pub(super) fn notify(&mut self, room: RoomId, events: &[Event]) -> Result<()> {
+        if self.snapshot.inspection.filters_stale {
+            return Ok(());
+        }
         let prefs =
             cache::room_preferences(&mut self.client.store, room).map_err(|_| Error::Storage)?;
         if self.snapshot.preferences.quiet || prefs.notifications == NotificationMode::Off {

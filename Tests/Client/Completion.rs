@@ -3,14 +3,14 @@
 #[path = "Refresh.rs"]
 mod refresh;
 #[path = "SessionReuse.rs"]
-mod session_reuse;
+pub(in crate::client) mod session_reuse;
 use super::*;
 use crate::{
     client::tests::{Fixture, action},
     clock::TimeBounds,
 };
 
-fn worker() -> (Fixture, Worker, RoomId) {
+pub(super) fn worker() -> (Fixture, Worker, RoomId) {
     let fixture = Fixture::new();
     let mut store = fixture.create();
     cache::initialize(&mut store, action().home).unwrap();
@@ -52,10 +52,13 @@ fn worker() -> (Fixture, Worker, RoomId) {
         operation: None,
         delivery_room: None,
         poll_room: 0,
+        refresh_cycle: None,
+        refresh_yield: false,
     };
     worker.select(room).unwrap();
     worker.snapshot.selected.as_mut().unwrap().stale = false;
     worker.snapshot.inspection.stale = false;
+    worker.snapshot.inspection.filters_stale = false;
     worker.snapshot.connection = ConnectionState::Online;
     (fixture, worker, room)
 }

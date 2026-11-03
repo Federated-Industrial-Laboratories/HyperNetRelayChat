@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! One ordered event stream, attributed sends and access-filtered history.
 #[path = "History.rs"]
-mod history;
+pub(crate) mod history;
 use crate::{
     clock::TimeBounds,
     conversations,

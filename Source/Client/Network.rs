@@ -158,6 +158,7 @@ impl Session {
             versions: vec![VERSION],
             required_capabilities: Vec::new(),
             optional_capabilities: vec![
+                CLIENT_VIEWS_CAPABILITY.into(),
                 "community-rooms".into(),
                 "delegation".into(),
                 "history".into(),
@@ -404,6 +405,7 @@ impl Session {
     /// Submit exactly the persisted bytes. An I/O error does not imply rejection.
     pub fn submit(&self, bytes: &[u8], key: &VerifyingKey) -> Result<Verified<Response>> {
         self.submit_bounded(bytes, key, None)
+            .map(|(response, _)| response)
     }
     /// Retry a read within its original caller budget; mutations cannot enter this path.
     pub(crate) fn submit_read_until(
@@ -413,13 +415,21 @@ impl Session {
         end: u64,
     ) -> Result<Verified<Response>> {
         self.submit_bounded(bytes, key, Some(end))
+            .map(|(response, _)| response)
+    }
+    pub(crate) fn submit_observed(
+        &self,
+        bytes: &[u8],
+        key: &VerifyingKey,
+    ) -> Result<(Verified<Response>, Option<u64>)> {
+        self.submit_bounded(bytes, key, None)
     }
     fn submit_bounded(
         &self,
         bytes: &[u8],
         key: &VerifyingKey,
         end: Option<u64>,
-    ) -> Result<Verified<Response>> {
+    ) -> Result<(Verified<Response>, Option<u64>)> {
         let action = verify_action(bytes, key).map_err(|_| Error::Authentication)?;
         if action.action().home != self.ready.home
             || action.action().actor.acting() != &self.ready.acting
@@ -433,18 +443,22 @@ impl Session {
             FrameKind::Action
         };
         let frame = Frame::new(kind, bytes.to_vec()).map_err(|_| Error::Frame)?;
-        let incoming = if let Some(end) = end {
-            let send_end = end.min(
-                clock::boot_ms()
-                    .map_err(|_| Error::Clock)?
-                    .saturating_add(5000),
-            );
-            io::send_before(&self.stream, &frame, send_end).map_err(transport_failure)?;
-            io::receive_before(&self.stream, end).map_err(transport_failure)?
-        } else {
-            io::send(&self.stream, &frame, Duration::from_secs(5)).map_err(transport_failure)?;
-            io::receive(&self.stream, Duration::from_secs(10)).map_err(transport_failure)?
+        let encoded = frame.encode().map_err(|_| Error::Frame)?;
+        let send_end = clock::boot_ms()
+            .map_err(|_| Error::Clock)?
+            .saturating_add(5000);
+        let send_end = end.map_or(send_end, |end| end.min(send_end));
+        // Encoding and action verification precede the exchange interval.
+        let written = std::time::Instant::now();
+        io::send_encoded_before(&self.stream, &encoded, send_end).map_err(transport_failure)?;
+        let receive_end = match end {
+            Some(end) => end,
+            None => clock::boot_ms()
+                .map_err(|_| Error::Clock)?
+                .saturating_add(10_000),
         };
+        let (incoming, received) =
+            io::receive_before_observed(&self.stream, receive_end).map_err(transport_failure)?;
         if let Some(remote) = &self.remote
             && let Some(error) = self.forwarding_refusal(
                 &incoming,
@@ -476,7 +490,18 @@ impl Session {
         {
             return Err(Error::Authentication);
         }
-        Ok(verified)
+        let exchange_ns = direct_exchange(action.action(), response, written, received);
+        Ok((verified, exchange_ns))
+    }
+    pub(crate) fn local_views_for(&self, home: ServiceId, key: Id) -> bool {
+        self.remote.is_none()
+            && self.ready.home == home
+            && self.server_key.to_bytes() == *key.as_bytes()
+            && self
+                .ready
+                .capabilities
+                .iter()
+                .any(|c| c == CLIENT_VIEWS_CAPABILITY)
     }
     pub fn stream_handle(&self) -> Arc<Stream> {
         Arc::clone(&self.stream)
@@ -686,4 +711,28 @@ fn transport_failure(error: io::Error) -> Error {
 
 #[cfg(test)]
 #[path = "../../Tests/Client/Connection.rs"]
-mod tests;
+pub(in crate::client) mod tests;
+
+// Timing becomes eligible only after the caller verifies response signature and exact binding.
+fn direct_exchange(
+    action: &Action,
+    response: &Response,
+    written: std::time::Instant,
+    received: std::time::Instant,
+) -> Option<u64> {
+    if !matches!(
+        action.operation,
+        Operation::MessageSend | Operation::MessageReply | Operation::MessageAction
+    ) || action.home != response.home
+        || action.operation_id != response.operation_id
+        || action_digest(action).ok()? != response.action_digest
+        || !matches!(response.outcome, Outcome::Committed { event: Some(_), .. })
+    {
+        return None;
+    }
+    received
+        .checked_duration_since(written)?
+        .as_nanos()
+        .try_into()
+        .ok()
+}

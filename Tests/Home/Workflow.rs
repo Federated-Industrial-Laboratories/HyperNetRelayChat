@@ -5,6 +5,8 @@ mod confidential;
 mod federation;
 #[path = "../Identity/Lifecycle.rs"]
 mod lifecycle;
+#[path = "Views.rs"]
+mod views;
 use crate::{conversations, delegation, identity, messaging, moderation};
 use std::{
     cell::Cell,
