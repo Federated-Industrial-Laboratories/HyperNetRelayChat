@@ -448,9 +448,54 @@ fn dispatch_offer(
     });
     Ok(())
 }
+// Network keepalives must not block observation or user-command dispatch.
+fn with_keepalive<T>(
+    end: Instant,
+    period: Duration,
+    mut keepalive: impl FnMut(&AtomicBool) + Send,
+    observe: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    let stopped = AtomicBool::new(false);
+    thread::scope(|scope| {
+        let worker = scope.spawn(|| {
+            let mut next = Instant::now() + period;
+            while !stopped.load(Ordering::Acquire) && Instant::now() < end {
+                if Instant::now() >= next {
+                    keepalive(&stopped);
+                    next = Instant::now() + period;
+                } else {
+                    thread::sleep(Duration::from_millis(20));
+                }
+            }
+        });
+        let result = observe();
+        stopped.store(true, Ordering::Release);
+        worker.join().map_err(|_| "SupportingHealthWorker")?;
+        result
+    })
+}
+fn command_completed(view: &Snapshot, request: u64) -> Result<bool> {
+    let Some(completion) = view.completions.iter().find(|c| c.request_id == request) else {
+        return Ok(false);
+    };
+    if let Some(error) = &completion.error {
+        return Err(format!("ControllerSetup:{}", bounded_reason(&error.code)));
+    }
+    Ok(true)
+}
+fn wait_command(controller: &Controller, request: u64, end: Instant) -> Result<()> {
+    loop {
+        ensure(Instant::now() < end, "ControllerSetupDeadline")?;
+        if command_completed(&controller.snapshot(), request)? {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+}
 fn open_controllers(
     paths: &[PathBuf],
     room: RoomId,
+    ignored: AccountId,
     supporting: &mut [Endpoint],
     overall: Instant,
 ) -> Result<Vec<Interactive>> {
@@ -476,66 +521,121 @@ fn open_controllers(
         });
     }
     let mut selected = [false; 8];
+    let mut joined = [None; 8];
+    let mut filter = None;
+    let mut resynchronise = None;
     let mut previous = vec![None; 8];
     let mut observations = [0u8; 8];
-    let mut last_health = Instant::now();
-    loop {
-        let mut ready = 0;
-        for ui in &controllers {
-            let v = ui.controller.snapshot();
-            let state = (
-                v.connection.clone(),
-                v.inspection.stale,
-                v.privacy.is_some(),
-                current(&v, room),
-                v.status.as_ref().map(|s| bounded_reason(&s.code)),
-            );
-            if observations[ui.index] < 8 && previous[ui.index].as_ref() != Some(&state) {
-                emit(
-                    json!({"case":"NativeLoadControllerStartup", "endpoint":ui.index,
+    with_keepalive(
+        end,
+        Duration::from_secs(8),
+        |stopped| {
+            for e in supporting.iter_mut() {
+                if stopped.load(Ordering::Acquire) || Instant::now() >= end {
+                    break;
+                }
+                let _ = health(&mut e.client);
+            }
+        },
+        || loop {
+            let mut ready = 0;
+            for ui in &controllers {
+                let v = ui.controller.snapshot();
+                let state = (
+                    v.connection.clone(),
+                    v.inspection.stale,
+                    v.privacy.is_some(),
+                    current(&v, room),
+                    v.status.as_ref().map(|s| bounded_reason(&s.code)),
+                );
+                if observations[ui.index] < 8 && previous[ui.index].as_ref() != Some(&state) {
+                    emit(
+                        json!({"case":"NativeLoadControllerStartup", "endpoint":ui.index,
                     "bootMs":hrc::clock::boot_ms().ok(), "stage":"ObservedState",
                     "connection":format!("{:?}",state.0), "inspectionStale":state.1,
                     "privacyPresent":state.2, "selectedCurrent":state.3, "status":state.4}),
-                );
-                observations[ui.index] += 1;
-                previous[ui.index] = Some(state);
+                    );
+                    observations[ui.index] += 1;
+                    previous[ui.index] = Some(state);
+                }
+                if !selected[ui.index]
+                    && v.connection == ConnectionState::Online
+                    && !v.inspection.stale
+                    && v.privacy.is_some()
+                {
+                    let Some(join) = joined[ui.index] else {
+                        joined[ui.index] = Some(
+                            ui.controller
+                                .dispatch(Command::Join(room))
+                                .map_err(|_| "ControllerJoinDispatch")?,
+                        );
+                        continue;
+                    };
+                    if !command_completed(&v, join)? {
+                        continue;
+                    }
+                    if ui.index == 7 {
+                        let Some(request) = filter else {
+                            filter = Some(
+                                ui.controller
+                                    .dispatch(Command::SetFilter {
+                                        subject: ignored,
+                                        ignored: Some(true),
+                                        muted: None,
+                                    })
+                                    .map_err(|_| "ControllerFilterDispatch")?,
+                            );
+                            continue;
+                        };
+                        if !command_completed(&v, request)? {
+                            continue;
+                        }
+                    }
+                    ui.controller
+                        .dispatch(Command::SelectRoom(room))
+                        .map_err(|_| "ControllerSelectDispatch")?;
+                    selected[ui.index] = true;
+                }
+                if ui.index == 7 && selected[ui.index] {
+                    if let Some(request) = resynchronise {
+                        if !command_completed(&v, request)? {
+                            continue;
+                        }
+                    } else if v.selected.as_ref().is_some_and(|view|
+                        view.summary.room == room && view.gap.is_some()) {
+                        // Ignore invalidates the old filter-bound cursor. Use the
+                        // same explicit recovery command as the interactive client.
+                        resynchronise = Some(ui.controller.dispatch(Command::Resynchronise)
+                            .map_err(|_| "ControllerResynchroniseDispatch")?);
+                        emit(json!({"case":"NativeLoadControllerStartup", "endpoint":ui.index,
+                            "bootMs":hrc::clock::boot_ms().ok(), "stage":"ResynchroniseDispatch"}));
+                        continue;
+                    }
+                }
+                ready += usize::from(current(&v, room));
             }
-            if !selected[ui.index]
-                && v.connection == ConnectionState::Online
-                && !v.inspection.stale
-                && v.privacy.is_some()
-            {
-                ui.controller
-                    .dispatch(Command::SelectRoom(room))
-                    .map_err(|_| "ControllerSelectDispatch")?;
-                selected[ui.index] = true;
-            }
-            ready += usize::from(current(&v, room));
-        }
-        if ready == 8 {
-            emit(
-                json!({"case":"NativeLoadControllerStartup", "bootMs":hrc::clock::boot_ms().ok(),
+            if ready == 8 {
+                emit(
+                    json!({"case":"NativeLoadControllerStartup", "bootMs":hrc::clock::boot_ms().ok(),
                 "stage":"AllCurrent"}),
-            );
-            return Ok(controllers);
-        }
-        if Instant::now() >= end {
-            emit(
-                json!({"case":"NativeLoadControllerReadiness","passed":false,"states":controllers.iter().map(|u| {
+                );
+                return Ok(controllers);
+            }
+            if Instant::now() >= end {
+                emit(
+                    json!({"case":"NativeLoadControllerReadiness","passed":false,"states":controllers.iter().map(|u| {
                 let v=u.controller.snapshot(); json!({"endpoint":u.index,"connection":format!("{:?}",v.connection),
                     "selectedCurrent":current(&v,room),"status":v.status.as_ref().map(|s|&s.code)})
             }).collect::<Vec<_>>()}),
-            );
-            return Err("EightControllerReadinessDeadline".into());
-        }
-        if last_health.elapsed() >= Duration::from_secs(8) {
-            for e in supporting.iter_mut() {
-                let _ = health(&mut e.client);
+                );
+                return Err("EightControllerReadinessDeadline".into());
             }
-            last_health = Instant::now();
-        }
-        thread::sleep(Duration::from_millis(20));
-    }
+            thread::sleep(Duration::from_millis(20));
+        },
+    ).and_then(|controllers| {
+        ensure(Instant::now() < end, "EightControllerReadinessDeadline")?;
+        Ok(controllers)
+    })
 }
 fn interactive(
     mut ui: Interactive,
@@ -1251,15 +1351,8 @@ fn run(args: &Arguments) -> Result<bool> {
     let mut endpoints = Vec::new();
     for (index, path) in request.profiles.iter().enumerate() {
         emit(json!({"case":"NativeLoadSetupStep","endpoint":index,"operation":"OpenProfile"}));
-        let mut client = net(Client::open_offline(path))?;
-        reconnect(
-            &mut client,
-            end.min(Instant::now() + Duration::from_secs(45)),
-        )?;
+        let client = net(Client::open_offline(path))?;
         endpoints.push(Endpoint { index, client });
-        for endpoint in &mut endpoints {
-            let _ = health(&mut endpoint.client);
-        }
     }
     ensure(
         endpoints
@@ -1298,8 +1391,21 @@ fn run(args: &Arguments) -> Result<bool> {
             )?;
         }
     }
+    // Interactive profiles start directly in the production Controller. Opening
+    // eight temporary streams first would exceed the reserved transition budget.
+    let mut supporting = endpoints.split_off(8);
+    drop(endpoints);
+    for index in 0..supporting.len() {
+        reconnect(
+            &mut supporting[index].client,
+            end.min(Instant::now() + Duration::from_secs(45)),
+        )?;
+        for endpoint in &mut supporting[..=index] {
+            let _ = health(&mut endpoint.client);
+        }
+    }
     let create = operation(
-        &mut endpoints[10].client,
+        &mut supporting[2].client,
         Operation::RoomCreate,
         Target::Service,
         &conversations::Create {
@@ -1313,7 +1419,7 @@ fn run(args: &Arguments) -> Result<bool> {
         .deserialized()
         .map_err(|_| "CreatedRoom")?;
     let room = body.room.ok_or("CreatedRoom")?;
-    for endpoint in &mut endpoints {
+    for endpoint in &mut supporting {
         if endpoint.index != 10 {
             emit(
                 json!({"case":"NativeLoadSetupStep","endpoint":endpoint.index,"operation":"JoinRoom"}),
@@ -1327,9 +1433,10 @@ fn run(args: &Arguments) -> Result<bool> {
             )?)?;
         }
     }
-    let subject = endpoints[8].client.profile.registration.account;
+    let subject = supporting[0].client.profile.registration.account;
+    let controllers = open_controllers(&request.profiles, room, subject, &mut supporting, end)?;
     let marker = committed(send_exact(
-        &mut endpoints[8].client,
+        &mut supporting[0].client,
         room,
         &message("loadmarker visible only to non-ignoring recipients".into()),
         end,
@@ -1340,7 +1447,7 @@ fn run(args: &Arguments) -> Result<bool> {
     marker_query.terms = vec!["loadmarker".into()];
     marker_query.sender = Some(subject);
     let result = operation(
-        &mut endpoints[10].client,
+        &mut supporting[2].client,
         Operation::SearchQuery,
         Target::Room(room),
         &marker_query,
@@ -1354,25 +1461,35 @@ fn run(args: &Arguments) -> Result<bool> {
         page.events.iter().any(|e| e.event == marker),
         "UnfilteredMarkerMissing",
     )?;
-    let recipient = endpoints[7].client.profile.registration.account;
-    committed(operation(
-        &mut endpoints[7].client,
-        Operation::ModerationIgnore,
-        Target::Account(recipient),
-        &moderation::Filter {
-            subject,
-            enabled: true,
-        },
-        end,
-    )?)?;
-    check_filter(&mut endpoints[7].client, room, subject, end)?;
-    let mut supporting = endpoints.split_off(8);
-    for mut endpoint in endpoints {
-        endpoint.client.disconnect();
-        drop(endpoint);
-    }
-    // SQLCipher owners and their streams are released before Controller::open acquires the same profiles.
-    let controllers = open_controllers(&request.profiles, room, &mut supporting, end)?;
+    // The marker exists before checking the production recipient's filtered view.
+    let recipient = &controllers[7].controller;
+    let refresh = recipient
+        .dispatch(Command::Refresh)
+        .map_err(|_| "FilteredRefreshDispatch")?;
+    wait_command(recipient, refresh, end)?;
+    let view = recipient.snapshot();
+    ensure(current(&view, room), "FilteredHistoryUnavailable")?;
+    ensure(
+        view.selected
+            .as_ref()
+            .is_some_and(|r| r.events.iter().all(|e| e.actor.acting().account != subject)),
+        "IgnoredHistoryLeak",
+    )?;
+    let mut filtered_query = query();
+    filtered_query.terms = vec!["loadmarker".into()];
+    filtered_query.sender = Some(subject);
+    let search = recipient
+        .dispatch(Command::Search(filtered_query))
+        .map_err(|_| "FilteredSearchDispatch")?;
+    wait_command(recipient, search, end)?;
+    ensure(
+        recipient
+            .snapshot()
+            .search
+            .as_ref()
+            .is_some_and(|s| s.room == room && !s.running && !s.cancelled && s.events.is_empty()),
+        "IgnoredSearchLeak",
+    )?;
     for endpoint in &mut supporting {
         emit(
             json!({"case":"NativeLoadSetupStep","endpoint":endpoint.index,"operation":"ServiceInspect"}),
@@ -1473,6 +1590,29 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn readiness_observer_progresses_while_a_support_read_is_blocked() {
+        let (started, observed) = std::sync::mpsc::channel();
+        let (release, blocked) = std::sync::mpsc::channel();
+        let mut first = true;
+        let result = with_keepalive(
+            Instant::now() + Duration::from_secs(2),
+            Duration::ZERO,
+            move |_| {
+                if first {
+                    first = false;
+                    started.send(()).unwrap();
+                    blocked.recv_timeout(Duration::from_secs(1)).unwrap();
+                }
+            },
+            || {
+                observed.recv_timeout(Duration::from_secs(1)).unwrap();
+                release.send(()).unwrap();
+                Ok(7)
+            },
+        );
+        assert_eq!(result.unwrap(), 7);
+    }
     #[test]
     fn pilot_entry_requires_a_current_support_result_and_retains_failure_context() {
         assert!(pilot_support_current(8, Ok(Outcome::Result { body: Value::Null })).is_ok());
