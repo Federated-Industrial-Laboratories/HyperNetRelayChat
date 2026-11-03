@@ -26,13 +26,19 @@ separate limits; neither overrides a lower route profile. These are explicit
 fixture policy settings, not changes to HyperNet's capacity implementation or
 HRC's performance thresholds.
 
-After room setup, all eight interactive Client instances release their streams
-and SQLCipher Store ownership. The production Controller then opens each of those
-same profiles, connects and selects the room. The helper waits for all eight
-current room views, inspection state and privacy observations. Their ordinary
-background refresh remains enabled throughout both measurements. The remaining
-four profiles retain one Client owner each; no profile is opened twice and the
-transition adds no companion slots.
+After offline profile validation, the eight interactive profiles start directly
+in production Controllers. Their ordinary commands connect, join the room, set
+recipient ignore and select the room. A filter-bound cursor gap receives one
+explicit resynchronisation command within the original 45-second readiness end.
+This setup avoids replacing eight temporary streams at once. The four supporting
+profiles retain one Client owner each, and no profile is opened twice.
+
+One scoped worker performs supporting health reads while the helper observes
+Controller state and dispatches commands. It stops and joins within the same
+readiness gate. All eight room views, inspection state and privacy observations
+must be current; ordinary background refresh remains enabled throughout both
+measurements. Presentation filtering is checked through the recipient Controller;
+the final raw history and search checks remain mandatory service-side evidence.
 
 The Rust helper has an original 360-second deadline inside the unchanged
 900-second outer fixture, with time retained for process cleanup. It measures a
