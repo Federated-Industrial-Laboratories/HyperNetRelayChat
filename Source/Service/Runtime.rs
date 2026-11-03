@@ -129,13 +129,17 @@ impl Shared {
                     || !stream.check_authority_supported()
             })
             .map_err(map)?;
-        let timeout = permit.check_timeout().map_err(map)?;
+        let check_end = permit.check_deadline().map_err(map)?;
         let result = self
             .companion
-            .check_authority(stream, *digest.as_bytes(), timeout)
+            .check_authority_until(stream, *digest.as_bytes(), check_end)
             .map_err(|error| {
                 self.report(operation, error.code());
-                Error::Authority
+                if matches!(error, crate::hypernet::Error::Timeout) {
+                    Error::AuthorityAdmissionExpired
+                } else {
+                    Error::Authority
+                }
             });
         // The finite observation is used below without retaining the admission slot.
         drop(permit);

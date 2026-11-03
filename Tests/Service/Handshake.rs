@@ -13,6 +13,7 @@ use std::{
 #[derive(Clone, Copy)]
 enum Reply {
     Permitted,
+    DelayedPermitted,
     Unavailable,
     Expired,
     Denied,
@@ -31,6 +32,9 @@ fn privacy() -> Value {
         "endToEndMessageEncryption":"applicationDefined"})
 }
 fn receipt(request: &Value, reply: Reply) -> Value {
+    if matches!(reply, Reply::DelayedPermitted) {
+        thread::sleep(Duration::from_millis(1100));
+    }
     let start = clock::boot_ms().unwrap();
     let end = start + request["timeoutMs"].as_u64().unwrap();
     let mut value = json!({"version":2,"ok":true,"id":request["id"],"nonce":request["nonce"],
@@ -42,7 +46,7 @@ fn receipt(request: &Value, reply: Reply) -> Value {
         "controlGeneration":1,"kernelBoot":fs::read_to_string("/proc/sys/kernel/random/boot_id").unwrap().trim(),
         "privacy":privacy()}});
     match reply {
-        Reply::Permitted => {}
+        Reply::Permitted | Reply::DelayedPermitted => {}
         Reply::Denied | Reply::ExpiredDenied => {
             value["result"]["disposition"] = "denied".into();
             value["result"]["authority"]["code"] = 3.into();
@@ -166,7 +170,7 @@ fn check(companion: &Companion, stream: &Stream, end: u64) -> Result<AuthorityCh
     let admission = admission::Admission::default();
     let permit = admission.acquire(Some(end), || false).unwrap();
     companion
-        .check_authority(stream, [42; 32], permit.check_timeout().unwrap())
+        .check_authority_until(stream, [42; 32], permit.check_deadline().unwrap())
         .map_err(|_| Error::Authority)
 }
 
@@ -200,13 +204,45 @@ fn temporary_observations_recover_on_the_same_stream_and_immutable_action() {
     for request in requests.iter() {
         assert_eq!(request["id"], id(14));
         assert_eq!(request["actionDigest"], id(42));
-        assert!(request["timeoutMs"].as_u64().unwrap() <= 1000);
+        assert!(request["timeoutMs"].as_u64().unwrap() <= 5000);
     }
     assert_ne!(requests[0]["nonce"], requests[1]["nonce"]);
     assert_ne!(requests[1]["nonce"], requests[2]["nonce"]);
     assert_ne!(requests[0]["nonce"], requests[2]["nonce"]);
     assert_eq!(stream.peer().session(), id(6));
     assert_eq!(stream.peer().generation(), 1);
+}
+
+#[test]
+fn authority_after_one_second_still_fits_the_original_handshake() {
+    let fixture = Fixture::new(vec![Reply::DelayedPermitted]);
+    let (companion, stream) = fixture.connect();
+    let initial = sample().unwrap();
+    let end = initial.boot_ms + 5000;
+    let authority = recover(
+        end,
+        initial.upper_ms + 5000,
+        sample,
+        || false,
+        |end| check(&companion, &stream, end),
+        |_| panic!("the delayed permitted observation needs no retry"),
+    )
+    .unwrap();
+    assert!(clock::boot_ms().unwrap() >= initial.boot_ms + 1100);
+    assert!(authority.current_at(sample(), false));
+    assert!(authority.end <= end);
+    assert!(
+        serde_json::to_value(&authority.check).unwrap()["usableUntilBootMs"]
+            .as_u64()
+            .unwrap()
+            <= authority.end
+    );
+    let requests = fixture.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0]["id"], id(14));
+    assert_eq!(requests[0]["actionDigest"], id(42));
+    assert_ne!(requests[0]["nonce"], id(0));
+    assert!((1001..=5000).contains(&requests[0]["timeoutMs"].as_u64().unwrap()));
 }
 
 #[test]

@@ -309,6 +309,79 @@ fn certified_denial_remains_distinct_from_local_unavailability() {
 }
 
 #[test]
+fn absolute_authority_end_keeps_spent_time_and_shorter_receipt_lifetimes() {
+    let (recorded, requests) = mpsc::channel();
+    let fixture = Fixture::new(move |request| {
+        if request["action"] != "checkAuthority" {
+            return normal(request);
+        }
+        recorded.send(request.clone()).unwrap();
+        let mut value = receipt(request);
+        if request["actionDigest"] == id(2) {
+            value["result"]["notAfterBootMs"] =
+                (value["result"]["callerStartedBootMs"].as_u64().unwrap() + 150).into();
+        }
+        value.into()
+    });
+    let adapter = fixture.agent();
+    let stream = incoming(&adapter);
+    let end = ipc::boot_ms().unwrap() + 400;
+    thread::sleep(Duration::from_millis(50));
+    let first = adapter
+        .check_authority_until(&stream, [1; 32], end)
+        .unwrap();
+    assert!(first.permitted());
+    let request = requests.recv_timeout(Duration::from_secs(1)).unwrap();
+    assert!((100..=350).contains(&request["timeoutMs"].as_u64().unwrap()));
+    let first_value = serde_json::to_value(&first).unwrap();
+    assert_eq!(first_value["usableUntilBootMs"], end);
+    assert_eq!(first_value["actionDigest"], id(1));
+
+    let end = ipc::boot_ms().unwrap() + 5000;
+    let shorter = adapter
+        .check_authority_until(&stream, [2; 32], end)
+        .unwrap();
+    assert!(shorter.permitted());
+    assert!(!first.permitted());
+    let next = requests.recv_timeout(Duration::from_secs(1)).unwrap();
+    assert_ne!(request["nonce"], next["nonce"]);
+    let value = serde_json::to_value(&shorter).unwrap();
+    assert_eq!(value["usableUntilBootMs"], value["receiptNotAfterBootMs"]);
+    assert!(value["usableUntilBootMs"].as_u64().unwrap() < end);
+    assert_eq!(value["actionDigest"], id(2));
+}
+
+#[test]
+fn absolute_authority_end_refuses_expired_work_and_caps_the_supported_wait() {
+    let (recorded, requests) = mpsc::channel();
+    let fixture = Fixture::new(move |request| {
+        if request["action"] == "checkAuthority" {
+            recorded.send(request.clone()).unwrap();
+        }
+        normal(request)
+    });
+    let adapter = fixture.agent();
+    let stream = incoming(&adapter);
+    for end in [0, ipc::boot_ms().unwrap() + 99] {
+        assert!(matches!(
+            adapter.check_authority_until(&stream, [1; 32], end),
+            Err(Error::Timeout)
+        ));
+    }
+    assert!(requests.try_recv().is_err());
+    let before = ipc::boot_ms().unwrap();
+    let permitted = adapter
+        .check_authority_until(&stream, [1; 32], before + 8000)
+        .unwrap();
+    assert!(permitted.permitted());
+    let request = requests.recv_timeout(Duration::from_secs(1)).unwrap();
+    assert_eq!(request["timeoutMs"], 5000);
+    let value = serde_json::to_value(&permitted).unwrap();
+    assert!(value["usableUntilBootMs"].as_u64().unwrap() <= ipc::boot_ms().unwrap() + 5000);
+    assert!(value["usableUntilBootMs"].as_u64().unwrap() < before + 8000);
+}
+
+#[test]
 fn original_call_deadline_survives_delayed_companion_dispatch() {
     let f = Fixture::new(|r| {
         if r["action"] == "checkAuthority" {

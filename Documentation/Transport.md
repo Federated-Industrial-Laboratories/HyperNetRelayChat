@@ -114,6 +114,12 @@ status connection or observed control replacement invalidates earlier results.
 A caller must check `permitted()` immediately before the effect; a serialized
 receipt is diagnostic data and cannot be deserialized into permission.
 
+Service authority calls carry an absolute enclosing boot-time end into the
+adapter. Its 100 to 5,000 millisecond check cannot restart that end when local
+dispatch begins. The earlier of that end and the companion receipt's expiry
+bounds the usable observation; the companion's original receipt times remain
+unchanged.
+
 The companion verifies endpoint signatures and certified authority observations.
 HRC does not implement a second HyperNet authority evaluator. A permitted result
 is a bounded current observation, not an atomic transaction with HRC storage or
