@@ -20,7 +20,9 @@ use crate::{
 };
 pub(crate) use agreements::{actor_admitted, admission, current, expire_in, recipient_admitted};
 pub use exchange::VerifiedRemoteSubmission;
-pub(crate) use exchange::{authenticate_in, constrain, consume_in, final_check, record_creation};
+pub(crate) use exchange::{
+    authenticate_in, constrain, consume_in, final_check, list_rooms, record_creation,
+};
 pub use freshness::{OriginWatchPage, WatchedIdentity};
 pub(crate) use freshness::{mark_identity_changed, recipient_fresh, reset_freshness};
 pub use identities::{IdentityImport, OriginSubject, SourceSubject, TrustAnchor};

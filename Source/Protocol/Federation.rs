@@ -462,8 +462,9 @@ pub(crate) fn check_page(v: &OriginIdentityPage) -> Result<()> {
         || v.agreement.revision == 0
         || v.records.len() > 4
         || v.records.iter().map(|b| b.0.len()).sum::<usize>() > 56 * 1024
-        || v.next != v.after + v.records.len() as u64
+        || v.after > 1024
         || v.next > 1024
+        || v.after.checked_add(v.records.len() as u64) != Some(v.next)
         || v.records.is_empty() && !v.complete
     {
         return Err(Error::Invalid);

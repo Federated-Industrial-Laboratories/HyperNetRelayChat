@@ -94,13 +94,11 @@ fn preparation_failure(error: &crate::hypernet::Error, started: u64, deadline: u
     {
         return;
     }
-    use std::io::Write;
-    let _ = writeln!(
-        std::io::stderr().lock(),
-        "{}",
-        serde_json::json!({"event":"ConnectionPreparationFailed", "code":error.code(),
+    crate::diagnostics::emit(
+        &serde_json::json!({"event":"ConnectionPreparationFailed", "code":error.code(),
             "startedBootMs":started, "finishedBootMs":clock::boot_ms().ok(),
             "setupDeadlineBootMs":deadline})
+        .to_string(),
     );
 }
 pub struct Session {
@@ -115,6 +113,7 @@ pub struct Session {
 }
 impl Session {
     pub fn open(profile: &Profile, key: &SigningKey) -> Result<Self> {
+        crate::diagnostics::start();
         let end = clock::boot_ms().map_err(|_| Error::Clock)? + 30_000;
         establish(end, |end| Self::open_once(profile, key, end))
     }

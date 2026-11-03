@@ -192,9 +192,9 @@ impl Shared {
             );
             Some(serde_json::Value::Object(fields))
         });
-        eprintln!(
-            "{}",
-            serde_json::json!({"event":event,"code":code,"bootMs":now,"authority":authority})
+        crate::diagnostics::emit(
+            &serde_json::json!({"event":event,"code":code,"bootMs":now,"authority":authority})
+                .to_string(),
         );
     }
     fn authentication(&self, stage: &'static str) -> Error {
@@ -322,6 +322,9 @@ pub fn run_with_ready(
     diagnostics: bool,
     ready: impl FnOnce(&super::Descriptor) -> Result<()>,
 ) -> Result<()> {
+    if diagnostics {
+        crate::diagnostics::start();
+    }
     let shared = Arc::new(load_shared(directory, Arc::clone(&stop), diagnostics)?);
     let status = shared.companion.status().map_err(|_| Error::Transport)?;
     if !status.check_authority().supported() || !status.check_authority().endpoint_ready() {

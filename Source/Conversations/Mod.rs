@@ -163,7 +163,9 @@ pub(crate) fn operate(db: &Transaction<'_>, action: &Action, now: TimeBounds) ->
         Operation::RoomCreate => create(db, action, now),
         Operation::DirectCreate => direct(db, action, now),
         Operation::RoomInvite => invite(db, action, now),
-        Operation::RoomList => list(db, action, now),
+        Operation::RoomList => list(db, action, now, |room| {
+            crate::federation::actor_admitted(db, action.actor.acting(), room, now)
+        }),
         Operation::RoomInspect => inspection::read(db, action, now),
         Operation::RoomJoin => join(db, action, now),
         Operation::RoomLeave => {
@@ -402,7 +404,12 @@ fn join(db: &Transaction<'_>, action: &Action, now: TimeBounds) -> Domain<Outcom
     )?;
     crate::messaging::record(db, action, room, Value::Null, "", now)
 }
-fn list(db: &Transaction<'_>, action: &Action, now: TimeBounds) -> Domain<Outcome> {
+pub(crate) fn list(
+    db: &Transaction<'_>,
+    action: &Action,
+    now: TimeBounds,
+    mut room_access: impl FnMut(RoomId) -> Domain<()>,
+) -> Domain<Outcome> {
     if action.target != Target::Service {
         return invalid("ServiceTarget");
     }
@@ -442,7 +449,7 @@ fn list(db: &Transaction<'_>, action: &Action, now: TimeBounds) -> Domain<Outcom
     for row in rows {
         let (room, name, topic, revision, sequence, joined, read, history_from, mode, invited) =
             row?;
-        match crate::federation::actor_admitted(db, action.actor.acting(), room, now) {
+        match room_access(room) {
             Ok(()) => {}
             Err(Fault::Reject(..)) => continue,
             Err(e) => return Err(e),

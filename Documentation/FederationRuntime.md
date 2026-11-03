@@ -135,6 +135,14 @@ administrations sign the same payload. Room consent is also explicit at the
 home. The first profile fixes remote admission as per-endpoint approval and
 forbids onward sharing; an agreement cannot weaken either rule.
 
+Remote room discovery uses the current request's exact agreement and endpoint
+admission. Each room must also satisfy that agreement's room mode and the privacy
+requirements on both transport legs before unread counts, metadata or pagination
+include it. An admission under another agreement cannot contribute rooms, even
+for the same endpoint and home. A setup-only agreement therefore returns an
+empty room list. Local discovery keeps its existing membership, invitation, ban
+and recipient-filter rules.
+
 A room identity is bound to one foreign origin service when it is first shared.
 That binding survives agreement revision, expiry and withdrawal. An agreement
 with a different foreign origin must use a separate room identity, so retained
@@ -335,7 +343,9 @@ most four whole records and at most 56 KiB of record bytes, and its final signed
 encoding must fit the ordinary frame. A single record retains the existing
 56-KiB ceiling. `next` is the final returned index; `complete` is true only at
 the checkpoint's record count. Empty incomplete pages, gaps, substitutions and
-changing heads are invalid. Retain the existing per-account 16-MiB chain bound.
+changing heads are invalid. Both indices are bounded to 0-1,024 before checked
+addition of the record count; a valid signature cannot bypass these bounds.
+Retain the existing per-account 16-MiB chain bound.
 
 The request's `authorization` is a Blob containing a home-signed
 `ProofAuthorization` with exact account and checkpoint. Its purpose is either

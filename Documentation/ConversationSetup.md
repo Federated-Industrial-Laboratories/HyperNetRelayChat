@@ -68,7 +68,10 @@ standard error. Diagnostics contain no messages, account identifiers or keys.
 Failed authority observations include fixed disposition categories and monotonic
 deadline timings. Authentication failures identify their fixed validation stage.
 Output is limited to a burst of eight lines, one line per second thereafter and
-128 lines per process. Client errors distinguish local configuration and storage,
+128 output attempts per process. The bounded diagnostic writer holds at most 32
+queued records of at most 1,024 bytes each, plus its current record and channel
+metadata. Producers discard saturated, closed or oversized output; service
+shutdown never waits for the output sink. Client errors distinguish local configuration and storage,
 HyperNet preparation, session authentication, clock and handshake failures.
 `AcceptWaitEnded/Timeout` can mean an ordinary idle wait; it does not establish a
 failed client operation. Periodic retention runs in one background task every
