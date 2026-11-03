@@ -232,6 +232,13 @@ The cursor binds home, room, account, sequence, membership revision, filter
 revision, current actor/grant/agreement context and five-minute expiry. Search
 cursors additionally bind all normalized terms and query filters. A changed access
 context or a gap before retained history returns `ResynchronisationRequired`.
+`CursorContext` identifies an expired or changed access context. A client may
+discard its community presentation and request a bounded cursorless page under
+current authority. `CursorHistoryGap` identifies missing retained history;
+`CursorPosition` identifies a position beyond the current authoritative order.
+These two gaps take precedence over context changes and require explicit recovery.
+Wrong home, room or account bindings return `InvalidInput` with `CursorBinding`;
+an invalid signature remains `CursorSignature`. No rejected cursor grants access.
 Neither a cursor nor previously returned search data grants future access.
 
 `HistoryContext` opens the original event from a search result under these same

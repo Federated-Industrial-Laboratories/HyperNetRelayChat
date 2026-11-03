@@ -55,15 +55,26 @@ fn after(
     let verified = verify_cursor(&cursor.0, &signer.verifying_key())
         .map_err(|_| Fault::Reject(ErrorCode::InvalidInput, "CursorSignature"))?;
     let c = verified.value();
-    if c.home != action.home
-        || c.room != access.room
-        || c.account != action.actor.represented()
-        || c.membership_revision != access.membership_revision
+    if c.home != action.home || c.room != access.room || c.account != action.actor.represented() {
+        return Err(Fault::Reject(ErrorCode::InvalidInput, "CursorBinding"));
+    }
+    // A stale access context must not hide missing history or a rolled-back order.
+    if c.sequence > access.sequence {
+        return Err(Fault::Reject(
+            ErrorCode::ResynchronisationRequired,
+            "CursorPosition",
+        ));
+    }
+    if c.sequence.saturating_add(1) < access.earliest {
+        return Err(Fault::Reject(
+            ErrorCode::ResynchronisationRequired,
+            "CursorHistoryGap",
+        ));
+    }
+    if c.membership_revision != access.membership_revision
         || c.filter_revision != access.filter_revision
         || c.access_digest != digest
         || now.upper_ms >= c.expires_ms
-        || c.sequence > access.sequence
-        || c.sequence.saturating_add(1) < access.earliest
     {
         return Err(Fault::Reject(
             ErrorCode::ResynchronisationRequired,

@@ -114,9 +114,13 @@ plaintext index.
 
 Cached views explicitly show stale status until current filtered history is read.
 Resume uses the service's current membership, grant, retention and recipient
-filter checks. An expired or changed access cursor produces an explicit gap;
-resynchronisation discards the invalid cached presentation and starts a current
-history pull. Disappeared or unjoined rooms lose cached events. A transport failure
+filter checks. An expired or changed community cursor can reacquire one current
+cursorless page within the original ten-second read deadline. The old community
+cache, focused view, search and queued room notifications are cleared before that
+read; catch-up does not emit live notifications. Every attempt checks current
+authority. A second context change, missing retained history, an impossible
+position, or an unclassified persisted gap remains explicit and needs recovery.
+Disappeared or unjoined rooms lose cached events. A transport failure
 keeps drafts, retained history, its signed cursor and exact uncertain outbox bytes.
 A transient authority/availability refusal cannot fabricate an access-withdrawal
 gap; only explicit denied, expired or resynchronisation outcomes invalidate the
@@ -235,6 +239,23 @@ are resolved before another is prepared. Successful MLS transitions and their
 verified rosters share one commit; a missing future epoch produces an explicit
 gap. Epoch-ready acknowledgement is sent only for the selected latest epoch and
 an endpoint currently eligible for live content.
+
+Encrypted history can restart one stale access cursor within its existing
+eight-request catch-up bound. A missing-history or impossible-position gap stays
+explicit and does not trigger that restart. Cursor gaps and explicit
+resynchronisation retain MLS state, pending transitions and already decrypted
+local content under the local retention policy. Current history windows and
+filters still govern presentation; acknowledging a gap cannot recover missing
+keys or confer access.
+
+The shared `Client::resynchronise_history(room)` operation explicitly clears a
+local history gap and continuation. It preserves encrypted archives, MLS state,
+drafts and exact pending effects; it does not fetch content or authorize access.
+Controller Resynchronise, `/resync` and bot `--resynchronise` use that operation.
+For CLI encrypted history, use `hrc crypto sync --profile PATH --room ROOM
+--resynchronise`. Omit the flag for ordinary synchronization. Resumed reads still
+check current room, grant, device and transport authority. A failed explicit
+CryptoSync exposes any persisted gap in the selected view and its recovery control.
 
 The selected room exposes an encryption view, exact roster, pending packages,
 barrier and contact trust status. `TrustContact` accepts an exact displayed anchor

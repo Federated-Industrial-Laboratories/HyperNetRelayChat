@@ -891,6 +891,306 @@ fn received_search(room: RoomId, events: Vec<Event>) -> SearchView {
     }
 }
 
+fn cached_community(worker: &mut Worker, room: RoomId) -> messaging::PageResult {
+    worker.shared.stop.store(false, Ordering::Release);
+    worker.shared.disconnect.store(false, Ordering::Release);
+    let mut event = received_event(50);
+    event.timestamp_ms = TimeBounds::test_now().lower_ms;
+    let cursor = HistoryCursor {
+        home: room.home,
+        room,
+        account: worker.snapshot.account,
+        sequence: event.sequence,
+        membership_revision: 1,
+        filter_revision: 1,
+        access_digest: Id::from_bytes([70; 32]),
+        expires_ms: event.timestamp_ms + 300_000,
+    };
+    let key = SigningKey::from_bytes(&[11; 32]);
+    let page = messaging::PageResult {
+        events: vec![event.clone()],
+        cursor: Blob(sign_cursor(&cursor, &key).unwrap()),
+        has_more: false,
+        room_revision: 1,
+        members: vec![],
+    };
+    cache::receive(
+        &mut worker.client.store,
+        room,
+        worker.snapshot.account,
+        &page,
+        &key.verifying_key(),
+        event.timestamp_ms,
+    )
+    .unwrap();
+    let view = worker.snapshot.selected.as_mut().unwrap();
+    view.events = page.events.clone();
+    view.focus = Some(event.event);
+    view.content = received_search(room, page.events.clone()).content;
+    worker.snapshot.search = Some(received_search(room, page.events.clone()));
+    worker.notify(room, &page.events).unwrap();
+    worker.caught_up.insert(room);
+    page
+}
+fn cursor_error(detail: &str) -> Error {
+    Error::Rejected {
+        code: ErrorCode::ResynchronisationRequired,
+        detail: detail.into(),
+    }
+}
+
+#[test]
+fn community_cursor_recovery_replaces_old_views_before_a_current_bounded_read() {
+    let (fixture, mut worker, room) = worker();
+    let old = cached_community(&mut worker, room);
+    worker.client.save_draft(room, "retained draft").unwrap();
+    let pending = action();
+    let _ = outcome(
+        &mut worker,
+        &pending,
+        Outcome::Refused {
+            code: ErrorCode::Unavailable,
+            detail: "uncertain".into(),
+            retry_after_ms: None,
+        },
+    );
+    let pending_bytes = worker.client.pending().unwrap()[0]
+        .action
+        .signed_bytes()
+        .to_vec();
+    let key = SigningKey::from_bytes(&[11; 32]);
+    let mut current = old.clone();
+    let mut event = received_event(51);
+    event.timestamp_ms = TimeBounds::test_now().lower_ms;
+    current.events = vec![event];
+    let mut cursor = verify_cursor(&old.cursor.0, &key.verifying_key())
+        .unwrap()
+        .value()
+        .clone();
+    cursor.sequence = 51;
+    cursor.access_digest = Id::from_bytes([71; 32]);
+    current.cursor = Blob(sign_cursor(&cursor, &key).unwrap());
+    let end = crate::clock::boot_ms().unwrap() + 10_000;
+    let mut calls = 0;
+    let page = worker
+        .community_page(
+            room,
+            Some(old.cursor.clone()),
+            end,
+            |worker, request, deadline| {
+                calls += 1;
+                assert_eq!(deadline, end);
+                assert_eq!(request.limit, 32);
+                if calls == 1 {
+                    assert_eq!(request.cursor, Some(old.cursor.clone()));
+                    return Err(cursor_error("CursorContext"));
+                }
+                assert!(request.cursor.is_none());
+                let visible = Arc::clone(&worker.shared.snapshot.lock().unwrap());
+                let selected = visible.selected.as_ref().unwrap();
+                assert!(
+                    selected.events.is_empty()
+                        && selected.content.is_empty()
+                        && selected.focus.is_none()
+                );
+                assert!(selected.stale && selected.gap.is_none());
+                assert!(visible.search.is_none() && visible.notifications.is_empty());
+                assert!(!worker.caught_up.contains(&room));
+                let cached = cache::room(&mut worker.client.store, room).unwrap();
+                assert!(
+                    cached.events.is_empty() && cached.cursor.is_none() && cached.gap.is_none()
+                );
+                Ok(current.clone())
+            },
+        )
+        .unwrap();
+    assert_eq!(calls, 2);
+    cache::receive(
+        &mut worker.client.store,
+        room,
+        worker.snapshot.account,
+        &page,
+        &key.verifying_key(),
+        TimeBounds::test_now().upper_ms,
+    )
+    .unwrap();
+    assert!(
+        !worker.caught_up.contains(&room),
+        "reacquired history must not notify as live delivery"
+    );
+    drop(worker);
+    let mut reopened = Client::open_offline(&fixture.root).unwrap();
+    let cached = cache::room(&mut reopened.store, room).unwrap();
+    assert_eq!(cached.events.len(), 1);
+    assert_eq!(cached.events[0].event, current.events[0].event);
+    assert!(cached.gap.is_none());
+    assert_eq!(
+        reopened.draft(room).unwrap().as_deref(),
+        Some("retained draft")
+    );
+    assert_eq!(
+        reopened.pending().unwrap()[0].action.signed_bytes(),
+        pending_bytes
+    );
+}
+
+#[test]
+fn community_cursor_recovery_never_loops_or_retries_real_gaps_and_access_failures() {
+    for (code, detail, expected) in [
+        (ErrorCode::ResynchronisationRequired, "CursorContext", 2),
+        (ErrorCode::ResynchronisationRequired, "CursorHistoryGap", 1),
+        (ErrorCode::ResynchronisationRequired, "CursorPosition", 1),
+        (ErrorCode::ResynchronisationRequired, "UnknownContext", 1),
+        (ErrorCode::Denied, "Membership", 1),
+        (ErrorCode::Expired, "GrantExpired", 1),
+        (ErrorCode::InvalidInput, "CursorSignature", 1),
+        (ErrorCode::InvalidInput, "CursorBinding", 1),
+    ] {
+        let (_fixture, mut worker, room) = worker();
+        let page = cached_community(&mut worker, room);
+        let mut calls = 0;
+        let result = worker.community_page(
+            room,
+            Some(page.cursor),
+            crate::clock::boot_ms().unwrap() + 10_000,
+            |_, _, _| {
+                calls += 1;
+                Err(Error::Rejected {
+                    code,
+                    detail: detail.into(),
+                })
+            },
+        );
+        assert!(result.is_err());
+        assert_eq!(calls, expected, "{detail}");
+        if code != ErrorCode::InvalidInput {
+            let cached = cache::room(&mut worker.client.store, room).unwrap();
+            assert!(cached.events.is_empty());
+            assert_eq!(cached.gap.as_deref(), Some(detail));
+            assert!(worker.snapshot.search.is_none() && worker.snapshot.notifications.is_empty());
+            // Ordinary polling does not reinterpret a retained explicit gap.
+            assert!(worker.pull(room).is_ok());
+        }
+    }
+}
+
+#[test]
+fn community_cursor_recovery_stops_at_the_original_deadline_and_disconnect() {
+    for cancel in [false, true] {
+        let (_fixture, mut worker, room) = worker();
+        let page = cached_community(&mut worker, room);
+        let end = crate::clock::boot_ms().unwrap() + if cancel { 10_000 } else { 20 };
+        let mut calls = 0;
+        let result = worker.community_page(room, Some(page.cursor), end, |worker, _, deadline| {
+            calls += 1;
+            assert_eq!(deadline, end);
+            if cancel {
+                worker.shared.disconnect.store(true, Ordering::Release);
+            } else {
+                while crate::clock::boot_ms().unwrap() < end {
+                    thread::sleep(Duration::from_millis(1));
+                }
+            }
+            Err(cursor_error("CursorContext"))
+        });
+        assert!(result.is_err());
+        assert_eq!(calls, 1);
+        assert!(
+            cache::room(&mut worker.client.store, room)
+                .unwrap()
+                .events
+                .is_empty()
+        );
+    }
+    let (_fixture, mut worker, room) = worker();
+    assert!(
+        worker
+            .community_page(room, None, 0, |_, _, _| panic!("expired read started"))
+            .is_err()
+    );
+}
+
+#[test]
+fn explicit_encrypted_resynchronisation_keeps_retained_events_when_current_read_fails() {
+    let (_fixture, mut worker, room) = worker();
+    let page = cached_community(&mut worker, room);
+    let view = worker.snapshot.selected.as_mut().unwrap();
+    view.summary.confidentiality = RoomConfidentiality::PrivateGroup;
+    view.gap = Some("CursorHistoryGap".into());
+    cache::save_rooms(
+        &mut worker.client.store,
+        room.home,
+        std::slice::from_ref(&view.summary),
+    )
+    .unwrap();
+    assert!(cache::restart_community(&mut worker.client.store, room, None).is_err());
+    assert!(matches!(
+        worker.command(Command::Resynchronise),
+        Err(Error::Offline)
+    ));
+    let cached = cache::room(&mut worker.client.store, room).unwrap();
+    assert_eq!(cached.events.len(), page.events.len());
+    assert!(cached.cursor.is_none() && cached.gap.is_none());
+    assert!(worker.snapshot.selected.as_ref().unwrap().events.is_empty());
+    assert!(worker.snapshot.search.is_none() && worker.snapshot.notifications.is_empty());
+}
+
+#[test]
+fn explicit_crypto_sync_surfaces_a_persisted_gap_and_exposes_recovery_after_failure() {
+    let (_fixture, mut worker, room) = worker();
+    let page = cached_community(&mut worker, room);
+    let view = worker.snapshot.selected.as_mut().unwrap();
+    view.summary.confidentiality = RoomConfidentiality::PrivateGroup;
+    cache::save_rooms(
+        &mut worker.client.store,
+        room.home,
+        std::slice::from_ref(&view.summary),
+    )
+    .unwrap();
+    assert!(view.gap.is_none() && !view.stale);
+    cache::inspection_failed(
+        &mut worker.client.store,
+        Operation::CryptoHistory,
+        room,
+        &cursor_error("CursorHistoryGap"),
+    )
+    .unwrap();
+    // The real command must reconcile durable gap state even when an earlier
+    // current inspection fails before it can read another history page.
+    worker.run_command(Queued::new(88, Command::CryptoSync { room, grant: None }));
+    assert!(
+        worker
+            .snapshot
+            .completions
+            .iter()
+            .any(|c| c.request_id == 88 && c.error.is_some())
+    );
+    let published = Arc::clone(&worker.shared.snapshot.lock().unwrap());
+    let selected = published.selected.as_ref().unwrap();
+    assert_eq!(selected.gap.as_deref(), Some("CursorHistoryGap"));
+    assert!(
+        selected.stale
+            && selected.events.is_empty()
+            && selected.content.is_empty()
+            && selected.focus.is_none()
+    );
+    assert!(published.search.is_none() && published.notifications.is_empty());
+    assert_eq!(
+        cache::room(&mut worker.client.store, room)
+            .unwrap()
+            .events
+            .len(),
+        page.events.len()
+    );
+    assert!(matches!(
+        worker.command(Command::Resynchronise),
+        Err(Error::Offline)
+    ));
+    let cached = cache::room(&mut worker.client.store, room).unwrap();
+    assert!(cached.gap.is_none() && cached.cursor.is_none());
+    assert_eq!(cached.events.len(), page.events.len());
+}
+
 #[test]
 fn current_ignore_refilters_live_search_focus_and_queued_notifications_before_later_read_failure() {
     for focused in [false, true] {

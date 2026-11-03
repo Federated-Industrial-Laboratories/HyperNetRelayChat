@@ -1,6 +1,41 @@
 use super::*;
 
 #[test]
+fn encrypted_history_recovery_requires_an_explicit_sync_flag() {
+    let id = |n| hrc::protocol::Id::from_bytes([n; 32]);
+    let room = hrc::protocol::RoomId {
+        home: hrc::protocol::ServiceId {
+            network: hrc::protocol::NetworkId {
+                network: id(1),
+                incarnation: id(2),
+            },
+            service: id(3),
+        },
+        local: id(4),
+    }
+    .to_string();
+    let args = [
+        "hrc",
+        "crypto",
+        "sync",
+        "--profile",
+        "/private/agent",
+        "--room",
+        room.as_str(),
+    ];
+    for requested in [false, true] {
+        let mut args = args.to_vec();
+        if requested {
+            args.push("--resynchronise");
+        }
+        let cli = Cli::try_parse_from(args).unwrap();
+        assert!(
+            matches!(cli.command,Command::Crypto {command: conversation::encryption_cli::Command::Sync {resynchronise,..}} if resynchronise==requested)
+        );
+    }
+}
+
+#[test]
 fn endpoint_lifecycle_requires_explicit_purpose_and_secret_files() {
     assert!(
         Cli::try_parse_from([

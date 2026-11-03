@@ -258,58 +258,17 @@ impl Worker {
                 current,
                 cached.events.last().map(|e| e.sequence).unwrap_or(0),
             );
-            if result.is_err()
-                && cache::room(&mut self.client.store, room)
-                    .map_err(|_| Error::Storage)?
-                    .gap
-                    .is_some()
-            {
-                self.caught_up.remove(&room);
-                if let Some(view) = &mut self.snapshot.selected
-                    && view.summary.room == room
-                {
-                    view.events.clear();
-                    view.content.clear();
-                    view.members.clear();
-                    view.gap = Some("CurrentRoomAccessUnavailable".into());
-                }
+            if result.is_err() {
+                self.reconcile_history_gap(room)?;
             }
             return result;
         }
-        let page = self.read::<messaging::PageResult, _>(
-            Operation::EventsResume,
-            Target::Room(room),
-            &messaging::Page {
-                cursor: cached.cursor,
-                limit: 32,
-            },
-        );
-        let page = match page {
-            Ok(page) => page,
-            Err(Error::Rejected {
-                code: ErrorCode::ResynchronisationRequired,
-                detail,
-            })
-            | Err(Error::Refused {
-                code: ErrorCode::ResynchronisationRequired,
-                detail,
-                ..
-            }) => {
-                cache::invalidate(&mut self.client.store, room).map_err(|_| Error::Storage)?;
-                self.caught_up.remove(&room);
-                if let Some(view) = &mut self.snapshot.selected
-                    && view.summary.room == room
-                {
-                    view.events.clear();
-                    view.members = current.members;
-                    view.stale = true;
-                    view.gap = Some(detail);
-                    view.has_more = false;
-                }
-                return Ok(());
-            }
-            Err(e) => return Err(e),
-        };
+        let end = crate::clock::boot_ms()
+            .map_err(|_| Error::Clock)?
+            .saturating_add(10_000);
+        let page = self.community_page(room, cached.cursor, end, |worker, page, end| {
+            worker.read_until(Operation::EventsResume, Target::Room(room), &page, end)
+        })?;
         let key =
             VerifyingKey::from_bytes(self.client.profile.active_server().signing_key.as_bytes())
                 .map_err(|_| Error::Configuration)?;
@@ -364,6 +323,105 @@ impl Worker {
             if let Some(summary) = self.snapshot.rooms.iter().find(|s| s.room == room) {
                 view.summary = summary.clone();
             }
+        }
+        Ok(())
+    }
+    /// One current cursorless page may replace an obsolete access context. Both
+    /// attempts share the original read deadline and normal service authorization.
+    pub(super) fn community_page(
+        &mut self,
+        room: RoomId,
+        mut cursor: Option<Blob>,
+        end: u64,
+        mut read: impl FnMut(&mut Self, messaging::Page, u64) -> Result<messaging::PageResult>,
+    ) -> Result<messaging::PageResult> {
+        let had_cursor = cursor.is_some();
+        for attempt in 0..2 {
+            if self.shared.stop.load(Ordering::Acquire)
+                || self.shared.disconnect.load(Ordering::Acquire)
+            {
+                return Err(Error::Offline);
+            }
+            if crate::clock::boot_ms().map_err(|_| Error::Clock)? >= end {
+                return Err(Error::Network(super::super::network::Error::Transport));
+            }
+            let result = read(
+                self,
+                messaging::Page {
+                    cursor: cursor.take(),
+                    limit: 32,
+                },
+                end,
+            );
+            match result {
+                Err(error)
+                    if attempt == 0 && had_cursor && cache::cursor_context_changed(&error) =>
+                {
+                    self.clear_room_presentation(room, None);
+                    cache::restart_community(&mut self.client.store, room, None)
+                        .map_err(|_| Error::Storage)?;
+                }
+                Err(error) => {
+                    if cache::access_unavailable(&error) {
+                        let detail = match &error {
+                            Error::Rejected { detail, .. } | Error::Refused { detail, .. } => {
+                                detail.as_str()
+                            }
+                            _ => unreachable!(),
+                        };
+                        self.clear_room_presentation(room, Some(detail.into()));
+                        cache::restart_community(&mut self.client.store, room, Some(detail))
+                            .map_err(|_| Error::Storage)?;
+                    }
+                    return Err(error);
+                }
+                Ok(page) => {
+                    if self.shared.stop.load(Ordering::Acquire)
+                        || self.shared.disconnect.load(Ordering::Acquire)
+                    {
+                        return Err(Error::Offline);
+                    }
+                    if crate::clock::boot_ms().map_err(|_| Error::Clock)? >= end {
+                        return Err(Error::Network(super::super::network::Error::Transport));
+                    }
+                    return Ok(page);
+                }
+            }
+        }
+        unreachable!("community cursor restart is bounded")
+    }
+    pub(super) fn clear_room_presentation(&mut self, room: RoomId, gap: Option<String>) {
+        self.caught_up.remove(&room);
+        if let Some(view) = &mut self.snapshot.selected
+            && view.summary.room == room
+        {
+            view.events.clear();
+            view.content.clear();
+            view.members.clear();
+            view.focus = None;
+            view.stale = true;
+            view.gap = gap;
+            view.has_more = false;
+        }
+        if self
+            .snapshot
+            .search
+            .as_ref()
+            .is_some_and(|view| view.room == room)
+        {
+            self.snapshot.search = None;
+        }
+        self.snapshot
+            .notifications
+            .retain(|notification| notification.room != room);
+        self.publish();
+    }
+    pub(super) fn reconcile_history_gap(&mut self, room: RoomId) -> Result<()> {
+        if let Some(gap) = cache::room(&mut self.client.store, room)
+            .map_err(|_| Error::Storage)?
+            .gap
+        {
+            self.clear_room_presentation(room, Some(gap));
         }
         Ok(())
     }

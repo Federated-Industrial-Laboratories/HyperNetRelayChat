@@ -28,7 +28,7 @@ pub(super) fn run(config: Config, stop: Arc<AtomicBool>, on_ready: impl FnOnce()
     {
         return Err(Error::Configuration);
     }
-    state::initialise(&mut client.store, &config)?;
+    initialise(&mut client, &config)?;
     settle_local(&mut client)?;
     let mut room_index = 0;
     let mut failures = 0u8;
@@ -125,6 +125,15 @@ pub(super) fn run(config: Config, stop: Arc<AtomicBool>, on_ready: impl FnOnce()
         }
     }
     client.disconnect();
+    Ok(())
+}
+pub(super) fn initialise(client: &mut Client, config: &Config) -> Result<()> {
+    state::initialise(&mut client.store, config)?;
+    if config.resynchronise {
+        for room in &config.rooms {
+            client.resynchronise_history(*room)?;
+        }
+    }
     Ok(())
 }
 /// Readiness belongs to one initial connection's authenticated pulls, never to retained cache flags.

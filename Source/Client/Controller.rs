@@ -831,6 +831,18 @@ impl Worker {
         target: Target,
         body: &B,
     ) -> Result<T> {
+        let end = crate::clock::boot_ms()
+            .map_err(|_| Error::Clock)?
+            .saturating_add(10_000);
+        self.read_until(op, target, body, end)
+    }
+    fn read_until<T: serde::de::DeserializeOwned, B: serde::Serialize>(
+        &mut self,
+        op: Operation,
+        target: Target,
+        body: &B,
+        end: u64,
+    ) -> Result<T> {
         if !home::is_read_operation(op) {
             return Err(Error::Input);
         }
@@ -843,9 +855,6 @@ impl Worker {
         let key =
             VerifyingKey::from_bytes(self.client.profile.registration.endpoint_key.as_bytes())
                 .map_err(|_| Error::Input)?;
-        let end = crate::clock::boot_ms()
-            .map_err(|_| Error::Clock)?
-            .saturating_add(10_000);
         let r = retry_read(
             end,
             || {
