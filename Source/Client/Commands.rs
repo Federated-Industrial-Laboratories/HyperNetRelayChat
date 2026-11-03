@@ -39,13 +39,8 @@ impl Worker {
             LoadMore => return self.pull(self.selected()?),
             Resynchronise => {
                 let room = self.selected()?;
-                cache::invalidate(&mut self.client.store, room).map_err(|_| Error::Storage)?;
-                cache::reset_gap(&mut self.client.store, room).map_err(|_| Error::Storage)?;
-                self.caught_up.remove(&room);
-                if let Some(v) = &mut self.snapshot.selected {
-                    v.gap = None;
-                    v.events.clear();
-                }
+                self.clear_room_presentation(room, None);
+                self.client.resynchronise_history(room)?;
                 return self.pull(room);
             }
             SaveDraft {
@@ -197,7 +192,11 @@ impl Worker {
                 self.response(response)?;
             }
             CryptoSync { room, grant } => {
-                let view = self.client.crypto_sync(room, grant.as_deref())?;
+                let result = self.client.crypto_sync(room, grant.as_deref());
+                if result.is_err() {
+                    self.reconcile_history_gap(room)?;
+                }
+                let view = result?;
                 let selected = self
                     .snapshot
                     .selected

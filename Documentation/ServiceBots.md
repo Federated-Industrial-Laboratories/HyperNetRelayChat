@@ -110,7 +110,9 @@ does not assert rejection or retract an already committed reply.
 
 Expired cursors or changed access context require an explicit restart with
 `--resynchronise`. This replaces the stale cursor and catches up without old
-triggers; it does not discard a pending exact effect. Changing the configured
+triggers. It also resets the shared encrypted-history continuation and gap while
+preserving decrypted archives and MLS state. Current authority is checked again
+on resumed reads; no pending exact effect is discarded. Changing the configured
 rooms, help text or selected grant requires no outstanding bot plan and starts
 the same no-trigger catch-up. Both transitions preserve existing outbox outcomes.
 

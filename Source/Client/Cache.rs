@@ -127,8 +127,25 @@ pub(super) fn inspection_failed(
 ) -> storage::Result<bool> {
     // A history cursor can expire or lose its room revision while access remains
     // valid. Deleting encrypted events would also erase unrecoverable plaintext.
-    if operation == Operation::CryptoHistory && cursor_context_changed(error) {
-        return Ok(false);
+    if operation == Operation::CryptoHistory {
+        if cursor_context_changed(error) {
+            return Ok(false);
+        }
+        if let Some(detail) = cursor_gap(error) {
+            // Keep MLS and decrypted archive associations; the missing interval
+            // remains explicit and cannot be replaced by a cursorless retry.
+            store.write(|db| {
+                db.execute(
+                    "UPDATE client_rooms SET gap=?2 WHERE id=?1",
+                    params![room.to_string(), detail],
+                )?;
+                Ok(Commit::new(
+                    (),
+                    encode(&("HRC.ClientHistoryGap", room, detail))?,
+                ))
+            })?;
+            return Ok(true);
+        }
     }
     if !access_unavailable(error) {
         return Ok(false);
@@ -141,6 +158,51 @@ pub(super) fn cursor_context_changed(error: &super::Error) -> bool {
         super::Error::Rejected { code: ErrorCode::ResynchronisationRequired, detail }
         | super::Error::Refused { code: ErrorCode::ResynchronisationRequired, detail, .. }
         if detail == "CursorContext")
+}
+pub(super) fn cursor_gap(error: &super::Error) -> Option<&str> {
+    match error {
+        super::Error::Rejected {
+            code: ErrorCode::ResynchronisationRequired,
+            detail,
+        }
+        | super::Error::Refused {
+            code: ErrorCode::ResynchronisationRequired,
+            detail,
+            ..
+        } if matches!(detail.as_str(), "CursorHistoryGap" | "CursorPosition") => Some(detail),
+        _ => None,
+    }
+}
+/// Replace community presentation under a fresh access context, never MLS history.
+pub(super) fn restart_community(
+    store: &mut Store,
+    room: RoomId,
+    gap: Option<&str>,
+) -> storage::Result<()> {
+    store.write(|db| {
+        let summary: Vec<u8> = db.query_row(
+            "SELECT summary FROM client_rooms WHERE id=?1",
+            [room.to_string()],
+            |r| r.get(0),
+        )?;
+        if decode::<conversations::Summary>(&summary)?.confidentiality
+            != RoomConfidentiality::Community
+        {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        db.execute(
+            "DELETE FROM client_events WHERE room=?1",
+            [room.to_string()],
+        )?;
+        db.execute(
+            "UPDATE client_rooms SET cursor=NULL,members=NULL,gap=?2 WHERE id=?1",
+            params![room.to_string(), gap],
+        )?;
+        Ok(Commit::new(
+            (),
+            encode(&("HRC.ClientCommunityRestart", room, gap))?,
+        ))
+    })
 }
 pub(super) fn restart_cursor(store: &mut Store, room: RoomId) -> storage::Result<()> {
     store.write(|db| {
@@ -243,13 +305,33 @@ pub(super) fn candidate_bytes(store: &mut Store, id: Id, now: u64) -> storage::R
     })
 }
 
-pub(super) fn reset_gap(store: &mut Store, room: RoomId) -> storage::Result<()> {
+/// Explicit local recovery has one meaning for interactive and headless clients.
+pub(super) fn resynchronise_history(store: &mut Store, room: RoomId) -> storage::Result<()> {
     store.write(|db| {
+        let summary: Option<Vec<u8>> = db
+            .query_row(
+                "SELECT summary FROM client_rooms WHERE id=?1",
+                [room.to_string()],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(summary) = summary
+            && decode::<conversations::Summary>(&summary)?.confidentiality
+                == RoomConfidentiality::Community
+        {
+            db.execute(
+                "DELETE FROM client_events WHERE room=?1",
+                [room.to_string()],
+            )?;
+        }
         db.execute(
-            "UPDATE client_rooms SET gap=NULL,cursor=NULL WHERE id=?1",
+            "UPDATE client_rooms SET gap=NULL,cursor=NULL,members=NULL WHERE id=?1",
             [room.to_string()],
         )?;
-        Ok(Commit::new((), encode(&("HRC.ClientResynchronise", room))?))
+        Ok(Commit::new(
+            (),
+            encode(&("HRC.ClientHistoryResynchronise", room))?,
+        ))
     })
 }
 /// Retention of disclosed local copies needs no authority and runs while offline.

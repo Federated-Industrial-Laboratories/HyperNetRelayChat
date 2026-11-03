@@ -7,7 +7,7 @@ use crate::{
     messaging,
     storage::{self, Commit, Store},
 };
-use std::{collections::BTreeMap, fs, os::unix::fs::PermissionsExt, path::PathBuf};
+use std::{collections::BTreeMap, fs, os::unix::fs::PermissionsExt, path::PathBuf, time::Duration};
 fn id(n: u8) -> Id {
     Id::from_bytes([n; 32])
 }
@@ -454,6 +454,138 @@ fn explicit_resynchronisation_and_configuration_change_do_not_replay_history() {
         .validate()
         .is_err()
     );
+}
+
+#[test]
+fn bot_resynchronisation_resets_encrypted_client_continuation_and_keeps_exact_plans() {
+    let fixture = Fixture::new();
+    drop(fixture.store(true));
+    fs::rename(fixture.root.join("Key"), fixture.root.join("Database.key")).unwrap();
+    let key = SigningKey::from_bytes(&[10; 32]);
+    crate::service::files::create(&fixture.root.join("Endpoint.key"), &key.to_bytes()).unwrap();
+    let profile = client::Profile {
+        server: crate::service::Descriptor {
+            version: 1,
+            home: room().home,
+            signing_key: Id::from_bytes(
+                SigningKey::from_bytes(&[30; 32]).verifying_key().to_bytes(),
+            ),
+            protocol: PROTOCOL.into(),
+            text_profile: crate::text::PROFILE.into(),
+        },
+        registration: AccountRegistration {
+            home: room().home,
+            account: account(10),
+            endpoint: id(10),
+            endpoint_key: Id::from_bytes(key.verifying_key().to_bytes()),
+            transport_principal: id(13),
+            recovery_key: id(14),
+            classification: AccountClass::Agent {
+                operator: account(20),
+            },
+            invitation: id(15),
+        },
+        companion: fixture.root.join("AbsentCompanion"),
+        clock: crate::clock::Config {
+            observation: fixture.root.join("AbsentClock"),
+            monitor_key: hex::encode([16; 32]),
+        },
+        federation: None,
+        agreements: vec![],
+    };
+    crate::service::files::create_json(&fixture.root.join("Profile.json"), &profile).unwrap();
+    let mut client = client::Client::open_offline(&fixture.root).unwrap();
+    let mut config = fixture.config();
+    runtime::initialise(&mut client, &config).unwrap();
+    let summary = crate::conversations::Summary {
+        room: room(),
+        name: "encrypted bot room".into(),
+        topic: String::new(),
+        revision: 1,
+        sequence: 1,
+        joined: true,
+        unread: 0,
+        confidentiality: RoomConfidentiality::PrivateGroup,
+        invited: false,
+    };
+    let bytes =
+        canonical_encode(&Value::serialized(&summary).unwrap(), ORDINARY_FRAME_BYTES).unwrap();
+    client.store.write(|db| {
+        db.execute("INSERT INTO client_rooms(id,summary,cursor,gap) VALUES(?1,?2,?3,'CursorHistoryGap')",rusqlite::params![room().to_string(),bytes,vec![1u8]])?;
+        Ok(Commit::new((),b"encrypted continuation gap".to_vec()))
+    }).unwrap();
+    let window = RetryWindow {
+        id: id(9),
+        expires_ms: TimeBounds::test_now().upper_ms + 120_000,
+    };
+    let mut action = reply(&window).action().clone();
+    action.actor = Actor::IndependentAgent {
+        acting: EndpointActor {
+            endpoint: id(10),
+            ..acting(10)
+        },
+        operator: account(20),
+    };
+    let pending =
+        verify_action(&sign_action(&action, &key).unwrap(), &key.verifying_key()).unwrap();
+    let caught_up = Blob(vec![1]);
+    state::advance(
+        &mut client.store,
+        state::Advance {
+            room: room(),
+            prior: None,
+            cursor: &caught_up,
+            live: true,
+            reply: None,
+            window: &window,
+            now: TimeBounds::test_now(),
+        },
+    )
+    .unwrap();
+    state::advance(
+        &mut client.store,
+        state::Advance {
+            room: room(),
+            prior: Some(&caught_up),
+            cursor: &Blob(vec![2]),
+            live: true,
+            reply: Some((&pending, id(12))),
+            window: &window,
+            now: TimeBounds::test_now(),
+        },
+    )
+    .unwrap();
+    config.resynchronise = true;
+    runtime::initialise(&mut client, &config).unwrap();
+    let trigger = state::room(&mut client.store, room()).unwrap();
+    assert!(trigger.cursor.is_none() && !trigger.live);
+    let continuation: (Option<Vec<u8>>, Option<String>) = client
+        .store
+        .read(Duration::from_secs(1), |db| {
+            db.query_row(
+                "SELECT cursor,gap FROM client_rooms WHERE id=?1",
+                [room().to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+        })
+        .unwrap();
+    assert_eq!(continuation, (None, None));
+    assert_eq!(state::plans(&mut client.store).unwrap().len(), 1);
+    assert_eq!(
+        client.pending().unwrap()[0].action.signed_bytes(),
+        pending.signed_bytes()
+    );
+    assert!(matches!(
+        client.history_messages(
+            room(),
+            &messaging::Page {
+                cursor: None,
+                limit: 32
+            },
+            None
+        ),
+        Err(client::Error::Offline)
+    ));
 }
 
 #[test]
