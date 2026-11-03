@@ -33,7 +33,7 @@ fn queued_checks_start_after_admission_and_control_is_not_overtaken() {
         scope.spawn(move || {
             let control = gate.acquire(None, || false).unwrap();
             control_events
-                .send(("control", control.check_timeout().unwrap()))
+                .send(("control", control.check_deadline().unwrap()))
                 .unwrap();
             released.recv_timeout(Duration::from_secs(1)).unwrap();
         });
@@ -41,23 +41,23 @@ fn queued_checks_start_after_admission_and_control_is_not_overtaken() {
         scope.spawn(|| {
             let next = admission.acquire(None, || false).unwrap();
             events
-                .send(("next", next.check_timeout().unwrap()))
+                .send(("next", next.check_deadline().unwrap()))
                 .unwrap();
         });
         queued(&admission, 2);
         // Real queued time is not charged to the later authority check's lifetime.
         assert!(received.recv_timeout(Duration::from_millis(30)).is_err());
         drop(first);
-        assert_eq!(
-            received.recv_timeout(Duration::from_secs(1)).unwrap(),
-            ("control", Duration::from_secs(1))
-        );
+        let (name, end) = received.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert_eq!(name, "control");
+        assert!(end > clock::boot_ms().unwrap() + 1000);
+        assert!(end <= clock::boot_ms().unwrap() + 5000);
         assert!(received.try_recv().is_err());
         release.send(()).unwrap();
-        assert_eq!(
-            received.recv_timeout(Duration::from_secs(1)).unwrap(),
-            ("next", Duration::from_secs(1))
-        );
+        let (name, end) = received.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert_eq!(name, "next");
+        assert!(end > clock::boot_ms().unwrap() + 1000);
+        assert!(end <= clock::boot_ms().unwrap() + 5000);
     });
     assert!(admission.acquire(None, || false).is_ok());
 }
@@ -104,13 +104,12 @@ fn admission_is_bounded_and_preserves_the_original_enclosing_deadline() {
     drop(first);
     let end = clock::boot_ms().unwrap() + 400;
     let permit = admission.acquire(Some(end), || false).unwrap();
-    let remaining = permit.check_timeout().unwrap();
-    assert!(remaining <= Duration::from_millis(400));
+    assert_eq!(permit.check_deadline().unwrap(), end);
     drop(permit);
     let permit = admission
         .acquire(Some(clock::boot_ms().unwrap() + 50), || false)
         .unwrap();
-    assert_eq!(permit.check_timeout(), Err(Error::Expired));
+    assert_eq!(permit.check_deadline(), Err(Error::Expired));
 }
 
 #[test]

@@ -9,7 +9,7 @@ use std::{
 
 const MAXIMUM_PENDING: usize = 32;
 const WAIT_MS: u64 = 1000;
-const CHECK_MS: u64 = 1000;
+const CHECK_MS: u64 = 5000;
 
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum Error {
@@ -94,15 +94,14 @@ impl Admission {
 }
 impl Permit<'_> {
     /// The authority clock starts after admission; an enclosing deadline never moves.
-    pub fn check_timeout(&self) -> Result<Duration, Error> {
+    pub fn check_deadline(&self) -> Result<u64, Error> {
         let now = clock::boot_ms().map_err(|_| Error::Unavailable)?;
-        let ms = self
-            .outer_end
-            .map_or(CHECK_MS, |end| end.saturating_sub(now).min(CHECK_MS));
-        if ms < 100 {
+        let check_end = now.checked_add(CHECK_MS).ok_or(Error::Unavailable)?;
+        let end = self.outer_end.map_or(check_end, |end| end.min(check_end));
+        if end.saturating_sub(now) < 100 {
             return Err(Error::Expired);
         }
-        Ok(Duration::from_millis(ms))
+        Ok(end)
     }
 }
 impl Drop for Permit<'_> {

@@ -90,10 +90,17 @@ action refusal), separately from a failed transport authority check. Shutdown,
 stream invalidation or query cancellation removes a waiter.
 
 After admission, each check starts a fresh nonce and a separate lifetime of at
-most one second. The original five-second handshake and ten-second search ends
-also cap admission and check time; neither is restarted. The exchange slot is
-released before Home state is locked or work executes. The resulting observation
-must still be currently permitted at every existing admission and commit check.
+most five seconds, within the companion's supported 100 to 5,000 millisecond
+range. An absolute boot-time end crosses the adapter and IPC boundary, so time
+spent before dispatch cannot restart that lifetime. The original five-second
+handshake, signed challenge expiry and ten-second search end also cap admission
+and check time; none is restarted. Less than 100 milliseconds remaining refuses
+the check. Ordinary operation frames do not transmit a client read deadline:
+without an enclosing service deadline, admission has its one-second wait and
+the subsequent authority check has its own five-second maximum.
+The exchange slot is released before Home state is locked or work executes.
+The resulting observation must still be currently permitted at every existing
+admission and commit check.
 This scheduling does not extend a receipt, reuse authority, retry an effect, or
 conceal a Core busy or unavailable result.
 

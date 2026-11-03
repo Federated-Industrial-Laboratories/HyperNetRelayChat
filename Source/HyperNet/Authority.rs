@@ -251,6 +251,30 @@ impl Companion {
         let ms = ipc::timeout_ms(timeout, 5000, 100)?;
         let started = ipc::boot_ms()?;
         let deadline = started.checked_add(ms).ok_or(Error::Clock)?;
+        self.check_authority_bounded(stream, action_digest, started, deadline)
+    }
+    /// Preserve an enclosing boot-time deadline through admission and local IPC.
+    pub(crate) fn check_authority_until(
+        &self,
+        stream: &Stream,
+        action_digest: [u8; 32],
+        end: u64,
+    ) -> Result<AuthorityCheck> {
+        let started = ipc::boot_ms()?;
+        let deadline = end.min(started.checked_add(5000).ok_or(Error::Clock)?);
+        self.check_authority_bounded(stream, action_digest, started, deadline)
+    }
+    fn check_authority_bounded(
+        &self,
+        stream: &Stream,
+        action_digest: [u8; 32],
+        started: u64,
+        deadline: u64,
+    ) -> Result<AuthorityCheck> {
+        let ms = deadline
+            .checked_sub(started)
+            .filter(|ms| (100..=5000).contains(ms))
+            .ok_or(Error::Timeout)?;
         if action_digest == [0; 32] {
             return Err(Error::InvalidInput);
         }
