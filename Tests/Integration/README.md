@@ -30,6 +30,12 @@ After offline profile validation, the eight interactive profiles start directly
 in production Controllers. Their ordinary commands connect, join the room, set
 recipient ignore and select the room. A filter-bound cursor gap receives one
 explicit resynchronisation command within the original 45-second readiness end.
+Join and ignore retain their original request, operation ID and action digest.
+Setup follows those exact deliveries through reconnect and accepts only a
+committed outcome, even when the original attempt has a temporary completion
+error. Unknown and temporary outcomes keep waiting within the same readiness end;
+terminal refusals, rejection, identity substitution and held or abandoned effects
+fail setup. No setup effect is redispatched to obtain a different identity.
 This setup avoids replacing eight temporary streams at once. The four supporting
 profiles retain one Client owner each, and no profile is opened twice.
 

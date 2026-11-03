@@ -483,6 +483,79 @@ fn command_completed(view: &Snapshot, request: u64) -> Result<bool> {
     }
     Ok(true)
 }
+#[derive(Clone, Copy)]
+struct SetupEffect {
+    request: u64,
+    operation: Operation,
+    room: Option<RoomId>,
+    identity: Option<(OperationId, Id)>,
+}
+impl SetupEffect {
+    fn new(request: u64, operation: Operation, room: Option<RoomId>) -> Self {
+        Self {
+            request,
+            operation,
+            room,
+            identity: None,
+        }
+    }
+    fn observe(
+        &mut self,
+        deliveries: &[client::Delivery],
+        completions: &[client::Completion],
+    ) -> Result<bool> {
+        let mut matching = deliveries.iter().filter(|d| {
+            d.request_id == Some(self.request)
+                || self.identity.is_some_and(|(id, _)| id == d.operation_id)
+        });
+        let Some(delivery) = matching.next() else {
+            if let Some(completion) = completions.iter().find(|c| c.request_id == self.request) {
+                return Err(format!(
+                    "ControllerSetup:{}",
+                    completion.error.as_ref().map_or_else(
+                        || "CompletionWithoutDelivery".into(),
+                        |error| bounded_reason(&error.code),
+                    )
+                ));
+            }
+            return Ok(false);
+        };
+        let identity = (delivery.operation_id, delivery.action_digest);
+        ensure(
+            matching.next().is_none()
+                && delivery.request_id == Some(self.request)
+                && delivery.operation == self.operation
+                && delivery.room == self.room
+                && self.identity.is_none_or(|saved| saved == identity),
+            "ControllerSetupDeliveryBinding",
+        )?;
+        ensure(
+            !delivery.held && !delivery.abandoned,
+            "ControllerSetupHeldOrAbandoned",
+        )?;
+        self.identity = Some(identity);
+        // Completion describes the original command attempt. Reconnect can resolve
+        // its exact durable effect later without replacing that completion record.
+        match &delivery.outcome {
+            Some(Outcome::Committed { .. }) => Ok(true),
+            None
+            | Some(Outcome::Unknown | Outcome::Absent)
+            | Some(Outcome::Refused {
+                code: ErrorCode::Unavailable | ErrorCode::RateLimited | ErrorCode::Overloaded,
+                ..
+            }) => Ok(false),
+            Some(Outcome::Rejected { code, detail }) => Err(format!(
+                "ControllerSetupRejected:{code:?}:{}",
+                bounded_reason(detail)
+            )),
+            Some(Outcome::Refused { code, detail, .. }) => Err(format!(
+                "ControllerSetupRefused:{code:?}:{}",
+                bounded_reason(detail)
+            )),
+            Some(Outcome::Result { .. }) => Err("ControllerSetupUnexpectedResult".into()),
+        }
+    }
+}
 fn wait_command(controller: &Controller, request: u64, end: Instant) -> Result<()> {
     loop {
         ensure(Instant::now() < end, "ControllerSetupDeadline")?;
@@ -532,8 +605,8 @@ fn open_controllers(
         });
     }
     let mut selected = [false; 8];
-    let mut joined = [None; 8];
-    let mut filter = None;
+    let mut joined: [Option<SetupEffect>; 8] = [None; 8];
+    let mut filter: Option<SetupEffect> = None;
     let mut resynchronise = None;
     let mut previous = vec![None; 8];
     let mut observations = [0u8; 8];
@@ -562,42 +635,64 @@ fn open_controllers(
                     observations[ui.index] += 1;
                     previous[ui.index] = Some(state);
                 }
+                // Retain the original effect binding even during backoff, before
+                // reconnect publishes its resolved delivery and current views.
+                let join_committed = if !selected[ui.index] {
+                    joined[ui.index]
+                        .as_mut()
+                        .map(|effect| effect.observe(&v.deliveries, &v.completions))
+                        .transpose()?
+                        .unwrap_or(false)
+                } else {
+                    true
+                };
+                let filter_committed = if ui.index == 7 && !selected[ui.index] {
+                    filter
+                        .as_mut()
+                        .map(|effect| effect.observe(&v.deliveries, &v.completions))
+                        .transpose()?
+                        .unwrap_or(false)
+                } else {
+                    true
+                };
                 if !selected[ui.index]
                     && v.connection == ConnectionState::Online
                     && !v.inspection.stale
                     && v.privacy.is_some()
                 {
-                    let Some(join) = joined[ui.index] else {
-                        joined[ui.index] = Some(
-                            ui.controller
-                                .dispatch(Command::Join(room))
-                                .map_err(|_| "ControllerJoinDispatch")?,
-                        );
+                    if joined[ui.index].is_none() {
+                        let request = ui.controller
+                            .dispatch(Command::Join(room))
+                            .map_err(|_| "ControllerJoinDispatch")?;
+                        joined[ui.index] = Some(SetupEffect::new(
+                            request, Operation::RoomJoin, Some(room),
+                        ));
                         emit(json!({"case":"NativeLoadControllerStartup","endpoint":ui.index,
                             "bootMs":hrc::clock::boot_ms().ok(),"stage":"JoinDispatch",
-                            "request":joined[ui.index]}));
+                            "request":request}));
                         continue;
-                    };
-                    if !command_completed(&v, join)? {
+                    }
+                    if !join_committed {
                         continue;
                     }
                     if ui.index == 7 {
-                        let Some(request) = filter else {
-                            filter = Some(
-                                ui.controller
-                                    .dispatch(Command::SetFilter {
-                                        subject: ignored,
-                                        ignored: Some(true),
-                                        muted: None,
-                                    })
-                                    .map_err(|_| "ControllerFilterDispatch")?,
-                            );
+                        if filter.is_none() {
+                            let request = ui.controller
+                                .dispatch(Command::SetFilter {
+                                    subject: ignored,
+                                    ignored: Some(true),
+                                    muted: None,
+                                })
+                                .map_err(|_| "ControllerFilterDispatch")?;
+                            filter = Some(SetupEffect::new(
+                                request, Operation::ModerationIgnore, None,
+                            ));
                             emit(json!({"case":"NativeLoadControllerStartup","endpoint":ui.index,
                                 "bootMs":hrc::clock::boot_ms().ok(),"stage":"FilterDispatch",
-                                "request":filter}));
+                                "request":request}));
                             continue;
-                        };
-                        if !command_completed(&v, request)? {
+                        }
+                        if !filter_committed {
                             continue;
                         }
                     }
@@ -1603,6 +1698,211 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn setup_fixture() -> (SetupEffect, client::Delivery, client::Completion) {
+        let id = |n| Id::from_bytes([n; 32]);
+        let room = RoomId {
+            home: ServiceId {
+                network: NetworkId {
+                    network: id(1),
+                    incarnation: id(2),
+                },
+                service: id(3),
+            },
+            local: id(4),
+        };
+        (
+            SetupEffect::new(7, Operation::RoomJoin, Some(room)),
+            client::Delivery {
+                abandoned: false,
+                held: false,
+                request_id: Some(7),
+                operation: Operation::RoomJoin,
+                operation_id: OperationId {
+                    window: id(5),
+                    operation: id(6),
+                },
+                action_digest: id(7),
+                room: Some(room),
+                outcome: Some(Outcome::Refused {
+                    code: ErrorCode::Unavailable,
+                    detail: "CurrentAuthorityUnavailable".into(),
+                    retry_after_ms: Some(1000),
+                }),
+            },
+            client::Completion {
+                request_id: 7,
+                error: Some(client::Status {
+                    request_id: Some(7),
+                    code: "OperationTemporarilyUnavailable".into(),
+                    detail: "The original attempt was refused.".into(),
+                }),
+            },
+        )
+    }
+    fn setup_commit() -> Outcome {
+        Outcome::Committed {
+            event: None,
+            position: 1,
+            body: Value::Null,
+        }
+    }
+    #[test]
+    fn setup_effect_accepts_only_its_recovered_commit_despite_old_attempt_error() {
+        for operation in [Operation::RoomJoin, Operation::ModerationIgnore] {
+            let (mut effect, mut delivery, completion) = setup_fixture();
+            effect.operation = operation;
+            delivery.operation = operation;
+            if operation == Operation::ModerationIgnore {
+                effect.room = None;
+                delivery.room = None;
+            }
+            assert!(
+                !effect
+                    .observe(
+                        std::slice::from_ref(&delivery),
+                        std::slice::from_ref(&completion)
+                    )
+                    .unwrap()
+            );
+            assert_eq!(
+                effect.identity,
+                Some((delivery.operation_id, delivery.action_digest))
+            );
+            delivery.outcome = Some(setup_commit());
+            assert!(effect.observe(&[delivery], &[completion]).unwrap());
+        }
+    }
+    #[test]
+    fn setup_effect_waits_for_retained_unknown_and_typed_temporary_outcomes() {
+        let (mut effect, mut delivery, mut completion) = setup_fixture();
+        let temporary = [
+            ErrorCode::Unavailable,
+            ErrorCode::RateLimited,
+            ErrorCode::Overloaded,
+        ]
+        .map(|code| {
+            Some(Outcome::Refused {
+                code,
+                detail: "Temporary".into(),
+                retry_after_ms: None,
+            })
+        });
+        for outcome in [None, Some(Outcome::Unknown), Some(Outcome::Absent)]
+            .into_iter()
+            .chain(temporary)
+        {
+            delivery.outcome = outcome;
+            assert!(
+                !effect
+                    .observe(
+                        std::slice::from_ref(&delivery),
+                        std::slice::from_ref(&completion)
+                    )
+                    .unwrap()
+            );
+            // Even an apparently successful completion cannot establish commitment.
+            completion.error = None;
+            assert!(
+                !effect
+                    .observe(
+                        std::slice::from_ref(&delivery),
+                        std::slice::from_ref(&completion)
+                    )
+                    .unwrap()
+            );
+        }
+    }
+    #[test]
+    fn setup_effect_rejects_terminal_outcomes_and_held_or_abandoned_work() {
+        for code in [ErrorCode::Denied, ErrorCode::Expired] {
+            for outcome in [
+                Outcome::Rejected {
+                    code,
+                    detail: "CurrentPolicy".into(),
+                },
+                Outcome::Refused {
+                    code,
+                    detail: "CurrentPolicy".into(),
+                    retry_after_ms: None,
+                },
+            ] {
+                let (mut effect, mut delivery, completion) = setup_fixture();
+                delivery.outcome = Some(outcome);
+                assert!(effect.observe(&[delivery], &[completion]).is_err());
+            }
+        }
+        for (held, abandoned) in [(true, false), (false, true)] {
+            let (mut effect, mut delivery, completion) = setup_fixture();
+            delivery.held = held;
+            delivery.abandoned = abandoned;
+            delivery.outcome = Some(setup_commit());
+            assert_eq!(
+                effect.observe(&[delivery], &[completion]).unwrap_err(),
+                "ControllerSetupHeldOrAbandoned"
+            );
+        }
+        let (mut effect, mut delivery, completion) = setup_fixture();
+        delivery.outcome = Some(Outcome::Result { body: Value::Null });
+        assert_eq!(
+            effect.observe(&[delivery], &[completion]).unwrap_err(),
+            "ControllerSetupUnexpectedResult"
+        );
+    }
+    #[test]
+    fn setup_effect_binds_request_operation_room_and_original_signed_identity() {
+        let (mut effect, mut delivery, _) = setup_fixture();
+        delivery.request_id = Some(effect.request + 1);
+        delivery.outcome = Some(setup_commit());
+        assert!(!effect.observe(&[delivery], &[]).unwrap());
+        assert!(effect.identity.is_none());
+        for change in 0..5 {
+            let (mut effect, mut delivery, completion) = setup_fixture();
+            assert!(
+                !effect
+                    .observe(std::slice::from_ref(&delivery), &[])
+                    .unwrap()
+            );
+            match change {
+                0 => delivery.request_id = Some(effect.request + 1),
+                1 => delivery.operation = Operation::RoomLeave,
+                2 => delivery.room = None,
+                3 => delivery.operation_id.operation = Id::from_bytes([9; 32]),
+                _ => delivery.action_digest = Id::from_bytes([9; 32]),
+            }
+            delivery.outcome = Some(setup_commit());
+            assert_eq!(
+                effect.observe(&[delivery], &[completion]).unwrap_err(),
+                "ControllerSetupDeliveryBinding"
+            );
+        }
+        let (mut effect, delivery, _) = setup_fixture();
+        assert_eq!(
+            effect
+                .observe(&[delivery.clone(), delivery], &[])
+                .unwrap_err(),
+            "ControllerSetupDeliveryBinding"
+        );
+    }
+    #[test]
+    fn setup_effect_missing_delivery_does_not_hide_terminal_completion() {
+        let (mut effect, _, mut completion) = setup_fixture();
+        assert!(!effect.observe(&[], &[]).unwrap());
+        assert_eq!(
+            effect
+                .observe(&[], std::slice::from_ref(&completion))
+                .unwrap_err(),
+            "ControllerSetup:OperationTemporarilyUnavailable"
+        );
+        completion.error = None;
+        assert_eq!(
+            effect
+                .observe(&[], std::slice::from_ref(&completion))
+                .unwrap_err(),
+            "ControllerSetup:CompletionWithoutDelivery"
+        );
+        completion.request_id += 1;
+        assert!(!effect.observe(&[], &[completion]).unwrap());
+    }
     #[test]
     fn readiness_observer_progresses_while_a_support_read_is_blocked() {
         let (started, observed) = std::sync::mpsc::channel();
