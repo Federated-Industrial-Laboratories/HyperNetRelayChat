@@ -18,6 +18,14 @@ pub struct RestrictionState {
     pub moderator: AccountId,
 }
 pub(super) fn read(db: &Connection, action: &Action, now: TimeBounds) -> Domain<Outcome> {
+    read_bounded(db, action, now, ORDINARY_FRAME_BYTES - 8192)
+}
+pub(crate) fn read_bounded(
+    db: &Connection,
+    action: &Action,
+    now: TimeBounds,
+    bytes: usize,
+) -> Domain<Outcome> {
     let p = inspection::request(action)?;
     if action.operation == Operation::ModerationFilters {
         inspection::own(action)?;
@@ -42,7 +50,7 @@ pub(super) fn read(db: &Connection, action: &Action, now: TimeBounds) -> Domain<
                 },
             )?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        inspection::page(rows, p.limit)
+        inspection::page_bounded(rows, p.limit, bytes)
     } else {
         let a = conversations::access(db, action, now)?;
         let mut stmt=db.prepare("SELECT subject,kind,expires,moderator,subject||':'||kind FROM hrc_restrictions WHERE room=?1 AND expires>?2 AND subject||':'||kind>?3 ORDER BY subject,kind LIMIT ?4")?;
@@ -73,6 +81,6 @@ pub(super) fn read(db: &Connection, action: &Action, now: TimeBounds) -> Domain<
                 },
             )?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        inspection::page(rows, p.limit)
+        inspection::page_bounded(rows, p.limit, bytes)
     }
 }

@@ -140,6 +140,7 @@ fn committed(model: &mut Model, request: u64, room: RoomId) {
     Arc::make_mut(&mut model.snapshot)
         .deliveries
         .push(Delivery {
+            exchange_ns: None,
             abandoned: false,
             held: false,
             request_id: Some(request),

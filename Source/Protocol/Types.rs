@@ -305,6 +305,7 @@ operations! {
     AccountRecover=90,AccountRotateRecovery=91,AccountEnrolEndpoint=92,AccountDisableEndpoint=93,
     AccountDevices=94,AccountContinuity=95,AccountLifecycleOutcome=96,AccountPublicIdentity=97,
     DirectCreate=100,
+    ClientMetadata=110,CommunitySync=111,
 }
 impl Operation {
     pub fn is_crypto_transition(self) -> bool {

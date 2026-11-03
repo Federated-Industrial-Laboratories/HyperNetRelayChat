@@ -16,6 +16,95 @@ pub struct PreparedSend {
     pub signed: Vec<u8>,
     pub encrypted: bool,
 }
+pub(super) struct ControllerPreparedSend {
+    pub(super) message: PreparedSend,
+    proof: Option<VerifiedAction>,
+}
+impl ControllerPreparedSend {
+    fn verified(&self) -> Result<Option<&VerifiedAction>> {
+        let Some(proof) = &self.proof else {
+            return Ok(None);
+        };
+        let action = proof.action();
+        if self.message.encrypted
+            || !matches!(
+                action.actor,
+                Actor::Direct { .. } | Actor::IndependentAgent { .. }
+            )
+            || action.approval.is_some()
+            || !matches!(
+                action.operation,
+                Operation::MessageSend | Operation::MessageReply | Operation::MessageAction
+            )
+            || action_digest(&self.message.action).map_err(|_| Error::Input)? != proof.digest()
+            || self.message.signed != proof.signed_bytes()
+        {
+            return Err(Error::Input);
+        }
+        Ok(Some(proof))
+    }
+}
+impl Client {
+    pub(super) fn bounded_views(&self) -> bool {
+        let server = self.profile.active_server();
+        self.session()
+            .is_ok_and(|s| s.local_views_for(server.home, server.signing_key))
+    }
+    pub(super) fn remember_community(
+        &mut self,
+        room: RoomId,
+        mode: RoomConfidentiality,
+    ) -> Result<()> {
+        if !self.bounded_views()
+            || mode != RoomConfidentiality::Community
+            || room.home != self.profile.active_server().home
+        {
+            return Err(Error::Input);
+        }
+        if self.community_modes.len() >= 256 && !self.community_modes.contains_key(&room) {
+            return Err(Error::Input);
+        }
+        self.community_modes
+            .insert(room, self.profile.active_server().signing_key);
+        Ok(())
+    }
+    fn known_community(&self, room: RoomId) -> bool {
+        self.bounded_views()
+            && room.home == self.profile.active_server().home
+            && self.community_modes.get(&room) == Some(&self.profile.active_server().signing_key)
+    }
+    pub(super) fn execute_controller_send(
+        &mut self,
+        prepared: ControllerPreparedSend,
+    ) -> Result<super::runtime::ExecutedResponse> {
+        let Some(verified) = prepared.verified()? else {
+            return self.execute_signed_observed(&prepared.message.signed);
+        };
+        let action = verified.action();
+        let Target::Room(room) = action.target else {
+            return Err(Error::Input);
+        };
+        if !self.known_community(room)
+            || action.operation_id.window != self.session()?.ready.window.id
+        {
+            return Err(Error::Input);
+        }
+        let now = self.profile.clock.sample().map_err(|_| Error::Clock)?;
+        if now.upper_ms >= self.session()?.ready.window.expires_ms {
+            return Err(Error::Unknown);
+        }
+        // The private token exists only after exact guarded outbox preparation.
+        let (response, exchange_ns) = self
+            .session()?
+            .submit_observed(verified.signed_bytes(), &self.key.verifying_key())?;
+        let now = self.profile.clock.sample().map_err(|_| Error::Clock)?;
+        outbox::record(&mut self.store, verified, &response, now).map_err(|_| Error::Storage)?;
+        Ok(super::runtime::ExecutedResponse {
+            response: response.value().clone(),
+            exchange_ns,
+        })
+    }
+}
 pub(super) fn failure(error: crypto::Error) -> Error {
     let (code, detail) = match error {
         crypto::Error::Storage(_) | crypto::Error::Database => {
@@ -543,13 +632,52 @@ impl Client {
         approval: Option<Id>,
         finalize: impl FnOnce(&rusqlite::Transaction<'_>, &VerifiedAction) -> rusqlite::Result<()>,
     ) -> Result<PreparedSend> {
+        self.prepare_preserved(room, message, grant, is_action, approval, false, finalize)
+    }
+    pub(super) fn prepare_controller_send_with(
+        &mut self,
+        room: RoomId,
+        message: &messaging::Send,
+        grant: Option<&delegation::Grant>,
+        is_action: bool,
+        approval: Option<Id>,
+        finalize: impl FnOnce(&rusqlite::Transaction<'_>, &VerifiedAction) -> rusqlite::Result<()>,
+    ) -> Result<ControllerPreparedSend> {
+        let known = grant.is_none() && approval.is_none() && self.known_community(room);
+        let message =
+            self.prepare_preserved(room, message, grant, is_action, approval, known, finalize)?;
+        let proof = if known {
+            Some(
+                verify_action(&message.signed, &self.key.verifying_key())
+                    .map_err(|_| Error::Input)?,
+            )
+        } else {
+            None
+        };
+        Ok(ControllerPreparedSend { message, proof })
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_preserved(
+        &mut self,
+        room: RoomId,
+        message: &messaging::Send,
+        grant: Option<&delegation::Grant>,
+        is_action: bool,
+        approval: Option<Id>,
+        known: bool,
+        finalize: impl FnOnce(&rusqlite::Transaction<'_>, &VerifiedAction) -> rusqlite::Result<()>,
+    ) -> Result<PreparedSend> {
         self.effects_ready()?;
-        let inspection: conversations::Inspection = self.read_as(
-            Operation::RoomInspect,
-            Target::Room(room),
-            &home::Empty {},
-            grant,
-        )?;
+        let inspection: Option<conversations::Inspection> = if known {
+            None
+        } else {
+            Some(self.read_as(
+                Operation::RoomInspect,
+                Target::Room(room),
+                &home::Empty {},
+                grant,
+            )?)
+        };
         let operation = if message.parent.is_some() {
             Operation::MessageReply
         } else if is_action {
@@ -559,7 +687,11 @@ impl Client {
         };
         let mut action = self.prepare_as(operation, Target::Room(room), message, grant)?;
         action.approval = approval;
-        if inspection.confidentiality == RoomConfidentiality::Community {
+        if known
+            || inspection
+                .as_ref()
+                .is_some_and(|i| i.confidentiality == RoomConfidentiality::Community)
+        {
             let signed = self.sign(&action)?;
             let verified =
                 verify_action(&signed, &self.key.verifying_key()).map_err(|_| Error::Input)?;
@@ -585,6 +717,7 @@ impl Client {
                 encrypted: false,
             });
         }
+        let inspection = inspection.ok_or(Error::Input)?;
         self.crypto_sync(room, grant)?;
         let view = self.crypto_inspect(room, grant)?;
         require_trust(&view)?;
@@ -723,3 +856,7 @@ fn require_member_trust(members: &[domain::Member], contacts: &[ContactTrust]) -
 #[cfg(test)]
 #[path = "../../Tests/Client/EncryptedTrust.rs"]
 mod trust_tests;
+
+#[cfg(test)]
+#[path = "../../Tests/Client/PreparedMode.rs"]
+mod prepared_mode_tests;

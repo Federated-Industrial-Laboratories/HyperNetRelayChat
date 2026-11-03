@@ -78,6 +78,8 @@ pub struct Status {
 }
 #[derive(Clone, Debug)]
 pub struct Delivery {
+    /// Prepared frame write to complete direct committed acknowledgement; never recovered.
+    pub exchange_ns: Option<u64>,
     pub abandoned: bool,
     pub held: bool,
     pub request_id: Option<u64>,
@@ -116,6 +118,7 @@ pub struct RoomView {
 }
 #[derive(Clone, Debug, Default)]
 pub struct Inspection {
+    pub filters_stale: bool,
     pub filters: Vec<moderation::FilterState>,
     /// Belongs to the selected room and follows that RoomView's freshness.
     pub restrictions: Vec<moderation::RestrictionState>,

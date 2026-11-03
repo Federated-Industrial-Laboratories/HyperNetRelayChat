@@ -53,12 +53,28 @@ one send command each second, staggered by 200 milliseconds. The schedule keeps
 offering commands while earlier work is queued. Queue refusals and missed
 scheduled offers are counted instead of slowing the offered schedule. Every
 normal offered message must commit within the measurement window; missed,
-refused, unknown or late outcomes fail the throughput gate. The reported p95
-includes scheduled waiting and all Controller work before the committed delivery
-becomes visible, including preflight, durable outbox and earlier queued work.
-Confirmed durable deliveries are published before trailing view reads finish;
-current room views remain a separate requirement for every Controller. The p95
-must remain below 500 milliseconds. Each request ID is bound to its observed operation
+refused, unknown or late outcomes fail the throughput gate.
+
+The primary message-latency sample starts immediately before writing an already
+encoded message frame on an established authenticated stream. It ends when the
+complete acknowledgement payload arrives, before local response decoding. The
+sample is accepted only after verifying the committed acknowledgement's exact
+home, operation ID, action digest and event. Connection setup, Controller queue
+time, local persistence, frame encoding, response decoding and UI work are
+excluded. `p95MessageExchangeMs` must be below 500 milliseconds; the gate compares
+the original nanosecond samples without rounding. Every
+normal offered commit must have a direct exchange sample; missing samples are
+reported and cannot qualify the latency gate. Resolution, persisted retries and
+recovered deliveries do not manufacture an original exchange sample.
+
+`p95ScheduledToObservedCommitMs` separately reports usability delay from the
+scheduled offer until the Controller exposes its durable delivery. It includes
+queueing, preflight and local persistence. It is not the message-exchange latency
+and does not receive the 500-millisecond gate. Per-Controller `completionMs` uses
+this broader boundary; supporting moderation completion keeps its separate
+one-second gate. Confirmed durable deliveries are published before trailing view
+reads finish; current room views remain a separate requirement for every
+Controller. Each request ID is bound to its observed operation
 ID and digest; an unrelated completion cannot count as its commit. All eight
 Controllers must also receive fresh messages from another account and finish
 with current selected-room state. State durations and snapshot revision counts
@@ -111,7 +127,9 @@ logs. These are published snapshot observations, not internal request timings.
 They include connection state, inspection staleness, privacy presence and whether
 the selected room is current. They contain no account IDs, room IDs, message
 content or keys. Startup logging does not change admission, polling cadence,
-retries or measurement bounds.
+retries or measurement bounds. Phase start/result and recovery records also
+include `observationBootMs`. These timestamps mark report observations, not exact
+scheduled measurement boundaries or internal request timings.
 
 Deliberately hostile protocol offers
 use the authenticated Session submission API without a durable retry loop.

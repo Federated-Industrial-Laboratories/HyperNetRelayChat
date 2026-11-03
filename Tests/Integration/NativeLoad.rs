@@ -22,6 +22,7 @@ use std::{
 };
 
 type Result<T> = std::result::Result<T, String>;
+const MESSAGE_EXCHANGE_LIMIT_NS: u64 = 500_000_000;
 #[derive(Parser)]
 struct Arguments {
     #[arg(long)]
@@ -48,7 +49,8 @@ struct Metrics {
     committed_in_window: usize,
     missed: usize,
     results: BTreeMap<String, usize>,
-    commit_ms: Vec<u64>,
+    completion_ms: Vec<u64>,
+    message_exchange_ns: Vec<u64>,
     schedule_lag_ms: Vec<u64>,
     signed_action_bytes: usize,
     decoded_response_bytes: usize,
@@ -341,6 +343,7 @@ struct Offer {
     identity: Option<(OperationId, Id)>,
     event: Option<Id>,
     committed_at: Option<Instant>,
+    exchange_ns: Option<u64>,
     terminal: bool,
     seen_refused: bool,
     status: String,
@@ -353,6 +356,7 @@ struct Interactive {
 fn current(view: &Snapshot, room: RoomId) -> bool {
     view.connection == ConnectionState::Online
         && !view.inspection.stale
+        && !view.inspection.filters_stale
         && view.privacy.is_some()
         && view
             .selected
@@ -381,6 +385,7 @@ fn apply_delivery(offer: &mut Offer, d: &client::Delivery, room: RoomId) -> bool
         }) => {
             offer.event = Some(*event);
             offer.committed_at = Some(Instant::now());
+            offer.exchange_ns = d.exchange_ns;
             offer.terminal = true;
             offer.status = "Committed".into();
         }
@@ -442,6 +447,7 @@ fn dispatch_offer(
         identity: None,
         event: None,
         committed_at: None,
+        exchange_ns: None,
         terminal: false,
         seen_refused: false,
         status: "Queued".into(),
@@ -568,7 +574,7 @@ fn wait_command(controller: &Controller, request: u64, end: Instant) -> Result<(
 fn readiness_state(index: usize, view: &Snapshot, room: RoomId) -> serde_json::Value {
     json!({"endpoint":index,"connection":format!("{:?}",view.connection),
         "updating":view.updating,
-        "inspectionStale":view.inspection.stale,"privacyPresent":view.privacy.is_some(),
+        "inspectionStale":view.inspection.stale,"filtersStale":view.inspection.filters_stale,"privacyPresent":view.privacy.is_some(),
         "selectedCurrent":current(view,room),
         "selectedStale":view.selected.as_ref().map(|v|v.stale),
         "selectedGap":view.selected.as_ref().and_then(|v|v.gap.as_deref()).map(bounded_reason),
@@ -833,8 +839,11 @@ fn interactive(
         if let Some(at) = offer.committed_at {
             m.committed += 1;
             m.committed_in_window += usize::from(at <= end);
-            m.commit_ms
+            m.completion_ms
                 .push(millis(at.saturating_duration_since(offer.scheduled)));
+            if let Some(exchange_ns) = offer.exchange_ns {
+                m.message_exchange_ns.push(exchange_ns);
+            }
         }
     }
     let fresh = !received.is_empty() && current(&view, room) && !ignored_leak;
@@ -1064,7 +1073,7 @@ fn moderator(
             })
         ) {
             m.committed += 1;
-            m.commit_ms.push(millis(began.elapsed()));
+            m.completion_ms.push(millis(began.elapsed()));
         }
         record_result(&mut m, &result);
     }
@@ -1092,6 +1101,7 @@ fn run_phase(
         .account;
     emit(
         json!({"case":"NativeLoadPhaseStarted","phase":phase,"seconds":seconds,"offeredNormalPerSecond":5,
+        "observationBootMs":hrc::clock::boot_ms().ok(),
         "productionControllers":8,"backgroundRefreshEnabled":true}),
     );
     let (ui_pairs, pairs) = thread::scope(|scope| {
@@ -1122,9 +1132,13 @@ fn run_phase(
         )
     });
     let normal: Vec<_> = ui_pairs.iter().take(5).map(|(_, m)| m).collect();
-    let latencies: Vec<_> = normal
+    let completion_latencies: Vec<_> = normal
         .iter()
-        .flat_map(|m| m.commit_ms.iter().copied())
+        .flat_map(|m| m.completion_ms.iter().copied())
+        .collect();
+    let exchange_latencies: Vec<_> = normal
+        .iter()
+        .flat_map(|m| m.message_exchange_ns.iter().copied())
         .collect();
     let offered: usize = normal.iter().map(|m| m.offered).sum();
     let committed: usize = normal.iter().map(|m| m.committed).sum();
@@ -1142,7 +1156,8 @@ fn run_phase(
         })
         .map(|(_, count)| count)
         .sum();
-    let p95 = percentile(&latencies, 95);
+    let exchange_p95_ns = percentile(&exchange_latencies, 95);
+    let exchange_ms = |ns: Option<u64>| ns.map(|ns| ns as f64 / 1_000_000.0);
     let distinct_events: BTreeSet<_> = ui_pairs
         .iter()
         .take(5)
@@ -1153,20 +1168,37 @@ fn run_phase(
     let moderator = &pairs[2].1;
     let attacks_exercised = !overload || attacks_pass(&pairs[0].1, &pairs[1].1, &pairs[3].1);
     let controllers_current = ui_pairs.iter().all(|(_, m)| !m.unresolved);
-    let passed = rate_pass(seconds, offered, in_window, missed, p95)
-        && attacks_exercised
+    let passed = rate_pass(
+        seconds,
+        offered,
+        in_window,
+        missed,
+        exchange_latencies.len(),
+        exchange_p95_ns,
+    ) && attacks_exercised
         && distinct_events.len() == committed
         && controllers_current
         && (!overload
-            || (moderator.committed == 2 && moderator.commit_ms.iter().all(|ms| *ms < 1000)));
+            || (moderator.committed == 2 && moderator.completion_ms.iter().all(|ms| *ms < 1000)));
     emit(
         json!({"case":"NativeLoadPhaseResult","phase":phase,"passed":passed,"offered":offered,"committed":committed,
+        "observationBootMs":hrc::clock::boot_ms().ok(),
         "committedWithinMeasurementWindow":in_window,"distinctCommittedEvents":distinct_events.len(),"missedOffers":missed,"commitsPerSecond":in_window as f64/seconds as f64,
         "offersCurrentlyRejectedOrRefused":rejected,"fractionStartedOffersRejectedOrRefused":if started==0 {None} else {Some(rejected as f64/started as f64)},
         "uncommittedFractionOfOffered":(offered-committed) as f64/offered as f64,
-        "p95CommitMs":p95,"p50CommitMs":percentile(&latencies,50),"maximumCommitMs":latencies.iter().max(),
+        "p95MessageExchangeMs":exchange_ms(exchange_p95_ns),
+        "p50MessageExchangeMs":exchange_ms(percentile(&exchange_latencies,50)),
+        "maximumMessageExchangeMs":exchange_ms(exchange_latencies.iter().max().copied()),"messageExchangeSamples":exchange_latencies.len(),
+        "messageExchangeCoverageComplete":exchange_latencies.len()==offered,
+        "messageExchangeP95WithinLimit":exchange_p95_ns.map(|ns|ns<MESSAGE_EXCHANGE_LIMIT_NS),
+        "committedWithoutDirectExchangeSample":committed.saturating_sub(exchange_latencies.len()),
+        "p95ScheduledToObservedCommitMs":percentile(&completion_latencies,95),
+        "p50ScheduledToObservedCommitMs":percentile(&completion_latencies,50),
+        "maximumScheduledToObservedCommitMs":completion_latencies.iter().max(),
         "attacksExercised":attacks_exercised,"allEightControllersCurrentAndResolved":controllers_current,
-        "latencyIncludesScheduledWaitAndControllerWork":true,"controllerMetrics":ui_pairs.iter().map(|(_,m)|m).collect::<Vec<_>>(),
+        "messageExchangeBoundary":"already-encoded message write on authenticated stream to complete valid committed-ack payload receipt",
+        "messageExchangeExcludes":"connection setup, queueing, local persistence, frame encoding, response decoding and UI work",
+        "scheduledToObservedCommitIncludesClientWork":true,"controllerMetrics":ui_pairs.iter().map(|(_,m)|m).collect::<Vec<_>>(),
         "supportingEndpointMetrics":pairs.iter().map(|(_,m)|m).collect::<Vec<_>>(),
         "byteAccounting":"Controller bytes are unobserved; supporting sessions count signed actions and decoded response CBOR only"}),
     );
@@ -1195,12 +1227,14 @@ fn rate_pass(
     offered: usize,
     in_window: usize,
     missed: usize,
-    p95: Option<u64>,
+    exchange_samples: usize,
+    exchange_p95_ns: Option<u64>,
 ) -> bool {
     offered == seconds as usize * 5
         && in_window == offered
         && missed == 0
-        && p95.is_some_and(|ms| ms < 500)
+        && exchange_samples == offered
+        && exchange_p95_ns.is_some_and(|ns| ns < MESSAGE_EXCHANGE_LIMIT_NS)
 }
 fn check_filter(c: &mut Client, room: RoomId, subject: AccountId, end: Instant) -> Result<()> {
     let outcome = operation(
@@ -1239,7 +1273,10 @@ fn recovery(
     room: RoomId,
     overall: Instant,
 ) -> Result<bool> {
-    emit(json!({"case":"NativeLoadRecoveryStarted","phase":"recovery"}));
+    emit(
+        json!({"case":"NativeLoadRecoveryStarted","phase":"recovery",
+        "observationBootMs":hrc::clock::boot_ms().ok()}),
+    );
     let began = Instant::now();
     let deadline = overall.min(began + Duration::from_secs(30));
     let mut probes = [None; 5];
@@ -1298,6 +1335,7 @@ fn recovery(
     let passed = results.iter().all(|r| r["passed"] == true) && elapsed < 30000;
     emit(
         json!({"case":"NativeLoadRecoveryResult","passed":passed,"elapsedMs":elapsed,"limitMs":30000,
+        "observationBootMs":hrc::clock::boot_ms().ok(),
         "clockStartsAtAttackStop":true,"productControllerResolvesOriginalEffects":true,"helperEffectResubmissions":0,"endpointResults":results}),
     );
     Ok(passed)
@@ -1713,6 +1751,7 @@ mod tests {
         (
             SetupEffect::new(7, Operation::RoomJoin, Some(room)),
             client::Delivery {
+                exchange_ns: None,
                 abandoned: false,
                 held: false,
                 request_id: Some(7),
@@ -1985,11 +2024,13 @@ mod tests {
             identity: None,
             event: None,
             committed_at: None,
+            exchange_ns: None,
             terminal: false,
             seen_refused: false,
             status: "Queued".into(),
         };
         let mut delivery = client::Delivery {
+            exchange_ns: None,
             abandoned: false,
             held: false,
             request_id: Some(8),
@@ -2158,13 +2199,46 @@ mod tests {
         assert!(!attacks_pass(&flood, &queries, &slow));
     }
     #[test]
+    fn message_exchange_samples_exclude_controller_wait_and_recovery() {
+        let (_, mut delivery, _) = setup_fixture();
+        let room = delivery.room.unwrap();
+        delivery.operation = Operation::MessageSend;
+        delivery.outcome = Some(Outcome::Committed {
+            event: Some(Id::from_bytes([8; 32])),
+            position: 1,
+            body: Value::Null,
+        });
+        delivery.exchange_ns = Some(250_000_000);
+        let offer = || Offer {
+            request: 7,
+            scheduled: Instant::now() - Duration::from_secs(30),
+            identity: None,
+            event: None,
+            committed_at: None,
+            exchange_ns: None,
+            terminal: false,
+            seen_refused: false,
+            status: "Queued".into(),
+        };
+        let mut direct = offer();
+        assert!(apply_delivery(&mut direct, &delivery, room));
+        assert_eq!(direct.exchange_ns, Some(250_000_000));
+        assert!(direct.committed_at.unwrap() - direct.scheduled >= Duration::from_secs(30));
+        delivery.exchange_ns = None;
+        let mut recovered = offer();
+        assert!(apply_delivery(&mut recovered, &delivery, room));
+        assert!(recovered.committed_at.is_some());
+        assert_eq!(recovered.exchange_ns, None);
+    }
+    #[test]
     fn offered_load_cannot_pass_with_missing_or_slow_commits() {
-        assert!(rate_pass(30, 150, 150, 0, Some(499)));
-        assert!(!rate_pass(30, 149, 149, 0, Some(1)));
-        assert!(!rate_pass(30, 150, 149, 0, Some(1)));
-        assert!(!rate_pass(30, 150, 150, 1, Some(1)));
-        assert!(!rate_pass(30, 150, 150, 0, Some(500)));
-        assert!(!rate_pass(30, 150, 150, 0, None));
+        assert!(rate_pass(30, 150, 150, 0, 150, Some(499_999_999)));
+        assert!(!rate_pass(30, 149, 149, 0, 149, Some(1)));
+        assert!(!rate_pass(30, 150, 149, 0, 149, Some(1)));
+        assert!(!rate_pass(30, 150, 150, 1, 150, Some(1)));
+        assert!(!rate_pass(30, 150, 150, 0, 150, Some(500_000_000)));
+        assert!(!rate_pass(30, 150, 150, 0, 150, None));
+        assert!(!rate_pass(30, 150, 150, 0, 149, Some(1)));
         assert_eq!(percentile(&(1..=100).collect::<Vec<_>>(), 95), Some(95));
     }
 }

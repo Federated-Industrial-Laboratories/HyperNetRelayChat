@@ -24,6 +24,7 @@ impl Worker {
                 self.snapshot.search = None;
                 self.snapshot.inspection = Inspection::default();
                 self.snapshot.inspection.stale = true;
+                self.snapshot.inspection.filters_stale = true;
                 self.snapshot.inspection.filters =
                     cache::filters(&mut self.client.store, self.snapshot.home)
                         .map_err(|_| Error::Storage)?;
@@ -456,7 +457,7 @@ impl Worker {
             parent,
             causation,
         };
-        let prepared = self.client.prepare_preserved_send_with(
+        let prepared = self.client.prepare_controller_send_with(
             room,
             &message,
             grant.as_deref(),
@@ -469,13 +470,13 @@ impl Worker {
                 Ok(())
             },
         )?;
-        let action = prepared.action;
+        let action = prepared.message.action.clone();
         let operation = action.operation;
         if let Some(g) = &grant
             && g.scope.mode == delegation::Mode::Approve
         {
             let approval = action.approval.ok_or(Error::Input)?;
-            let bytes = prepared.signed;
+            let bytes = prepared.message.signed;
             let now = self
                 .client
                 .profile
@@ -514,8 +515,8 @@ impl Worker {
         self.operation = Some(operation);
         self.delivery_room = Some(room);
         self.remember(&action)?;
-        let response = self.client.execute_signed(&prepared.signed)?;
-        self.response(response)?;
+        let response = self.client.execute_controller_send(prepared)?;
+        self.response_observed(response.response, response.exchange_ns)?;
         self.clear_matching_draft(&action)?;
         let view = self.refresh_after_send(room);
         self.finish_view(view);

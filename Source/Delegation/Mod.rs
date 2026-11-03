@@ -644,6 +644,9 @@ fn decide(db: &Transaction<'_>, action: &Action, now: TimeBounds) -> Domain<Outc
 }
 
 fn list(db: &Connection, action: &Action) -> Domain<Outcome> {
+    list_bounded(db, action, ORDINARY_FRAME_BYTES - 8192)
+}
+pub(crate) fn list_bounded(db: &Connection, action: &Action, bytes: usize) -> Domain<Outcome> {
     home::inspection::own(action)?;
     let p = home::inspection::request(action)?;
     let mut stmt=db.prepare("SELECT id FROM hrc_grants WHERE (owner=?1 OR (agent=?1 AND endpoint=?4)) AND id>?2 ORDER BY id LIMIT ?3")?;
@@ -667,5 +670,5 @@ fn list(db: &Connection, action: &Action) -> Domain<Outcome> {
         )?;
         rows.push((id, grant));
     }
-    home::inspection::page(rows, p.limit)
+    home::inspection::page_bounded(rows, p.limit, bytes)
 }

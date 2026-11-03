@@ -3,7 +3,7 @@
 #[path = "Continuity.rs"]
 pub(crate) mod continuity;
 #[path = "Inspection.rs"]
-mod inspection;
+pub(crate) mod inspection;
 #[path = "Lifecycle.rs"]
 pub(crate) mod lifecycle;
 #[path = "Proofs.rs"]

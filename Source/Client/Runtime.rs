@@ -116,11 +116,16 @@ impl Error {
     }
 }
 pub type Result<T> = std::result::Result<T, Error>;
+pub(super) struct ExecutedResponse {
+    pub(super) response: Response,
+    pub(super) exchange_ns: Option<u64>,
+}
 pub struct Client {
     pub profile: Profile,
     pub store: Store,
     pub(super) key: SigningKey,
     session: Option<Session>,
+    pub(super) community_modes: std::collections::BTreeMap<RoomId, Id>,
     directory: std::path::PathBuf,
 }
 impl Client {
@@ -133,6 +138,7 @@ impl Client {
             store,
             key,
             session: None,
+            community_modes: Default::default(),
             directory: directory.to_owned(),
         };
         super::cache::initialize(&mut client.store, client.profile.server.home)
@@ -162,6 +168,7 @@ impl Client {
         Ok(())
     }
     pub fn disconnect(&mut self) {
+        self.community_modes.clear();
         if let Some(session) = self.session.take() {
             session.close();
         }
@@ -191,22 +198,33 @@ impl Client {
         sign_action(action, &self.key).map_err(|_| Error::Input)
     }
     pub fn execute_signed(&mut self, bytes: &[u8]) -> Result<Response> {
+        self.execute_signed_observed(bytes).map(|r| r.response)
+    }
+    pub(super) fn execute_signed_observed(&mut self, bytes: &[u8]) -> Result<ExecutedResponse> {
         let verified = verify_action(bytes, &self.key.verifying_key()).map_err(|_| Error::Input)?;
         if crate::home::is_read_operation(verified.action().operation) {
-            return Ok(self
-                .session()?
-                .submit(bytes, &self.key.verifying_key())?
-                .value()
-                .clone());
+            return Ok(ExecutedResponse {
+                response: self
+                    .session()?
+                    .submit(bytes, &self.key.verifying_key())?
+                    .value()
+                    .clone(),
+                exchange_ns: None,
+            });
         }
         self.validate_message_mode(verified.action())?;
         let now = self.profile.clock.sample().map_err(|_| Error::Clock)?;
         let window = self.session()?.ready.window.clone();
         outbox::prepare(&mut self.store, &verified, &window, now).map_err(|_| Error::Storage)?;
-        let response = self.session()?.submit(bytes, &self.key.verifying_key())?;
+        let (response, exchange_ns) = self
+            .session()?
+            .submit_observed(bytes, &self.key.verifying_key())?;
         let now = self.profile.clock.sample().map_err(|_| Error::Clock)?;
         outbox::record(&mut self.store, &verified, &response, now).map_err(|_| Error::Storage)?;
-        Ok(response.value().clone())
+        Ok(ExecutedResponse {
+            response: response.value().clone(),
+            exchange_ns,
+        })
     }
     pub fn call<T: serde::Serialize>(
         &mut self,
@@ -350,3 +368,7 @@ impl Client {
         outbox::draft_mentions(&mut self.store, room).map_err(|_| Error::Storage)
     }
 }
+
+#[cfg(test)]
+#[path = "../../Tests/Client/PreparedRuntime.rs"]
+mod prepared_runtime_tests;

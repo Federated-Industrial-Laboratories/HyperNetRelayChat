@@ -305,3 +305,18 @@ pub fn date_bound(input: &str) -> std::result::Result<Option<u64>, &'static str>
 #[cfg(test)]
 #[path = "../../Tests/Presentation/Dates.rs"]
 mod tests;
+
+pub fn filters(snapshot: &Snapshot) -> Vec<String> {
+    let mut lines = Vec::new();
+    if snapshot.inspection.stale || snapshot.inspection.filters_stale {
+        lines.push("Retained recipient filters; current policy is not confirmed".into());
+    }
+    lines.extend(
+        snapshot
+            .inspection
+            .filters
+            .iter()
+            .map(|f| format!("{} · ignored={} · muted={}", f.subject, f.ignored, f.muted)),
+    );
+    lines
+}

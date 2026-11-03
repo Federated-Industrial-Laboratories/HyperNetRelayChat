@@ -150,6 +150,7 @@ impl Controller {
             deliveries: Vec::new(),
             inspection: Inspection {
                 filters,
+                filters_stale: true,
                 stale: true,
                 ..Inspection::default()
             },
@@ -187,6 +188,8 @@ impl Controller {
                     operation: None,
                     delivery_room: None,
                     poll_room: 0,
+                    refresh_cycle: None,
+                    refresh_yield: false,
                 };
                 if let Err(e) = w.deliveries() {
                     w.error(e);
@@ -359,6 +362,8 @@ struct Worker {
     operation: Option<Operation>,
     delivery_room: Option<RoomId>,
     poll_room: usize,
+    refresh_cycle: Option<views::RefreshCycle>,
+    refresh_yield: bool,
 }
 impl Worker {
     fn run(&mut self, receiver: mpsc::Receiver<Queued>, local_receiver: mpsc::Receiver<Queued>) {
@@ -377,8 +382,9 @@ impl Worker {
             // Preserve the bounded local lane before servicing due metadata, even
             // with a busy command queue. Recheck controls and original admission
             // deadlines after the potentially slow reads.
-            if self.metadata_due() {
+            if self.metadata_due() && !self.refresh_yield {
                 self.tick();
+                self.refresh_yield = true;
                 continue;
             }
             if let Some(queued) = &held {
@@ -402,6 +408,7 @@ impl Worker {
                 // repeated before this one consumption, never after an effect begins.
                 let queued = held.take().expect("held command");
                 self.run_command(queued);
+                self.refresh_yield = false;
                 continue;
             }
             match receiver.recv_timeout(Duration::from_millis(100)) {
@@ -466,7 +473,7 @@ impl Worker {
             }
             self.publish();
         } else if self.metadata_due() {
-            if let Err(error) = self.refresh() {
+            if let Err(error) = self.refresh_turn() {
                 self.error(error);
             }
             self.publish();
@@ -593,6 +600,7 @@ impl Worker {
     fn publish(&mut self) {
         if self.snapshot.connection == ConnectionState::Online
             && !self.snapshot.inspection.stale
+            && !self.snapshot.inspection.filters_stale
             && self.snapshot.privacy.is_some()
             && self
                 .snapshot
@@ -619,10 +627,12 @@ impl Worker {
             room.stale = true;
         }
         self.snapshot.inspection.stale = true;
+        self.snapshot.inspection.filters_stale = true;
         self.snapshot.privacy = None;
         self.snapshot.federation_privacy = None;
     }
     fn offline(&mut self) {
+        self.refresh_cycle = None;
         self.desired = false;
         self.client.disconnect();
         self.stale();
@@ -634,6 +644,7 @@ impl Worker {
         self.publish();
     }
     fn error(&mut self, e: Error) {
+        self.refresh_cycle = None;
         self.snapshot.status = Some(Status {
             request_id: self.request,
             code: e.code().into(),
@@ -671,6 +682,7 @@ impl Worker {
         }
     }
     fn connect(&mut self) -> Result<()> {
+        self.refresh_cycle = None;
         let reuse = matches!(self.snapshot.connection, ConnectionState::Backoff { .. })
             && self.client.session().is_ok();
         self.desired = true;
@@ -721,6 +733,7 @@ impl Worker {
                     .deliveries
                     .retain(|d| d.operation_id != operation_id);
                 self.snapshot.deliveries.push(Delivery {
+                    exchange_ns: None,
                     abandoned: p.abandoned,
                     held: p.held,
                     request_id,
@@ -766,6 +779,7 @@ impl Worker {
                 .deliveries
                 .retain(|d| d.operation_id != operation_id);
             self.snapshot.deliveries.push(Delivery {
+                exchange_ns: None,
                 abandoned: p.abandoned,
                 held: p.held,
                 request_id,
@@ -791,6 +805,7 @@ impl Worker {
             .deliveries
             .retain(|d| d.operation_id != action.operation_id);
         self.snapshot.deliveries.push(Delivery {
+            exchange_ns: None,
             abandoned: false,
             held: false,
             request_id: self.request,
@@ -832,10 +847,20 @@ impl Worker {
         Ok(())
     }
     fn response(&mut self, r: Response) -> Result<Value> {
+        self.response_observed(r, None)
+    }
+    fn response_observed(&mut self, r: Response, exchange_ns: Option<u64>) -> Result<Value> {
+        let exchange_ns = exchange_ns.filter(|_| {
+            matches!(
+                self.operation,
+                Some(Operation::MessageSend | Operation::MessageReply | Operation::MessageAction)
+            ) && matches!(r.outcome, Outcome::Committed { event: Some(_), .. })
+        });
         self.snapshot
             .deliveries
             .retain(|d| d.operation_id != r.operation_id);
         self.snapshot.deliveries.push(Delivery {
+            exchange_ns,
             abandoned: false,
             held: false,
             request_id: self.request,
@@ -921,6 +946,19 @@ impl Worker {
             // Only these reads finish in a room pull that revalidates its whole view.
             // A typed application refusal does not change unrelated transport observations.
             match (operation, target) {
+                (Operation::ClientMetadata, Target::Account(account))
+                    if *account == self.snapshot.account =>
+                {
+                    self.snapshot.notifications.clear();
+                    self.snapshot.search = None;
+                    self.stale();
+                }
+                (Operation::CommunitySync, Target::Room(room)) => {
+                    self.snapshot.inspection.filters_stale = true;
+                    self.snapshot.notifications.clear();
+                    self.snapshot.search = None;
+                    self.clear_room_presentation(*room, None);
+                }
                 (
                     Operation::RoomInspect
                     | Operation::EventsResume
@@ -1012,7 +1050,9 @@ fn retry_read(
 mod commands;
 #[path = "Synchronise.rs"]
 mod synchronise;
+#[path = "Views.rs"]
+mod views;
 
 #[cfg(test)]
 #[path = "../../Tests/Client/Completion.rs"]
-mod completion_tests;
+pub(in crate::client) mod completion_tests;

@@ -43,7 +43,11 @@ pub(crate) fn own(action: &Action) -> Domain<()> {
     }
     Ok(())
 }
-pub(crate) fn page<T: Serialize>(rows: Vec<(String, T)>, limit: u16) -> Domain<Outcome> {
+pub(crate) fn page_bounded<T: Serialize>(
+    rows: Vec<(String, T)>,
+    limit: u16,
+    bytes: usize,
+) -> Domain<Outcome> {
     let mut items = Vec::new();
     let mut last = None;
     let mut more = false;
@@ -53,7 +57,7 @@ pub(crate) fn page<T: Serialize>(rows: Vec<(String, T)>, limit: u16) -> Domain<O
             break;
         }
         items.push(item);
-        if canonical_encode(&value(&items)?, ORDINARY_FRAME_BYTES - 8192).is_err() {
+        if canonical_encode(&value(&items)?, bytes).is_err() {
             items.pop();
             more = true;
             break;

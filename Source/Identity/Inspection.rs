@@ -16,6 +16,9 @@ pub struct AgentEndpoint {
     pub nickname: String,
 }
 pub(super) fn read(db: &Connection, action: &Action) -> Domain<Outcome> {
+    read_bounded(db, action, ORDINARY_FRAME_BYTES - 8192)
+}
+pub(crate) fn read_bounded(db: &Connection, action: &Action, bytes: usize) -> Domain<Outcome> {
     inspection::own(action)?;
     if action.operation == Operation::AccountInspect {
         empty(&action.body)?;
@@ -59,5 +62,5 @@ pub(super) fn read(db: &Connection, action: &Action) -> Domain<Outcome> {
             }
         }
     }
-    inspection::page(result, p.limit)
+    inspection::page_bounded(result, p.limit, bytes)
 }

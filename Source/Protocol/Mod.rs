@@ -23,6 +23,7 @@ pub use lifecycle::*;
 pub use signed::*;
 pub use types::*;
 
+pub const CLIENT_VIEWS_CAPABILITY: &str = "bounded-client-views-v1";
 pub const VERSION: u64 = 1;
 pub const PROTOCOL: &str = "hrc/1";
 pub const ORDINARY_FRAME_BYTES: usize = 65_536;
