@@ -266,6 +266,38 @@ below adds native encrypted client scenarios. Independently administered
 federation requires its own real integration scenario before release. A helper's
 presence or successful compilation is not a passing qualification result.
 
+### Stopped package upgrade only
+
+Set `configuration.upgradeBinary` or `HRC_NATIVE_UPGRADE_BINARY` to the new
+package's explicit `Bin/hrc`. The existing `configuration.binary` supplies the
+old package executable; the external fixture obtains it from `HRC_CHECK_BINARY`.
+`HRC_CONVERSATION_WORKFLOW` selects this driver directory. No upstream fixture
+change is required. Package and signature provenance remain the outer
+qualification's responsibility. The driver records SHA-256 hashes of both actual
+executables; it does not authenticate packages.
+
+The upgrade selector rejects missing, nonexecutable or identical executables,
+conflicting configuration/environment targets, other workflow-only selectors,
+and optional local/confidential client helpers. It never falls back to the normal
+workflow after an invalid selection. Without this selector, existing workflows
+are unchanged.
+
+This path uses ordinary admission, CLI service/profile creation and room join.
+It stores searchable Unicode history and an independent unsent Unicode draft,
+then uses the existing acknowledgement-loss fault to leave Bob's genuinely
+committed message unresolved locally. Only after an orderly service stop does
+it switch executables. Before restarting or resolving, the new executable must
+read the unchanged draft and exact pending operation ID/digest from the same
+guarded state. The resolution must identify the same committed event; a second
+resolution must be empty and history must contain one copy. Public acting account,
+endpoint and home identities, retained history and search event/content must
+survive. Session windows are ephemeral and are not compared. Final shutdown must
+also be orderly. Existing overall and subprocess deadlines remain in force.
+
+No bot, delegation, confidential, load or presentation workflow runs in this
+mode. It is CLI/service upgrade evidence; actual packaged GUI/TUI launches remain
+separate qualification checks. Use only the fixture's isolated state directories.
+
 
 ## Confidential conversation extension
 
