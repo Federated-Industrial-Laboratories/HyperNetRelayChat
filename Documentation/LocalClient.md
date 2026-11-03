@@ -29,7 +29,17 @@ the last successfully synchronized view; it does not itself signal lost access.
 Cached or already-stale views remain stale until their required current reads
 succeed. A failed view scope marks its retained views stale, including local
 storage and invalid-response failures. An authenticated read refusal is published
-as stale before any bounded same-action retry wait. Existing denial, expiry,
+as stale before any bounded same-action retry wait. Temporary refusals of
+RoomInspect, EventsResume and ModerationRestrictions with a room target mark only
+that matching room view stale. They preserve unrelated inspection and transport
+privacy observations: a synchronized application refusal is not evidence of
+changed TLS or route properties. The completed room pull revalidates its room,
+history and restrictions before making that view current. It cannot clear
+already-stale account inspection. Restriction lists follow selected-room
+freshness and are cleared when selection changes. Other read kinds, including
+recipient filters, search and focused context, retain global failure handling;
+no room-only recovery is inferred for them. Exhausted retries and final view
+failures still invalidate the full view and privacy observation. Existing denial, expiry,
 history-gap and encrypted-history protections still apply. Neither a synchronized
 view nor a retained privacy observation grants authority: the service checks
 current authority on every read and effect.

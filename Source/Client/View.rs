@@ -117,6 +117,7 @@ pub struct RoomView {
 #[derive(Clone, Debug, Default)]
 pub struct Inspection {
     pub filters: Vec<moderation::FilterState>,
+    /// Belongs to the selected room and follows that RoomView's freshness.
     pub restrictions: Vec<moderation::RestrictionState>,
     pub grants: Vec<delegation::Grant>,
     pub agents: Vec<identity::AgentEndpoint>,

@@ -124,7 +124,7 @@ impl App {
             if ui.button("Refresh current inspection").clicked() { self.model.dispatch(Command::Inspect); }
             if snapshot.inspection.stale { ui.label("Retained inspection; current authority is not confirmed"); }
             for filter in &snapshot.inspection.filters { ui.label(format!("{} · ignored={} · muted={}",filter.subject,filter.ignored,filter.muted)); }
-            for restriction in &snapshot.inspection.restrictions { ui.label(format!("{} · kind={} · expires UTC {} · moderator {}",restriction.subject,restriction.kind,restriction.expires_ms,restriction.moderator)); }
+            for line in display::restrictions(&snapshot) { ui.label(line); }
         });
     }
 }
