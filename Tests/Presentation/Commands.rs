@@ -26,6 +26,7 @@ fn snapshot() -> Snapshot {
     };
     Snapshot {
         revision: 0,
+        updating: false,
         account,
         home,
         services: Vec::new(),
@@ -65,6 +66,18 @@ fn snapshot() -> Snapshot {
         status: None,
         completions: vec![],
     }
+}
+#[test]
+fn shared_connection_display_distinguishes_progress_from_access_failure() {
+    let mut view = snapshot();
+    view.connection = hrc::client::ConnectionState::Online;
+    view.updating = true;
+    let label = crate::display::connection(&view);
+    assert!(label.contains("Connected through HyperNet"));
+    assert!(label.contains("refreshing views"));
+    assert!(view.selected.as_ref().unwrap().stale);
+    view.updating = false;
+    assert!(!crate::display::connection(&view).contains("refreshing views"));
 }
 #[test]
 fn command_case_does_not_change_filter_effect_and_ambiguous_names_fail() {

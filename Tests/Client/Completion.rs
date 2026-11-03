@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Keep durable effect outcomes separate from subsequent view and connection failures.
+#[path = "Refresh.rs"]
+mod refresh;
 #[path = "SessionReuse.rs"]
 mod session_reuse;
 use super::*;

@@ -15,9 +15,24 @@ and resolves exact retained operations before retrying an absent effect. A durab
 rejection, invalid identity or malformed frame does not become an automatic retry.
 Readiness failure remains visible on the original command; later recovery does
 not rewrite that completion as success. Current-query errors remain explicit.
-The five-second background refresh interval starts after a successful refresh
-finishes, including initial connection and explicit commands. A slow refresh does
-not schedule an immediate second full refresh.
+The five-second metadata refresh interval starts after a successful full refresh
+finishes, including initial connection and commands that change membership or
+policy. Due metadata work runs between command turns, even with a busy queue.
+Room selection and targeted post-send reads do not postpone that deadline.
+A slow full refresh does not schedule an immediate second full refresh.
+A failed full attempt also waits that interval before another metadata attempt;
+connection backoff can require a longer wait. Failure never makes a view current.
+
+Snapshots distinguish `updating` from stale room or inspection state. The GUI and
+TUI show "refreshing views" while reads run. Starting an ordinary refresh retains
+the last successfully synchronized view; it does not itself signal lost access.
+Cached or already-stale views remain stale until their required current reads
+succeed. A failed view scope marks its retained views stale, including local
+storage and invalid-response failures. An authenticated read refusal is published
+as stale before any bounded same-action retry wait. Existing denial, expiry,
+history-gap and encrypted-history protections still apply. Neither a synchronized
+view nor a retained privacy observation grants authority: the service checks
+current authority on every read and effect.
 
 Session setup allows at most three attempts within one original 30-second
 deadline. Each HyperNet preparation wait is at most 10 seconds; each HRC
@@ -81,8 +96,13 @@ Local persistence errors remain visible on their original completions.
 Effect completion succeeds only after every requested effect and its required
 local persistence succeeds. A later room, grant or inspection refresh can fail
 without changing that confirmed outcome or replaying the effect. The original
-durable delivery is published before a full view refresh starts its reads, with
-room and inspection state marked stale until that refresh succeeds. The command
+durable delivery is published before follow-up view reads start. A normal send
+refreshes recipient filters, the affected room and the companion privacy
+observation. Unrelated room-list, account, service, grant and agent metadata wait
+until the existing full-refresh deadline. The affected-room pull retains current
+room authorization, filtered history and restriction inspection; focused history
+also receives its current context check. Membership and policy mutations still
+invalidate their retained views and perform a full refresh. The command
 completion and exact committed delivery remain successful; the affected views,
 inspection and privacy become stale. `ViewRefreshFailed` reports the separate
 view failure without attributing it to the effect request, and normal connection
