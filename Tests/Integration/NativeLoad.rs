@@ -494,6 +494,7 @@ fn wait_command(controller: &Controller, request: u64, end: Instant) -> Result<(
 }
 fn readiness_state(index: usize, view: &Snapshot, room: RoomId) -> serde_json::Value {
     json!({"endpoint":index,"connection":format!("{:?}",view.connection),
+        "updating":view.updating,
         "inspectionStale":view.inspection.stale,"privacyPresent":view.privacy.is_some(),
         "selectedCurrent":current(view,room),
         "selectedStale":view.selected.as_ref().map(|v|v.stale),
