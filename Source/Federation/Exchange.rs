@@ -266,6 +266,51 @@ fn actor_in(
     }
     Ok(())
 }
+fn room_in(
+    db: &Connection,
+    agreement: &AgreementState,
+    admission: &RemoteAdmission,
+    remote: &VerifiedRemoteSubmission,
+    room: RoomId,
+) -> Domain<()> {
+    if admission.agreement != agreement.reference || !admission.rooms.contains(&room) {
+        return deny("AdmissionRoomScope");
+    }
+    let shared = agreement
+        .agreement
+        .rooms
+        .iter()
+        .find(|shared| shared.room == room)
+        .ok_or(Fault::Reject(ErrorCode::Denied, "SharedRoom"))?;
+    if shared.privacy == PrivacyRequirement::AttestedRelayArrival
+        && (!remote.destination_privacy.attested_relay()
+            || !remote.assertion.value().source_privacy.attested_relay())
+    {
+        return deny("FederationPrivacy");
+    }
+    let mode: u8 = db.query_row(
+        "SELECT mode FROM hrc_rooms WHERE id=?1",
+        [room.to_string()],
+        |r| r.get(0),
+    )?;
+    if !crate::conversations::mode_value(mode).is_ok_and(|value| value == shared.confidentiality) {
+        return deny("FederationRoomMode");
+    }
+    Ok(())
+}
+
+pub(crate) fn list_rooms(
+    db: &Transaction<'_>,
+    remote: &VerifiedRemoteSubmission,
+    now: TimeBounds,
+) -> Domain<Outcome> {
+    let agreement = current(db, remote.agreement(), now)?;
+    let admission = admission(db, remote.challenge.value().admission, now)?;
+    crate::conversations::list(db, remote.verified.action(), now, |room| {
+        room_in(db, &agreement, &admission, remote, room)
+    })
+}
+
 pub(crate) fn authenticate_in(
     db: &Connection,
     remote: &VerifiedRemoteSubmission,
@@ -296,34 +341,7 @@ pub(crate) fn authenticate_in(
         _ => None,
     };
     if let Some(room) = room {
-        if !adm.rooms.contains(&room) {
-            return deny("AdmissionRoomScope");
-        }
-        let shared = a
-            .agreement
-            .rooms
-            .iter()
-            .find(|r| r.room == room)
-            .ok_or(Fault::Reject(ErrorCode::Denied, "SharedRoom"))?;
-        if shared.privacy == PrivacyRequirement::AttestedRelayArrival
-            && (!remote.destination_privacy.attested_relay()
-                || !remote.assertion.value().source_privacy.attested_relay())
-        {
-            return deny("FederationPrivacy");
-        }
-        let mode: u8 = db.query_row(
-            "SELECT mode FROM hrc_rooms WHERE id=?1",
-            [room.to_string()],
-            |r| r.get(0),
-        )?;
-        let expected = match shared.confidentiality {
-            RoomConfidentiality::Community => 0,
-            RoomConfidentiality::ConfidentialDirect => 1,
-            RoomConfidentiality::PrivateGroup => 2,
-        };
-        if mode != expected {
-            return deny("FederationRoomMode");
-        }
+        room_in(db, &a, &adm, remote, room)?;
     }
     let window = remote.verified.action().operation_id.window;
     let row:Option<(String,String,u64,Vec<u8>)>=db.query_row("SELECT agreement,admission,admission_revision,actor FROM federation_windows WHERE id=?1",[window.as_hex()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?;

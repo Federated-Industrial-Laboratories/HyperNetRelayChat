@@ -16,6 +16,8 @@ pub mod conversations;
 pub mod crypto;
 #[path = "Delegation/Mod.rs"]
 pub mod delegation;
+#[path = "Diagnostics.rs"]
+mod diagnostics;
 #[path = "Federation/Mod.rs"]
 pub mod federation;
 #[path = "Home/Mod.rs"]

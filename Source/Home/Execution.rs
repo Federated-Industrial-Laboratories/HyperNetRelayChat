@@ -209,6 +209,7 @@ fn resolve(db: &Connection, action: &Action, now: TimeBounds) -> Domain<Outcome>
         })?,
     })
 }
+#[allow(clippy::too_many_arguments)]
 fn dispatch(
     db: &Transaction<'_>,
     verified: &VerifiedAction,
@@ -217,6 +218,7 @@ fn dispatch(
     signer: &SigningKey,
     cancel: &Cancellation,
     information: &super::ServiceInformation,
+    context: ExecutionContext<'_>,
 ) -> Domain<Outcome> {
     let action = verified.action();
     use Operation::*;
@@ -249,7 +251,11 @@ fn dispatch(
         AccountSetNickname | PresenceSet | AccountInspect | AgentList => {
             crate::identity::operate(db, action, now)
         }
-        RoomCreate | DirectCreate | RoomInvite | RoomJoin | RoomLeave | RoomSetTopic | RoomList
+        RoomList => match context {
+            ExecutionContext::Local(_) => crate::conversations::operate(db, action, now),
+            ExecutionContext::Remote(remote) => crate::federation::list_rooms(db, remote, now),
+        },
+        RoomCreate | DirectCreate | RoomInvite | RoomJoin | RoomLeave | RoomSetTopic
         | RoomInspect => crate::conversations::operate(db, action, now),
         MessageSend | MessageReply | MessageAction | HistoryPage | HistoryContext | SearchQuery
         | EventsSubscribe | EventsResume | CryptoHistory | UnreadSet => {
@@ -404,7 +410,7 @@ impl Home {
                     admitted_permit=Some(grant_permit);
                     match budgets::admit(db,action,now.lower_ms){Ok(true)=>{},Ok(false)=>return commit(refusal(ErrorCode::RateLimited,"OperationBudget")),Err(e)=>return Err(sql_fault(e))}
                     db.execute_batch("SAVEPOINT hrc_domain_effects")?;
-                    match dispatch(db,verified,now,grant_permit,signer,cancel,information) {
+                    match dispatch(db,verified,now,grant_permit,signer,cancel,information,context) {
                         Ok(outcome)=>{if let ExecutionContext::Remote(remote)=context {crate::federation::record_creation(db,remote,&outcome).map_err(sql_fault)?;}crate::delegation::consume(db,grant_permit)?;db.execute_batch("RELEASE hrc_domain_effects")?;outcome},
                         Err(Fault::Sql(e))=>return Err(e),
                         Err(Fault::Reject(ErrorCode::Unavailable,"OriginIdentityFreshnessUnavailable"))=>{rollback_reason.set(Some("OriginIdentityFreshnessUnavailable"));return Err(rusqlite::Error::InvalidQuery)},

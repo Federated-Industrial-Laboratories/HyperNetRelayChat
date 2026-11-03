@@ -6,6 +6,8 @@ use crate::federation as fed;
 use std::time::{Duration, Instant};
 #[path = "Confidential.rs"]
 mod confidential;
+#[path = "Discovery.rs"]
+mod discovery;
 #[path = "Freshness.rs"]
 mod freshness;
 #[path = "Identities.rs"]
@@ -76,6 +78,75 @@ fn enrol_origin(home: &mut Home, n: u8, class: AccountClass) -> RemoteParty {
         session,
         window: None,
     }
+}
+fn accept_agreement(
+    home: &mut Home,
+    origin: &mut Home,
+    agreement: &FederationAgreement,
+    gateway_key: &SigningKey,
+) -> (fed::AgreementState, fed::GatewayContext) {
+    let hs = sign_agreement(agreement, home.signing_key()).unwrap();
+    let os = sign_agreement(agreement, origin.signing_key()).unwrap();
+    let pins = fed::AgreementPins {
+        home: agreement.home,
+        origin: agreement.origin,
+        home_key: agreement.home_service_key,
+        origin_key: agreement.origin_service_key,
+        origin_attestor: agreement.origin_attestor_key,
+    };
+    let accepted = home
+        .federation_accept(&hs, &os, &pins, TimeBounds::test_now())
+        .unwrap();
+    origin
+        .federation_accept(&hs, &os, &pins, TimeBounds::test_now())
+        .unwrap();
+    let transport = fed::GatewayTransport {
+        network: agreement.home.network,
+        destination: agreement.home,
+        principal: id(81),
+        service_endpoint: id(82),
+        session: id(85),
+        generation: 1,
+    };
+    let t = TimeBounds::test_now();
+    let challenge = GatewayMessage::Challenge {
+        profile: 1,
+        agreement: accepted.reference,
+        gateway: id(81),
+        receiver: agreement.home,
+        client_nonce: id(86),
+        server_nonce: id(87),
+        service_boot: id(88),
+        principal: id(81),
+        session: id(85),
+        transport_generation: 1,
+        issued_ms: t.lower_ms,
+        expires_ms: t.lower_ms + 5000,
+    };
+    let signed = verify_gateway_message(
+        &sign_gateway_message(&challenge, home.signing_key()).unwrap(),
+        &home.signing_key().verifying_key(),
+    )
+    .unwrap();
+    let proof = GatewayMessage::Proof {
+        profile: 1,
+        agreement: accepted.reference,
+        challenge_digest: signed.digest(),
+    };
+    let proof = verify_gateway_message(
+        &sign_gateway_message(&proof, gateway_key).unwrap(),
+        &gateway_key.verifying_key(),
+    )
+    .unwrap();
+    let gateway = fed::GatewayContext::verify(
+        &verify_agreement(&hs, &home.signing_key().verifying_key()).unwrap(),
+        transport,
+        &signed,
+        &proof,
+        TimeBounds::test_now(),
+    )
+    .unwrap();
+    (accepted, gateway)
 }
 impl Pair {
     fn new() -> Self {
@@ -165,67 +236,7 @@ impl Pair {
             not_before_ms: t.lower_ms,
             expires_ms: t.lower_ms + DAY,
         };
-        let hs = sign_agreement(&agreement, home.signing_key()).unwrap();
-        let os = sign_agreement(&agreement, origin.signing_key()).unwrap();
-        let pins = fed::AgreementPins {
-            home: agreement.home,
-            origin: agreement.origin,
-            home_key: agreement.home_service_key,
-            origin_key: agreement.origin_service_key,
-            origin_attestor: agreement.origin_attestor_key,
-        };
-        let accepted = home
-            .federation_accept(&hs, &os, &pins, TimeBounds::test_now())
-            .unwrap();
-        origin
-            .federation_accept(&hs, &os, &pins, TimeBounds::test_now())
-            .unwrap();
-        let transport = fed::GatewayTransport {
-            network: agreement.home.network,
-            destination: agreement.home,
-            principal: id(81),
-            service_endpoint: id(82),
-            session: id(85),
-            generation: 1,
-        };
-        let t = TimeBounds::test_now();
-        let challenge = GatewayMessage::Challenge {
-            profile: 1,
-            agreement: accepted.reference,
-            gateway: id(81),
-            receiver: agreement.home,
-            client_nonce: id(86),
-            server_nonce: id(87),
-            service_boot: id(88),
-            principal: id(81),
-            session: id(85),
-            transport_generation: 1,
-            issued_ms: t.lower_ms,
-            expires_ms: t.lower_ms + 5000,
-        };
-        let signed = verify_gateway_message(
-            &sign_gateway_message(&challenge, home.signing_key()).unwrap(),
-            &home.signing_key().verifying_key(),
-        )
-        .unwrap();
-        let proof = GatewayMessage::Proof {
-            profile: 1,
-            agreement: accepted.reference,
-            challenge_digest: signed.digest(),
-        };
-        let proof = verify_gateway_message(
-            &sign_gateway_message(&proof, &gk).unwrap(),
-            &gk.verifying_key(),
-        )
-        .unwrap();
-        let gateway = fed::GatewayContext::verify(
-            &verify_agreement(&hs, &home.signing_key().verifying_key()).unwrap(),
-            transport,
-            &signed,
-            &proof,
-            TimeBounds::test_now(),
-        )
-        .unwrap();
+        let (accepted, gateway) = accept_agreement(&mut home, &mut origin, &agreement, &gk);
         Self {
             home,
             origin,
@@ -292,6 +303,14 @@ impl Pair {
         cp.digest()
     }
     fn admit(&mut self, p: &RemoteParty) -> fed::RemoteAdmission {
+        self.admit_rooms(p, vec![self.room], 0)
+    }
+    fn admit_rooms(
+        &mut self,
+        p: &RemoteParty,
+        rooms: Vec<RoomId>,
+        expected_revision: u64,
+    ) -> fed::RemoteAdmission {
         let cp = self.import(p);
         let admitted = self
             .home
@@ -302,9 +321,9 @@ impl Pair {
                     endpoint: p.record.acting.endpoint,
                     binding_digest: p.record.acting.binding_digest,
                     checkpoint: cp,
-                    rooms: vec![self.room],
+                    rooms,
                     expires_ms: self.agreement.agreement.expires_ms,
-                    expected_revision: 0,
+                    expected_revision,
                 },
                 TimeBounds::test_now(),
             )
