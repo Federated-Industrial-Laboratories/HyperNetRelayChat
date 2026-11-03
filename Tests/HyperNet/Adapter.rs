@@ -195,6 +195,32 @@ fn malformed_frames_and_duplicate_fields_never_reach_context() {
 }
 
 #[test]
+fn preparation_closure_stays_temporary_without_reclassifying_other_refusals() {
+    for (code, expected) in [
+        ("Closed", "Closed"),
+        ("Timeout", "Timeout"),
+        ("Capacity", "Capacity"),
+        ("Refused", "Refused"),
+        ("Denied", "Refused"),
+        ("FutureCode", "Refused"),
+    ] {
+        let fixture = Fixture::new(move |request| {
+            assert_eq!(request["action"], "connect");
+            json!({"version":2,"ok":false,"error":{
+                "code":code,"message":"PRIVATE_CONNECTION_DIAGNOSTIC"}})
+            .into()
+        });
+        let error = fixture
+            .agent()
+            .connect(&id(3), "hrc-probe/1", Duration::from_secs(1))
+            .err()
+            .expect("typed connection preparation failure");
+        assert_eq!(error.code(), expected);
+        assert!(!error.to_string().contains("PRIVATE_CONNECTION_DIAGNOSTIC"));
+    }
+}
+
+#[test]
 fn context_and_privacy_cannot_cross_direction_or_claim_extra_assurance() {
     assert!(Peer::parse(peer(Direction::Outgoing), Direction::Incoming).is_err());
     let mut v = privacy(Direction::Outgoing);

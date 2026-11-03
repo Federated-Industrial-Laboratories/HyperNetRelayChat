@@ -338,6 +338,7 @@ pub(super) fn request(directory: &Path, value: Value, end: u64) -> Result<(Value
             Err(match refusal.error.code.as_str() {
                 "Capacity" => Error::Capacity,
                 "Timeout" => Error::Timeout,
+                "Closed" => Error::Closed,
                 _ => Error::Refused,
             })
         }
