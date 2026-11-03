@@ -901,7 +901,7 @@ impl Worker {
                     .submit_read_until(&signed, &key, end)
                     .map(|response| response.value().clone())
                     .map_err(Error::from)?;
-                self.observe_read(&response);
+                self.observe_read(action.operation, &action.target, &response);
                 Ok(response)
             },
         )?;
@@ -910,7 +910,7 @@ impl Worker {
             outcome => Err(Error::from_outcome(outcome)),
         }
     }
-    fn observe_read(&mut self, response: &Response) {
+    fn observe_read(&mut self, operation: Operation, target: &Target, response: &Response) {
         if matches!(
             response.outcome,
             Outcome::Refused {
@@ -918,8 +918,23 @@ impl Worker {
                 ..
             }
         ) {
-            // Publish loss of current read evidence before any same-action retry wait.
-            self.stale();
+            // Only these reads finish in a room pull that revalidates its whole view.
+            // A typed application refusal does not change unrelated transport observations.
+            match (operation, target) {
+                (
+                    Operation::RoomInspect
+                    | Operation::EventsResume
+                    | Operation::ModerationRestrictions,
+                    Target::Room(room),
+                ) => {
+                    if let Some(view) = &mut self.snapshot.selected
+                        && view.summary.room == *room
+                    {
+                        view.stale = true;
+                    }
+                }
+                _ => self.stale(),
+            }
             self.publish();
         }
     }

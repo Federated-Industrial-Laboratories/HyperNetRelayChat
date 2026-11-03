@@ -80,6 +80,33 @@ fn shared_connection_display_distinguishes_progress_from_access_failure() {
     assert!(!crate::display::connection(&view).contains("refreshing views"));
 }
 #[test]
+fn restriction_display_uses_room_freshness_and_requires_a_selection() {
+    let mut view = snapshot();
+    view.inspection.stale = false;
+    view.inspection
+        .restrictions
+        .push(hrc::moderation::RestrictionState {
+            subject: view.account,
+            kind: 1,
+            expires_ms: 1000,
+            moderator: view.account,
+        });
+    assert!(
+        crate::display::restrictions(&view)
+            .iter()
+            .any(|line| line.contains("not confirmed"))
+    );
+    view.selected.as_mut().unwrap().stale = false;
+    view.inspection.stale = true;
+    assert!(
+        !crate::display::restrictions(&view)
+            .iter()
+            .any(|line| line.contains("not confirmed"))
+    );
+    view.selected = None;
+    assert!(crate::display::restrictions(&view).is_empty());
+}
+#[test]
 fn command_case_does_not_change_filter_effect_and_ambiguous_names_fail() {
     let mut view = snapshot();
     let Interaction::Request(command) = parse("/IGNORE ALICE", &[], &view, None).unwrap() else {

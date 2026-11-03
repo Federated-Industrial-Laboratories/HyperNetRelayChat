@@ -61,6 +61,7 @@ impl Worker {
                 self.pull(room)?;
             } else {
                 self.snapshot.selected = None;
+                self.snapshot.inspection.restrictions.clear();
                 self.snapshot.search = None;
             }
         }
@@ -198,6 +199,14 @@ impl Worker {
             .find(|r| r.room == room)
             .cloned()
             .ok_or(Error::Input)?;
+        if self
+            .snapshot
+            .selected
+            .as_ref()
+            .is_none_or(|view| view.summary.room != room)
+        {
+            self.snapshot.inspection.restrictions.clear();
+        }
         let mut cached = cache::room(&mut self.client.store, room).map_err(|_| Error::Storage)?;
         cached.events.retain(|event| {
             !cache::filtered(&self.snapshot.inspection.filters, &event.actor, false)
@@ -318,7 +327,6 @@ impl Worker {
         if !page.has_more {
             self.caught_up.insert(room);
         }
-        let cached = cache::room(&mut self.client.store, room).map_err(|_| Error::Storage)?;
         if self
             .snapshot
             .selected
@@ -328,8 +336,19 @@ impl Worker {
             self.snapshot.inspection.restrictions =
                 self.pages(Operation::ModerationRestrictions, Target::Room(room))?;
         }
+        self.present_room_page(room, current, page)
+    }
+    /// Install a community view only after its current room, history and restriction reads.
+    pub(super) fn present_room_page(
+        &mut self,
+        room: RoomId,
+        current: conversations::Inspection,
+        page: messaging::PageResult,
+    ) -> Result<()> {
+        let cached = cache::room(&mut self.client.store, room).map_err(|_| Error::Storage)?;
         if let Some(view) = &mut self.snapshot.selected
             && view.summary.room == room
+            && view.gap.is_none()
         {
             if view.focus.is_none() {
                 view.events = cached

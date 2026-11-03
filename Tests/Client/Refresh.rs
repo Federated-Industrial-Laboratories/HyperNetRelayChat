@@ -100,7 +100,11 @@ fn a_temporary_read_refusal_is_visible_before_the_same_action_retry_finishes() {
                     } else {
                         read_result(Outcome::Result { body: Value::Null })
                     };
-                    worker.observe_read(&response);
+                    worker.observe_read(
+                        Operation::ModerationFilters,
+                        &Target::Account(worker.snapshot.account),
+                        &response,
+                    );
                     Ok(response)
                 },
             )?;
@@ -183,4 +187,185 @@ fn a_nonretryable_cache_failure_does_not_leave_the_full_refresh_immediately_due(
     let published = worker.snapshot.revision;
     worker.tick();
     assert_eq!(worker.snapshot.revision, published);
+}
+
+fn current_room() -> conversations::Inspection {
+    conversations::Inspection {
+        members: vec![],
+        read_sequence: 0,
+        room_revision: 1,
+        filter_revision: 1,
+        moderator: false,
+        confidentiality: RoomConfidentiality::Community,
+    }
+}
+
+#[test]
+fn room_retry_recovery_keeps_unrelated_metadata_and_transport_observations() {
+    let (fixture, mut worker, room) = worker();
+    let (_companion, stream) = session_reuse::retained_handle(&fixture.root);
+    let page = cached_community(&mut worker, room);
+    worker.snapshot.privacy = Some(stream.privacy());
+    let privacy = serde_json::to_value(&worker.snapshot.privacy).unwrap();
+    for operation in [
+        Operation::RoomInspect,
+        Operation::EventsResume,
+        Operation::ModerationRestrictions,
+    ] {
+        for metadata_stale in [false, true] {
+            worker.snapshot.inspection.stale = metadata_stale;
+            worker.snapshot.selected.as_mut().unwrap().stale = false;
+            let end = crate::clock::boot_ms().unwrap() + 2000;
+            let mut attempts = 0;
+            worker
+                .update_view(|worker| {
+                    let response = retry_read(
+                        end,
+                        || false,
+                        |passed| {
+                            assert_eq!(passed, end);
+                            attempts += 1;
+                            if attempts == 2 {
+                                let visible = worker.shared.snapshot.lock().unwrap();
+                                assert!(
+                                    visible.updating && visible.selected.as_ref().unwrap().stale
+                                );
+                                assert_eq!(visible.inspection.stale, metadata_stale);
+                                assert_eq!(
+                                    serde_json::to_value(&visible.privacy).unwrap(),
+                                    privacy
+                                );
+                            }
+                            let response = if attempts == 1 {
+                                temporary_read()
+                            } else {
+                                read_result(Outcome::Result { body: Value::Null })
+                            };
+                            worker.observe_read(operation, &Target::Room(room), &response);
+                            Ok(response)
+                        },
+                    )?;
+                    assert!(matches!(response.outcome, Outcome::Result { .. }));
+                    // An individual successful attempt is insufficient; installation follows
+                    // the completed room read group, using a verified cached history page.
+                    assert!(worker.snapshot.selected.as_ref().unwrap().stale);
+                    worker.present_room_page(room, current_room(), page.clone())
+                })
+                .unwrap();
+            assert_eq!(attempts, 2);
+            assert!(!worker.snapshot.selected.as_ref().unwrap().stale);
+            assert_eq!(worker.snapshot.inspection.stale, metadata_stale);
+            assert_eq!(
+                serde_json::to_value(&worker.snapshot.privacy).unwrap(),
+                privacy
+            );
+        }
+    }
+}
+
+#[test]
+fn room_refusal_scope_requires_the_whitelisted_operation_and_matching_target() {
+    let (_fixture, mut worker, room) = worker();
+    let other = RoomId {
+        local: Id::from_bytes([90; 32]),
+        ..room
+    };
+    worker.observe_read(
+        Operation::RoomInspect,
+        &Target::Room(other),
+        &temporary_read(),
+    );
+    assert!(!worker.snapshot.selected.as_ref().unwrap().stale);
+    assert!(!worker.snapshot.inspection.stale);
+    for (operation, target) in [
+        (
+            Operation::ModerationFilters,
+            Target::Account(worker.snapshot.account),
+        ),
+        (Operation::AgentList, Target::Room(room)),
+        (Operation::HistoryContext, Target::Room(room)),
+        (Operation::SearchQuery, Target::Room(room)),
+        (Operation::RoomInspect, Target::Service),
+    ] {
+        worker.snapshot.selected.as_mut().unwrap().stale = false;
+        worker.snapshot.inspection.stale = false;
+        worker.observe_read(operation, &target, &temporary_read());
+        assert!(worker.snapshot.inspection.stale);
+        assert!(worker.snapshot.selected.as_ref().unwrap().stale);
+        assert!(worker.snapshot.privacy.is_none());
+    }
+}
+
+#[test]
+fn exhausted_room_refusal_still_invalidates_the_complete_failed_view() {
+    let (fixture, mut worker, room) = worker();
+    let (_companion, stream) = session_reuse::retained_handle(&fixture.root);
+    worker.snapshot.privacy = Some(stream.privacy());
+    let mut attempts = 0;
+    let result: Result<()> = worker.update_view(|worker| {
+        let response = retry_read(
+            crate::clock::boot_ms().unwrap() + 2000,
+            || false,
+            |_| {
+                attempts += 1;
+                let response = temporary_read();
+                worker.observe_read(Operation::RoomInspect, &Target::Room(room), &response);
+                Ok(response)
+            },
+        )?;
+        Err(Error::from_outcome(response.outcome))
+    });
+    assert!(matches!(result, Err(Error::Refused { .. })));
+    assert_eq!(attempts, 5);
+    let visible = worker.shared.snapshot.lock().unwrap();
+    assert!(!visible.updating && visible.inspection.stale);
+    assert!(visible.selected.as_ref().unwrap().stale && visible.privacy.is_none());
+}
+
+#[test]
+fn restriction_refusal_and_room_changes_keep_restrictions_bound_to_the_selection() {
+    let (_fixture, mut worker, room) = worker();
+    worker
+        .snapshot
+        .inspection
+        .restrictions
+        .push(moderation::RestrictionState {
+            subject: worker.snapshot.account,
+            kind: 1,
+            expires_ms: 9999,
+            moderator: worker.snapshot.account,
+        });
+    worker.observe_read(
+        Operation::ModerationRestrictions,
+        &Target::Room(room),
+        &temporary_read(),
+    );
+    assert!(!worker.snapshot.inspection.stale);
+    assert!(worker.snapshot.selected.as_ref().unwrap().stale);
+    assert_eq!(worker.snapshot.inspection.restrictions.len(), 1);
+    let mut other = worker.snapshot.rooms[0].clone();
+    other.room.local = Id::from_bytes([91; 32]);
+    worker.snapshot.rooms.push(other.clone());
+    worker.select(other.room).unwrap();
+    assert!(worker.snapshot.inspection.restrictions.is_empty());
+    assert_eq!(
+        worker.snapshot.selected.as_ref().unwrap().summary.room,
+        other.room
+    );
+    assert!(worker.snapshot.selected.as_ref().unwrap().stale);
+}
+
+#[test]
+fn a_current_page_install_cannot_hide_an_existing_history_gap() {
+    let (_fixture, mut worker, room) = worker();
+    let page = cached_community(&mut worker, room);
+    let view = worker.snapshot.selected.as_mut().unwrap();
+    view.gap = Some("CursorHistoryGap".into());
+    view.stale = true;
+    worker
+        .present_room_page(room, current_room(), page)
+        .unwrap();
+    let view = worker.snapshot.selected.as_ref().unwrap();
+    assert!(view.stale);
+    assert_eq!(view.gap.as_deref(), Some("CursorHistoryGap"));
 }

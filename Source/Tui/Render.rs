@@ -364,6 +364,7 @@ fn content(model: &Model, columns: usize, wide: bool) -> Vec<String> {
                     )
                 }));
             }
+            raw.extend(display::restrictions(snapshot));
             raw.extend(snapshot.deliveries.iter().map(|d| {
                 format!(
                     "{} {} {}",

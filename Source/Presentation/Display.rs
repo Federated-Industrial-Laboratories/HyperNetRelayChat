@@ -131,6 +131,28 @@ pub fn connection(snapshot: &Snapshot) -> String {
     }
     description
 }
+pub fn restrictions(snapshot: &Snapshot) -> Vec<String> {
+    let Some(room) = &snapshot.selected else {
+        return Vec::new();
+    };
+    let mut lines = vec![format!(
+        "Room restrictions: {}",
+        text::identity_display(&room.summary.name)
+    )];
+    if room.stale || room.gap.is_some() {
+        lines.push("Retained room restrictions; current room access is not confirmed".into());
+    }
+    lines.extend(snapshot.inspection.restrictions.iter().map(|restriction| {
+        format!(
+            "{} · kind={} · expires UTC {} · moderator {}",
+            restriction.subject,
+            restriction.kind,
+            timestamp(restriction.expires_ms),
+            restriction.moderator
+        )
+    }));
+    lines
+}
 pub fn delivery(delivery: &hrc::client::Delivery) -> String {
     if delivery.held {
         return "Held locally; exact approval is required before submission".into();
