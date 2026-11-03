@@ -120,16 +120,9 @@ pub(super) fn serve(
     }
     let proof = verify_gateway_message(&proof.payload, &key(binding.signing_key)?)
         .map_err(|_| Error::Authentication)?;
-    let check = shared.check_authority(
-        stream,
-        proof.digest(),
-        Some(end),
-        &Cancellation::default(),
-        "GatewayAuthority",
-    )?;
-    if !current(&check, Some(end)) {
-        return Err(Error::Authority);
-    }
+    let GatewayMessage::Challenge { expires_ms, .. } = challenge.value() else {
+        return Err(Error::Authentication);
+    };
     let accepted = verify_agreement(&state.home_signature.0, &key(agreement.home_service_key)?)
         .map_err(|_| Error::Authentication)?;
     let transport = GatewayTransport {
@@ -145,6 +138,23 @@ pub(super) fn serve(
         session: Id::from_hex(stream.peer().session()).map_err(|_| Error::Authentication)?,
         generation: stream.peer().generation(),
     };
+    // Reject misbound signed proofs before attempting temporary authority recovery.
+    GatewayContext::verify(
+        &accepted,
+        transport.clone(),
+        &challenge,
+        &proof,
+        shared.config.clock.sample().map_err(|_| Error::Clock)?,
+    )
+    .map_err(|_| Error::Authentication)?;
+    let check = handshake::authority(
+        shared,
+        stream,
+        proof.digest(),
+        end,
+        *expires_ms,
+        "GatewayAuthority",
+    )?;
     let context = GatewayContext::verify(
         &accepted,
         transport,
@@ -153,21 +163,20 @@ pub(super) fn serve(
         shared.config.clock.sample().map_err(|_| Error::Clock)?,
     )
     .map_err(|_| Error::Authentication)?;
-    frame(
-        stream,
-        FrameKind::FederationControl,
-        sign_gateway_message(
-            &GatewayMessage::Ready {
-                profile: FEDERATION_PROFILE,
-                agreement: reference,
-                challenge_digest: challenge.digest(),
-                service_boot: shared.boot,
-            },
-            &shared.signer,
-        )
-        .map_err(|_| Error::Frame)?,
-        remaining(end)?,
-    )?;
+    let ready = sign_gateway_message(
+        &GatewayMessage::Ready {
+            profile: FEDERATION_PROFILE,
+            agreement: reference,
+            challenge_digest: challenge.digest(),
+            service_boot: shared.boot,
+        },
+        &shared.signer,
+    )
+    .map_err(|_| Error::Frame)?;
+    if !check.current(shared) {
+        return Err(Error::Authority);
+    }
+    frame(stream, FrameKind::FederationControl, ready, remaining(end)?)?;
     drop(handshake);
     let mut budget = Budget::new(16, 4);
     loop {

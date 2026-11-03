@@ -22,6 +22,8 @@ mod devices;
 mod federation_gateway;
 #[path = "FederationOrigin.rs"]
 mod federation_origin;
+#[path = "Handshake.rs"]
+mod handshake;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -481,25 +483,26 @@ fn serve(shared: &Shared, stream: &Stream) -> Result<()> {
     {
         return Err(shared.authentication("ProofBinding"));
     }
-    let check = shared.check_authority(
+    let check = handshake::authority(
+        shared,
         stream,
         proof.digest(),
-        Some(end),
-        &Cancellation::default(),
+        end,
+        challenge.expires_ms,
         "SessionAuthority",
     )?;
     let now = shared.config.clock.sample().map_err(|_| Error::Clock)?;
     if now.upper_ms >= challenge.expires_ms || clock::boot_ms().map_err(|_| Error::Clock)? >= end {
         return Err(Error::HandshakeExpired);
     }
-    if !check.permitted() {
+    if !check.current(shared) {
         return Err(Error::Authority);
     }
     let window = shared
         .home
         .lock()
         .map_err(|_| Error::State)?
-        .open_window(&endpoint, now, &|| current(&check, Some(end)))
+        .open_window(&endpoint, now, &|| check.current(shared))
         .map_err(|_| Error::RetryWindow)?;
     let session = AuthenticatedSession::new(
         &endpoint,
@@ -521,12 +524,11 @@ fn serve(shared: &Shared, stream: &Stream) -> Result<()> {
         acting: endpoint.acting.clone(),
         classification: endpoint.classification.clone(),
     };
-    frame(
-        stream,
-        FrameKind::Ready,
-        sign_ready(&ready, &shared.signer).map_err(|_| Error::Frame)?,
-        remaining(end)?,
-    )?;
+    let ready = sign_ready(&ready, &shared.signer).map_err(|_| Error::Frame)?;
+    if !check.current(shared) {
+        return Err(Error::Authority);
+    }
+    frame(stream, FrameKind::Ready, ready, remaining(end)?)?;
     drop(handshake);
     let mut budget = Budget::new(32, 8);
     loop {
