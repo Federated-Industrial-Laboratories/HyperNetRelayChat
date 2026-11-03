@@ -54,6 +54,14 @@ and directional privacy. A status observation is not fresh permission. The
 adapter requires version 2 and never falls back to version 1 or a public address.
 Error output uses stable categories; remote error prose is not printed.
 
+The adapter preserves an explicit companion `Closed` preparation error. Clients
+may retry that temporary connection failure within their existing attempt and
+waiting bounds. `Capacity` and `Timeout` keep their separate categories;
+`Refused` and unknown codes do not become temporary failures. A closed connection
+does not establish whether a remote operation committed, so uncertain effects
+still require exact outcome recovery. Authentication and permission refusals
+remain refusals; no direct route or renewed authority is inferred.
+
 ## One diagnostic exchange
 
 Start the receiver with the exact admitted caller principal:
