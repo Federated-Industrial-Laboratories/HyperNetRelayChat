@@ -117,7 +117,7 @@ pub fn time(ms: u64) -> String {
     )
 }
 pub fn connection(snapshot: &Snapshot) -> String {
-    match &snapshot.connection {
+    let mut description: String = match &snapshot.connection {
         ConnectionState::Offline => "Offline".into(),
         ConnectionState::Connecting => "Connecting through HyperNet".into(),
         ConnectionState::Resolving => "Resolving pending operations".into(),
@@ -125,7 +125,11 @@ pub fn connection(snapshot: &Snapshot) -> String {
         ConnectionState::Backoff { retry_in_ms, .. } => {
             format!("Reconnect in {} s", retry_in_ms.div_ceil(1000))
         }
+    };
+    if snapshot.updating {
+        description.push_str(" · refreshing views");
     }
+    description
 }
 pub fn delivery(delivery: &hrc::client::Delivery) -> String {
     if delivery.held {

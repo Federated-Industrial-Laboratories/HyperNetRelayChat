@@ -3,12 +3,12 @@
 use super::*;
 impl Worker {
     pub(super) fn refresh(&mut self) -> Result<()> {
-        self.snapshot.inspection.stale = true;
-        if let Some(room) = &mut self.snapshot.selected {
-            room.stale = true;
-        }
-        // Durable outcomes must remain visible while the following view reads wait or fail.
-        self.publish();
+        let result = self.update_view(Self::refresh_current);
+        // Failed nonretryable reads also get a finite interval before another full attempt.
+        self.poll = std::time::Instant::now();
+        result
+    }
+    fn refresh_current(&mut self) -> Result<()> {
         cache::maintain(&mut self.client.store).map_err(|_| Error::Storage)?;
         let mut rooms = Vec::new();
         let mut after = None;
@@ -78,9 +78,30 @@ impl Worker {
             self.pull(room)?;
         }
         self.snapshot.privacy = Some(self.client.session()?.refresh_privacy()?);
-        // A slow or explicit refresh must not immediately schedule another full poll.
-        self.poll = std::time::Instant::now();
         Ok(())
+    }
+    pub(super) fn refresh_after_send(&mut self, room: RoomId) -> Result<()> {
+        self.update_view(|worker| {
+            // Recipient filtering remains current before admitting history or notifications.
+            let filters = worker.pages(
+                Operation::ModerationFilters,
+                Target::Account(worker.snapshot.account),
+            )?;
+            worker.install_filters(filters)?;
+            if let Some(event) = worker
+                .snapshot
+                .selected
+                .as_ref()
+                .filter(|view| view.summary.room == room)
+                .and_then(|view| view.focus)
+            {
+                worker.open_event(room, event)?;
+            }
+            worker.pull(room)?;
+            worker.snapshot.privacy = Some(worker.client.session()?.refresh_privacy()?);
+            // Only a full refresh advances the metadata deadline.
+            Ok(())
+        })
     }
     pub(super) fn pages<T: serde::de::DeserializeOwned>(
         &mut self,
@@ -113,7 +134,9 @@ impl Worker {
         Err(Error::Input)
     }
     pub(super) fn inspect(&mut self) -> Result<()> {
-        self.snapshot.inspection.stale = true;
+        self.update_view(Self::inspect_current)
+    }
+    fn inspect_current(&mut self) -> Result<()> {
         let target = Target::Account(self.snapshot.account);
         let filters = self.pages(Operation::ModerationFilters, target.clone())?;
         self.install_filters(filters)?;
@@ -165,6 +188,9 @@ impl Worker {
         .map_err(|_| Error::Storage)
     }
     pub(super) fn select(&mut self, room: RoomId) -> Result<()> {
+        self.update_view(|worker| worker.select_current(room))
+    }
+    fn select_current(&mut self, room: RoomId) -> Result<()> {
         let summary = self
             .snapshot
             .rooms
@@ -210,6 +236,9 @@ impl Worker {
             .ok_or(Error::Input)
     }
     pub(super) fn pull(&mut self, room: RoomId) -> Result<()> {
+        self.update_view(|worker| worker.pull_current(room))
+    }
+    fn pull_current(&mut self, room: RoomId) -> Result<()> {
         if self
             .snapshot
             .selected
@@ -217,11 +246,6 @@ impl Worker {
             .is_some_and(|v| v.summary.room == room && v.gap.is_some())
         {
             return Ok(());
-        }
-        if let Some(view) = &mut self.snapshot.selected
-            && view.summary.room == room
-        {
-            view.stale = true;
         }
         let cached = cache::room(&mut self.client.store, room).map_err(|_| Error::Storage)?;
         if cached.gap.is_some() {
@@ -491,8 +515,10 @@ impl Worker {
 
 impl Worker {
     pub(super) fn open_event(&mut self, room: RoomId, event: Id) -> Result<()> {
-        let result = self.client.message_context(room, event, None);
-        self.context_result(room, event, result)
+        self.update_view(|worker| {
+            let result = worker.client.message_context(room, event, None);
+            worker.context_result(room, event, result)
+        })
     }
     pub(super) fn context_result(
         &mut self,
@@ -589,6 +615,11 @@ impl Worker {
             selected.crypto = Some(initial.clone());
         }
         if super::super::encrypted::require_trust(&initial).is_err() {
+            if let Some(selected) = &mut self.snapshot.selected
+                && selected.summary.room == room
+            {
+                selected.stale = true;
+            }
             return Ok(());
         }
         let view = self.client.crypto_sync(room, None)?;

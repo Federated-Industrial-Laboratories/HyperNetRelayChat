@@ -144,6 +144,8 @@ pub struct ServiceChoice {
 #[derive(Clone, Debug)]
 pub struct Snapshot {
     pub revision: u64,
+    /// View reads are in progress. This is not an authority or delivery guarantee.
+    pub updating: bool,
     pub account: AccountId,
     pub home: ServiceId,
     pub services: Vec<ServiceChoice>,

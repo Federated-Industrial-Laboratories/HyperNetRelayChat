@@ -39,9 +39,11 @@ impl Worker {
             LoadMore => return self.pull(self.selected()?),
             Resynchronise => {
                 let room = self.selected()?;
-                self.clear_room_presentation(room, None);
-                self.client.resynchronise_history(room)?;
-                return self.pull(room);
+                return self.update_view(|worker| {
+                    worker.clear_room_presentation(room, None);
+                    worker.client.resynchronise_history(room)?;
+                    worker.pull(room)
+                });
             }
             SaveDraft {
                 room,
@@ -156,15 +158,17 @@ impl Worker {
                 self.response(response)?;
             }
             CryptoInspect { room, grant } => {
-                let view = self.client.crypto_inspect(room, grant.as_deref())?;
-                let selected = self
-                    .snapshot
-                    .selected
-                    .as_mut()
-                    .filter(|v| v.summary.room == room)
-                    .ok_or(Error::Input)?;
-                selected.crypto = Some(view);
-                return Ok(());
+                return self.update_view(|worker| {
+                    let view = worker.client.crypto_inspect(room, grant.as_deref())?;
+                    let selected = worker
+                        .snapshot
+                        .selected
+                        .as_mut()
+                        .filter(|v| v.summary.room == room)
+                        .ok_or(Error::Input)?;
+                    selected.crypto = Some(view);
+                    Ok(())
+                });
             }
             CryptoPublish { room, grant } => {
                 self.operation = Some(Operation::CryptoPublishKeyPackage);
@@ -192,19 +196,21 @@ impl Worker {
                 self.response(response)?;
             }
             CryptoSync { room, grant } => {
-                let result = self.client.crypto_sync(room, grant.as_deref());
-                if result.is_err() {
-                    self.reconcile_history_gap(room)?;
-                }
-                let view = result?;
-                let selected = self
-                    .snapshot
-                    .selected
-                    .as_mut()
-                    .filter(|v| v.summary.room == room)
-                    .ok_or(Error::Input)?;
-                selected.crypto = Some(view);
-                return Ok(());
+                return self.update_view(|worker| {
+                    let result = worker.client.crypto_sync(room, grant.as_deref());
+                    if result.is_err() {
+                        worker.reconcile_history_gap(room)?;
+                    }
+                    let view = result?;
+                    let selected = worker
+                        .snapshot
+                        .selected
+                        .as_mut()
+                        .filter(|v| v.summary.room == room)
+                        .ok_or(Error::Input)?;
+                    selected.crypto = Some(view);
+                    Ok(())
+                });
             }
             TrustContact {
                 account,
@@ -290,11 +296,13 @@ impl Worker {
                 )?;
             }
             InspectGrant(reference) => {
-                let preview = self.client.inspect_grant(reference)?;
-                self.snapshot.inspection.proposed = preview.candidates;
-                self.snapshot.inspection.proposed_content = preview.content;
-                self.snapshot.inspection.grant = Some(preview.inspection);
-                return Ok(());
+                return self.update_view(|worker| {
+                    let preview = worker.client.inspect_grant(reference)?;
+                    worker.snapshot.inspection.proposed = preview.candidates;
+                    worker.snapshot.inspection.proposed_content = preview.content;
+                    worker.snapshot.inspection.grant = Some(preview.inspection);
+                    Ok(())
+                });
             }
             ChangeGrant { grant, change } => {
                 let op = match change {
@@ -383,6 +391,8 @@ impl Worker {
                     .map_err(|_| Error::Storage)?;
             }
         }
+        // These mutations can change membership, policy or inspected metadata.
+        self.stale();
         let view = self.refresh();
         self.finish_view(view);
         Ok(())
@@ -507,11 +517,14 @@ impl Worker {
         let response = self.client.execute_signed(&prepared.signed)?;
         self.response(response)?;
         self.clear_matching_draft(&action)?;
-        let view = self.refresh();
+        let view = self.refresh_after_send(room);
         self.finish_view(view);
         Ok(())
     }
     pub(super) fn search(&mut self, query: messaging::Search, append: bool) -> Result<()> {
+        self.update_view(|worker| worker.search_current(query, append))
+    }
+    fn search_current(&mut self, query: messaging::Search, append: bool) -> Result<()> {
         let room = self.selected()?;
         let events = if append {
             self.snapshot
