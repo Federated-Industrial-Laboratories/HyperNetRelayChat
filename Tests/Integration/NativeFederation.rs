@@ -1082,6 +1082,16 @@ fn workflow(run: &mut Run, r: &Request) -> Result<serde_json::Value> {
     let ready = run.step("Agent", "DelegatedWelcomeAndReady", |end| {
         synchronise(&mut agent, r.private, Some(&grant), end)
     })?;
+    run.step("Bob", "PinOwnerAuthorizedAgentRoster", |end| {
+        let view = pin(&mut bob, r.private, None, end)?;
+        ensure(
+            view.remote.members.iter().any(|member| {
+                member.credential.actor == agent_actor
+                    && matches!(member.actor, Actor::Delegated { .. })
+            }),
+            "DelegatedMemberMissing",
+        )
+    })?;
     run.step("Bob", "AdvanceAfterAgentAdmission", |end| {
         synchronise(&mut bob, r.private, None, end)
     })?;
