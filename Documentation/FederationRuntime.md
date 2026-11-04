@@ -399,12 +399,15 @@ an assertion. Immediately before signing, recheck the source stream, checkpoint
 heads, account generations and original check deadline.
 
 For conservative time conversion, sample the healthy clock with bounds
-`[L,U]` at source boot time `b`, bracketed so elapsed sampling time is included.
+`[L,U]` at source boot time `b`, bracketed by boot readings `start <= b <= after`.
 Let `d` be the earliest original local call/companion/receipt boot deadline.
 Set `sourceEvaluatedMs = L` and
-`sourceNotAfterMs <= L + max(0,d-b)`, also no later than the conservative
-authority/credential expiry. Record the bounded clock uncertainty; reject if
-it exceeds 250 ms or no positive safe interval remains. Do not use `U` to add
+`sourceNotAfterMs <= L + max(0,d-after)`, also no later than the conservative
+authority/credential expiry. Sampling and verification time therefore shorten
+remaining lifetime. Record `ceil((U-L)/2)` as the uncertainty of the captured
+observation; elapsed processing does not widen that already captured interval.
+Reject if uncertainty exceeds 250 ms or no positive safe interval remains.
+Do not use `U` to add
 permission lifetime. The represented positive interval is at most 5,000 ms.
 The home requires its current upper time bound to precede
 this expiry and all applicable credential/agreement/admission expiries.

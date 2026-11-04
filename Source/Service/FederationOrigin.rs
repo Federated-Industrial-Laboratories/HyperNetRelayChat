@@ -79,7 +79,7 @@ fn domain_error(error: federation::Error) -> Error {
         federation::Error::Storage(_) => Error::State,
     }
 }
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum OriginAuthorityFailure {
     IdentityCheckpointChanged,
     IdentityAuthorityRead,
@@ -356,6 +356,37 @@ impl Outbound {
     }
 }
 
+fn assertion_time(
+    now: clock::TimeBounds,
+    start: u64,
+    after: u64,
+    receipt_end: u64,
+    authority_end: u64,
+    challenge_end: u64,
+) -> std::result::Result<(u64, u64), OriginAuthorityFailure> {
+    // UTC bounds describe the captured boot instant. Verification time does not
+    // widen that historical interval; it consumes remaining permission below.
+    let uncertainty = now
+        .upper_ms
+        .checked_sub(now.lower_ms)
+        .ok_or(OriginAuthorityFailure::AssertionClockOrBinding)?
+        .div_ceil(2);
+    if now.boot_ms < start || now.boot_ms > after || uncertainty > clock::ERROR_BOUND_MS {
+        return Err(OriginAuthorityFailure::AssertionClockOrBinding);
+    }
+    // Map only the lifetime remaining AFTER sampling onto the earlier lower UTC
+    // bound. Processing time can shorten this assertion, never extend it.
+    let not_after = now
+        .lower_ms
+        .saturating_add(receipt_end.saturating_sub(after))
+        .min(authority_end)
+        .min(challenge_end);
+    if not_after <= now.upper_ms || not_after.saturating_sub(now.lower_ms) > 5000 {
+        return Err(OriginAuthorityFailure::AssertionLifetime);
+    }
+    Ok((uncertainty, not_after))
+}
+
 fn source_assertion(
     shared: &Shared,
     stream: &Stream,
@@ -381,15 +412,7 @@ fn source_assertion(
     };
     let challenge_digest = challenge.digest();
     let challenge = challenge.value();
-    let uncertainty = now
-        .upper_ms
-        .saturating_sub(now.lower_ms)
-        .div_ceil(2)
-        .saturating_add(after.saturating_sub(start));
-    if now.boot_ms < start
-        || now.boot_ms > after
-        || uncertainty > clock::ERROR_BOUND_MS
-        || evidence.action_digest() != prepared.subject.digest().as_hex()
+    if evidence.action_digest() != prepared.subject.digest().as_hex()
         || challenge.subject != prepared.subject
         || challenge.agreement != prepared.agreement
         || identity.session != stream.peer().session()
@@ -402,18 +425,15 @@ fn source_assertion(
         ));
     }
     let authority = evidence.authority();
-    let not_after = now
-        .lower_ms
-        .saturating_add(evidence.not_after_boot_ms().saturating_sub(after))
-        .min(authority.expires_at_ms())
-        .min(challenge.expires_ms);
-    if not_after <= now.upper_ms || not_after.saturating_sub(now.lower_ms) > 5000 {
-        return Err(authority_failure(
-            shared,
-            OriginAuthorityFailure::AssertionLifetime,
-            Some(check),
-        ));
-    }
+    let (uncertainty, not_after) = assertion_time(
+        now,
+        start,
+        after,
+        evidence.not_after_boot_ms(),
+        authority.expires_at_ms(),
+        challenge.expires_ms,
+    )
+    .map_err(|reason| authority_failure(shared, reason, Some(check)))?;
     let assertion = OriginAssertion {
         profile: FEDERATION_PROFILE,
         origin: shared.config.descriptor.home,

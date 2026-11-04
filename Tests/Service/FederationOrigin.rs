@@ -2,6 +2,66 @@
 //! Origin diagnostic categories cannot change or disclose detail in signed public refusals.
 use super::*;
 
+fn observed_time() -> clock::TimeBounds {
+    let mut now = clock::TimeBounds::test_now();
+    now.lower_ms = 1000;
+    now.upper_ms = 1500;
+    now.boot_ms = 100;
+    now
+}
+
+#[test]
+fn assertion_sampling_delay_consumes_lifetime_without_double_counting_clock_uncertainty() {
+    let now = observed_time();
+    for delay in [0, 1, 25, 100] {
+        let (uncertainty, end) = assertion_time(now, 99, 100 + delay, 1100, 5000, 5000).unwrap();
+        assert_eq!(uncertainty, 250);
+        assert_eq!(end, 2000 - delay);
+    }
+}
+
+#[test]
+fn assertion_time_keeps_original_clock_and_permission_boundaries() {
+    let now = observed_time();
+    assert!(matches!(
+        assertion_time(now, 101, 102, 1100, 5000, 5000),
+        Err(OriginAuthorityFailure::AssertionClockOrBinding)
+    ));
+    assert!(matches!(
+        assertion_time(now, 98, 99, 1100, 5000, 5000),
+        Err(OriginAuthorityFailure::AssertionClockOrBinding)
+    ));
+    let mut wide = now;
+    wide.upper_ms += 1;
+    assert!(matches!(
+        assertion_time(wide, 99, 100, 1100, 5000, 5000),
+        Err(OriginAuthorityFailure::AssertionClockOrBinding)
+    ));
+    let mut reversed = now;
+    reversed.upper_ms = 999;
+    assert!(assertion_time(reversed, 99, 100, 1100, 5000, 5000).is_err());
+    for (after, receipt, authority, challenge) in [
+        (600, 1100, 5000, 5000),
+        (1100, 1100, 5000, 5000),
+        (100, 1100, 1500, 5000),
+        (100, 1100, 5000, 1500),
+        (100, 6101, 10000, 10000),
+    ] {
+        assert!(matches!(
+            assertion_time(now, 99, after, receipt, authority, challenge),
+            Err(OriginAuthorityFailure::AssertionLifetime)
+        ));
+    }
+    assert_eq!(
+        assertion_time(now, 99, 100, 1100, 1700, 1800).unwrap().1,
+        1700
+    );
+    assert_eq!(
+        assertion_time(now, 99, 100, 1100, 1800, 1700).unwrap().1,
+        1700
+    );
+}
+
 #[test]
 fn origin_authority_reasons_are_fixed_bounded_and_distinguishable() {
     use OriginAuthorityFailure::*;
