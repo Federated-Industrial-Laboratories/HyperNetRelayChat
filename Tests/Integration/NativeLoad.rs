@@ -244,13 +244,44 @@ fn message(text: String) -> messaging::Send {
         causation: None,
     }
 }
+// Community preparation performs network reads before its outbox transaction.
+// Once preparation returns, only exact() may resolve or submit those saved bytes.
+fn prepare_staging_send<T>(
+    end: Instant,
+    mut attempt: impl FnMut(bool) -> client::Result<T>,
+    mut wait: impl FnMut(Instant, u64) -> Result<()>,
+) -> Result<T> {
+    let mut reconnect = false;
+    loop {
+        ensure(Instant::now() < end, "SendPreparationDeadline")?;
+        match attempt(reconnect) {
+            Ok(prepared) => {
+                ensure(Instant::now() < end, "SendPreparationDeadline")?;
+                return Ok(prepared);
+            }
+            Err(error) => {
+                wait(end, delay(&error).ok_or_else(|| error.code().to_string())?)?;
+                reconnect = true;
+            }
+        }
+    }
+}
 fn send_exact(
     c: &mut Client,
     room: RoomId,
     body: &messaging::Send,
     end: Instant,
 ) -> Result<Outcome> {
-    let prepared = net(c.prepare_send(room, body, None, false, None))?;
+    let prepared = prepare_staging_send(
+        end,
+        |reconnect| {
+            if reconnect {
+                c.connect()?;
+            }
+            c.prepare_send(room, body, None, false, None)
+        },
+        pause,
+    )?;
     exact(c, &prepared.action, &prepared.signed, end)
 }
 fn health(c: &mut Client) -> client::Result<Response> {
@@ -1785,6 +1816,90 @@ mod tests {
             position: 1,
             body: Value::Null,
         }
+    }
+    #[test]
+    fn staging_preparation_recovers_lost_transport_before_returning_exact_bytes() {
+        let end = Instant::now() + Duration::from_secs(60);
+        let (_, delivery, _) = setup_fixture();
+        let prepared = (
+            delivery.operation_id,
+            delivery.action_digest,
+            vec![3u8, 5, 8],
+        );
+        let mut attempts = Vec::new();
+        let mut waits = 0;
+        let result = prepare_staging_send(
+            end,
+            |reconnect| {
+                attempts.push(reconnect);
+                if attempts.len() == 1 {
+                    Err(client::Error::Network(client::network::Error::Transport))
+                } else {
+                    Ok(prepared.clone())
+                }
+            },
+            |original, delay| {
+                assert_eq!(original, end);
+                assert_eq!(delay, 1000);
+                waits += 1;
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(attempts, [false, true]);
+        assert_eq!(waits, 1);
+        assert_eq!(result, prepared);
+    }
+    #[test]
+    fn staging_preparation_does_not_repeat_permanent_or_storage_failures() {
+        for error in [
+            client::Error::Storage,
+            client::Error::Network(client::network::Error::Authentication),
+            client::Error::Refused {
+                code: ErrorCode::Denied,
+                detail: "CurrentPolicy".into(),
+                retry_after_ms: Some(1000),
+            },
+        ] {
+            let code = error.code();
+            let mut error = Some(error);
+            let mut attempts = 0;
+            let result = prepare_staging_send::<()>(
+                Instant::now() + Duration::from_secs(60),
+                |reconnect| {
+                    assert!(!reconnect);
+                    attempts += 1;
+                    Err(error.take().expect("no preparation retry"))
+                },
+                |_, _| panic!("permanent preparation error was retried"),
+            );
+            assert_eq!(result.unwrap_err(), code);
+            assert_eq!(attempts, 1);
+        }
+    }
+    #[test]
+    fn staging_preparation_keeps_its_original_deadline() {
+        let result = prepare_staging_send::<()>(
+            Instant::now(),
+            |_| panic!("expired preparation was attempted"),
+            |_, _| panic!("expired preparation was retried"),
+        );
+        assert_eq!(result.unwrap_err(), "SendPreparationDeadline");
+        let end = Instant::now() + Duration::from_secs(60);
+        let mut attempts = 0;
+        let result = prepare_staging_send::<()>(
+            end,
+            |_| {
+                attempts += 1;
+                Err(client::Error::Network(client::network::Error::Transport))
+            },
+            |original, _| {
+                assert_eq!(original, end);
+                Err("OriginalDeadline".into())
+            },
+        );
+        assert_eq!(result.unwrap_err(), "OriginalDeadline");
+        assert_eq!(attempts, 1);
     }
     #[test]
     fn setup_effect_accepts_only_its_recovered_commit_despite_old_attempt_error() {

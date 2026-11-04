@@ -113,7 +113,12 @@ the load helper does not claim to repeat them.
 
 Normal sends use the actual Controller command and durable Client path. Staging may retry
 only the exact saved operation identifier and digest, through product resolution
-and matching certified absence. The helper never redispatches an offered send;
+and matching certified absence. Before a community setup message is prepared,
+a retryable preparation-read failure can reconnect and repeat preparation within
+the same absolute setup end. A successful preparation returns its saved identity
+and signed bytes once; subsequent uncertainty uses the existing exact-outcome path.
+Storage, authentication and permanent policy failures stop preparation. The helper
+never redispatches an offered send;
 the production Controller retains and resolves its original uncertain effects.
 During setup, a temporary refusal of an outcome-resolution query keeps the
 original effect pending and uses the original setup deadline. A resolver rejection
