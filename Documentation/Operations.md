@@ -78,6 +78,13 @@ the home service stores and searches no plaintext confidential transcript.
 without message bodies, account identifiers or keys. Its burst is eight lines,
 then at most one per second, with 128 lines per process. It is diagnostic output,
 not an audit transcript or a substitute for attributable moderation history.
+The flag also permits a separate best-effort sample of verified local message
+sends: two per second, burst four, at most 512 records per process. Fixed
+`MessageTiming` spans distinguish authority admission and checking from remaining
+execution, signing/encoding and response write. Outcome labels contain no
+details. These service spans are not client exchange latency or delivery
+receipts; missing records do not imply success. See
+[conversation setup](ConversationSetup.md) for the precise boundaries and bounds.
 
 Distinguish permanent denial, HRC pause/revocation, unavailable transport, overload
 and an uncertain durable outcome. Do not send a replacement message merely because

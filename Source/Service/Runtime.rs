@@ -24,6 +24,8 @@ mod federation_gateway;
 mod federation_origin;
 #[path = "Handshake.rs"]
 mod handshake;
+#[path = "MessageTiming.rs"]
+mod message_timing;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -263,7 +265,7 @@ struct Budget {
     burst: u64,
 }
 impl Budget {
-    fn new(rate: u64, burst: u64) -> Self {
+    const fn new(rate: u64, burst: u64) -> Self {
         Self {
             at: 0,
             remaining: burst * 1000,
@@ -409,6 +411,24 @@ fn frame(stream: &Stream, kind: FrameKind, payload: Vec<u8>, timeout: Duration) 
     )
     .map_err(|_| Error::Transport)
 }
+fn message_frame(
+    stream: &Stream,
+    kind: FrameKind,
+    payload: Vec<u8>,
+    mut timing: message_timing::Sample,
+) -> Result<()> {
+    let response = Frame::new(kind, payload).map_err(|_| Error::Frame)?;
+    // Match io::send: the original five-second write end includes frame encoding.
+    let end = clock::boot_ms()
+        .map_err(|_| Error::Transport)?
+        .checked_add(5000)
+        .ok_or(Error::Transport)?;
+    let encoded = response.encode().map_err(|_| Error::Transport)?;
+    timing.encoding_complete();
+    let result = io::send_encoded_before(stream, &encoded, end).map_err(|_| Error::Transport);
+    timing.finish(result.is_ok());
+    result
+}
 fn serve(shared: &Shared, stream: &Stream) -> Result<()> {
     let handshake = Handshake(&shared.handshakes);
     let Peer::Incoming(peer) = stream.peer() else {
@@ -540,8 +560,12 @@ fn serve(shared: &Shared, stream: &Stream) -> Result<()> {
     drop(handshake);
     let mut budget = Budget::new(32, 8);
     loop {
-        let incoming =
-            io::receive(stream, Duration::from_secs(60)).map_err(|_| Error::Transport)?;
+        let receive_end = clock::boot_ms()
+            .map_err(|_| Error::Transport)?
+            .checked_add(60_000)
+            .ok_or(Error::Transport)?;
+        let (incoming, received) =
+            io::receive_before_observed(stream, receive_end).map_err(|_| Error::Transport)?;
         if incoming.kind == FrameKind::Close {
             return Ok(());
         }
@@ -587,6 +611,9 @@ fn serve(shared: &Shared, stream: &Stream) -> Result<()> {
             )?;
             continue;
         }
+        let mut timing = (verified.action().operation == Operation::MessageSend)
+            .then(|| message_timing::begin(shared.diagnostics.is_some(), received))
+            .flatten();
         let response = execute(
             shared,
             stream,
@@ -594,7 +621,11 @@ fn serve(shared: &Shared, stream: &Stream) -> Result<()> {
             &session,
             &Cancellation::default(),
             None,
+            timing.as_mut(),
         );
+        if let Some(timing) = &mut timing {
+            timing.executed(&response.outcome);
+        }
         let (kind, bytes) = if verified.action().operation.is_crypto_transition() {
             (
                 FrameKind::CryptoResponse,
@@ -606,12 +637,11 @@ fn serve(shared: &Shared, stream: &Stream) -> Result<()> {
                 sign_response(&response, &shared.signer),
             )
         };
-        frame(
-            stream,
-            kind,
-            bytes.map_err(|_| Error::Frame)?,
-            Duration::from_secs(5),
-        )?;
+        let bytes = bytes.map_err(|_| Error::Frame)?;
+        match timing {
+            Some(timing) => message_frame(stream, kind, bytes, timing)?,
+            None => frame(stream, kind, bytes, Duration::from_secs(5))?,
+        }
     }
 }
 fn execute(
@@ -621,6 +651,7 @@ fn execute(
     session: &AuthenticatedSession,
     cancel: &Cancellation,
     end: Option<u64>,
+    mut timing: Option<&mut message_timing::Sample>,
 ) -> Response {
     let base = |outcome| Response {
         home: shared.config.descriptor.home,
@@ -635,13 +666,20 @@ fn execute(
             retry_after_ms: Some(1000),
         })
     };
-    let check = match shared.check_authority(
+    if let Some(timing) = &mut timing {
+        timing.authority_started();
+    }
+    let checked = shared.check_authority(
         stream,
         action.digest(),
         end,
         cancel,
         action.action().operation.name(),
-    ) {
+    );
+    if let Some(timing) = timing {
+        timing.authority_complete();
+    }
+    let check = match checked {
         Ok(check) => check,
         Err(error) => {
             shared.report(action.action().operation.name(), error.code());
@@ -699,7 +737,7 @@ fn search(
         let (sender, receiver) = std::sync::mpsc::sync_channel(1);
         let token = cancel.clone();
         scope.spawn(move || {
-            let response = execute(shared, stream, query, session, &token, Some(end));
+            let response = execute(shared, stream, query, session, &token, Some(end), None);
             let _ = sender.send(response);
         });
         let mut control = None;
@@ -720,6 +758,7 @@ fn search(
                             session,
                             &Cancellation::accepted_control(),
                             Some(end),
+                            None,
                         );
                         frame(
                             stream,

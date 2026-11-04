@@ -1108,6 +1108,17 @@ impl FloodPending {
     }
 }
 
+fn poll_flood_reply(wait: Duration, poll: impl FnOnce(Duration) -> Result<bool>) -> Result<bool> {
+    // Companion polling requires whole milliseconds. Round down so a fine
+    // scheduling remainder cannot extend the window or become a false failure.
+    let millis = u64::try_from(wait.as_millis()).map_err(|_| "FloodWait")?;
+    if millis == 0 {
+        thread::sleep(wait);
+        return Ok(false);
+    }
+    poll(Duration::from_millis(millis))
+}
+
 fn flood(endpoint: Endpoint, room: RoomId, window: &PhaseWindow) -> (Endpoint, Metrics) {
     let mut metrics = Metrics {
         endpoint: endpoint.index,
@@ -1183,7 +1194,11 @@ fn flood(endpoint: Endpoint, room: RoomId, window: &PhaseWindow) -> (Endpoint, M
             } else {
                 wait
             };
-            if !stream.wait_readable(wait).map_err(|_| "FloodTransport")? {
+            if !poll_flood_reply(wait, |budget| {
+                stream
+                    .wait_readable(budget)
+                    .map_err(|_| "FloodTransport".into())
+            })? {
                 continue;
             }
             let frame = io::receive(
@@ -2086,6 +2101,31 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn flood_polling_respects_whole_millisecond_adapter_bounds_without_extending_wait() {
+        for wait in [Duration::ZERO, Duration::from_nanos(999_999)] {
+            assert!(!poll_flood_reply(wait, |_| panic!("invalid poll budget")).unwrap());
+        }
+        for wait in [Duration::from_millis(1), Duration::from_nanos(19_999_999)] {
+            let mut calls = 0;
+            assert!(
+                poll_flood_reply(wait, |budget| {
+                    calls += 1;
+                    assert!(budget >= Duration::from_millis(1));
+                    assert!(budget <= wait);
+                    assert_eq!(budget, Duration::from_millis(budget.as_millis() as u64));
+                    Ok(true)
+                })
+                .unwrap()
+            );
+            assert_eq!(calls, 1);
+        }
+        assert_eq!(
+            poll_flood_reply(Duration::from_millis(20), |_| Err("FloodTransport".into())),
+            Err("FloodTransport".into())
+        );
+    }
+
     fn flood_action(number: u8) -> Action {
         let id = |n| Id::from_bytes([n; 32]);
         let home = ServiceId {

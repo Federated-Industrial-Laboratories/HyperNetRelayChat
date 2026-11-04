@@ -67,12 +67,29 @@ Add `--diagnostics` to `service run` to report fixed lifecycle categories on
 standard error. Diagnostics contain no messages, account identifiers or keys.
 Failed authority observations include fixed disposition categories and monotonic
 deadline timings. Authentication failures identify their fixed validation stage.
-Output is limited to a burst of eight lines, one line per second thereafter and
-128 output attempts per process. The bounded diagnostic writer holds at most 32
-queued records of at most 1,024 bytes each, plus its current record and channel
-metadata. Producers discard saturated, closed or oversized output; service
-shutdown never waits for the output sink. Client errors distinguish local configuration and storage,
-HyperNet preparation, session authentication, clock and handshake failures.
+Lifecycle output is limited to a burst of eight lines, one line per second
+thereafter and 128 output attempts per process. The bounded diagnostic writer
+holds at most 32 queued records of at most 1,024 bytes each, plus its current
+record and channel metadata. Producers discard saturated, closed or oversized
+output; service shutdown never waits for the output sink. Client errors
+distinguish local configuration and storage, HyperNet preparation, session
+authentication, clock and handshake failures.
+
+The same opt-in flag separately samples verified local message sends at two per
+second, with a burst of four and at most 512 samples per process. One fixed
+`MessageTiming` record follows each sampled response write. `bootMs` is the
+dispatch observation; the process-local sample number is not an operation ID.
+Nanosecond spans cover complete frame receipt to dispatch, the entire authority
+check including its admission wait, remaining execution, response signing and
+encoding, and response write. `executeNs` excludes `authorityNs`; these spans
+sum to `totalNs`. The record contains only these timings, the fixed outcome
+variant and whether the write completed or failed. Each record is below 384
+bytes and uses the same nonblocking writer without consuming the lifecycle
+failure budget. Contention, clock or output failure, or response construction
+failure can omit a sample. Missing samples do not establish success. These are
+service processing spans, not delivery, client exchange latency, or UI timings;
+a completed response write does not prove recipient delivery.
+
 `AcceptWaitEnded/Timeout` can mean an ordinary idle wait; it does not establish a
 failed client operation. Periodic retention runs in one background task every
 30 seconds and writes only when expired state exists. Every operation still
