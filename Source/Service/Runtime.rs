@@ -110,6 +110,39 @@ struct Shared {
     stop: Arc<AtomicBool>,
 }
 impl Shared {
+    fn budget_exhausted(
+        &self,
+        stream: &Stream,
+        action: &VerifiedAction,
+        session: &AuthenticatedSession,
+        end: Option<u64>,
+        cancel: &Cancellation,
+    ) -> bool {
+        let active = || {
+            !self.stop.load(Ordering::Acquire)
+                && !cancel.is_cancelled()
+                && stream.check_authority_supported()
+                && end.is_none_or(|end| clock::boot_ms().is_ok_and(|now| now < end))
+        };
+        if !Home::budget_screen_candidate(action.action()) || !active() {
+            return false;
+        }
+        let Ok(now) = self.config.clock.sample() else {
+            return false;
+        };
+        let timeout = match end {
+            Some(end) => match remaining(end) {
+                Ok(left) => left.min(Duration::from_millis(25)),
+                Err(_) => return false,
+            },
+            None => Duration::from_millis(25),
+        };
+        let exhausted = self
+            .home
+            .try_lock()
+            .is_ok_and(|mut home| home.budget_exhausted(action, session, now, timeout));
+        exhausted && active()
+    }
     fn check_authority(
         &self,
         stream: &Stream,
@@ -666,6 +699,9 @@ fn execute(
             retry_after_ms: Some(1000),
         })
     };
+    if shared.budget_exhausted(stream, action, session, end, cancel) {
+        return refused(ErrorCode::RateLimited, "OperationBudget");
+    }
     if let Some(timing) = &mut timing {
         timing.authority_started();
     }

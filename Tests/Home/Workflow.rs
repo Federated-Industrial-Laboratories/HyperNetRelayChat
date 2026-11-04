@@ -1,4 +1,6 @@
 use super::*;
+#[path = "BudgetScreen.rs"]
+mod budget_screen;
 #[path = "../Confidential/Workflow.rs"]
 mod confidential;
 #[path = "../Federation/Workflow.rs"]

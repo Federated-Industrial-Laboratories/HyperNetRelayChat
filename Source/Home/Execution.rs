@@ -303,6 +303,80 @@ fn dispatch(
     }
 }
 impl Home {
+    pub(crate) fn budget_screen_candidate(action: &Action) -> bool {
+        action.agreement.is_none()
+            && !matches!(action.actor, Actor::Delegated { .. })
+            && action.approval.is_none()
+            && matches!(
+                action.operation,
+                Operation::MessageSend
+                    | Operation::MessageReply
+                    | Operation::MessageAction
+                    | Operation::SearchQuery
+            )
+    }
+    /// Reject demonstrably exhausted local work without granting permission or charging it.
+    pub(crate) fn budget_exhausted(
+        &mut self,
+        verified: &VerifiedAction,
+        session: &AuthenticatedSession,
+        clock: TimeBounds,
+        timeout: std::time::Duration,
+    ) -> bool {
+        let action = verified.action();
+        if action.home != self.home
+            || action.actor.acting().account.origin != self.home.network
+            || !Self::budget_screen_candidate(action)
+        {
+            return false;
+        }
+        self.store
+            .read(timeout, |db| {
+                let Some(now) = checked_clock(db, clock).ok() else {
+                    return Ok(false);
+                };
+                if crate::identity::authenticate(db, verified, session).is_err() {
+                    return Ok(false);
+                }
+                let Some(expires) = window(db, action.operation_id.window, action.actor.acting())?
+                else {
+                    return Ok(false);
+                };
+                // Even a conflicting or retained read must take the ordinary fresh-check path.
+                let retained: bool = db.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM hrc_operations WHERE window=?1 AND operation=?2)",
+                    params![
+                        action.operation_id.window.as_hex(),
+                        action.operation_id.operation.as_hex()
+                    ],
+                    |row| row.get(0),
+                )?;
+                if retained || now.upper_ms >= expires || expected(db, action).is_err() {
+                    return Ok(false);
+                }
+                let Ok(access) = crate::conversations::access(db, action, now) else {
+                    return Ok(false);
+                };
+                if access.confidentiality != RoomConfidentiality::Community
+                    || action.operation != Operation::SearchQuery
+                        && !matches!(
+                            crate::conversations::restriction(
+                                db,
+                                access.room,
+                                &action.actor,
+                                1,
+                                now
+                            ),
+                            Ok(false)
+                        )
+                {
+                    return Ok(false);
+                }
+                let exhausted = matches!(budgets::exhausted(db, action, now.lower_ms), Ok(true));
+                Ok(exhausted && checked_clock(db, clock).is_ok_and(|now| now.upper_ms < expires))
+            })
+            .unwrap_or(false)
+    }
     pub fn execute(
         &mut self,
         verified: &VerifiedAction,

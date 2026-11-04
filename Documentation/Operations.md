@@ -93,6 +93,16 @@ the first response was lost. `hrc outbox --profile PROFILE` lists pending identi
 under their supported window and current authority. A committed event remains
 committed even if the subsequent interface refresh fails.
 
+Local community sends and searches from direct users or independently acting
+agents receive a bounded, read-only budget screen before the fresh HyperNet
+check. It can only reject demonstrated exhaustion; it grants no permission and
+does not reserve or charge credit. It verifies current endpoint and room bindings
+and leaves retained outcomes, conflicts and uncertain state on the existing
+fresh-authority path. Delegated, remote, confidential and other operations retain
+that path as well. Work that passes the screen still receives current authority,
+all guarded Home policy checks and one atomic budget charge. Concurrent screens
+can pass together and subsequently be refused by final admission.
+
 Investigate a storage or continuity failure before restarting repeatedly. Preserve
 the exact files and keys, stop writers and check disk health and free space. Do not
 enable plaintext SQLite, reset state, change the system clock or disable HyperNet
