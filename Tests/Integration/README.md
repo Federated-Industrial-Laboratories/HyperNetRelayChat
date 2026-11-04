@@ -168,8 +168,19 @@ retries or measurement bounds. Phase start/result and recovery records also
 include `observationBootMs`. These timestamps mark report observations, not exact
 scheduled measurement boundaries or internal request timings.
 
-Deliberately hostile protocol offers
-use the authenticated Session submission API without a durable retry loop.
+Deliberately hostile protocol offers use the authenticated stream without a
+durable retry loop. The flood keeps at most eight signed requests outstanding
+on its single existing stream, so offering the next message need not wait for
+the previous reply. Every reply must match the home, operation ID and action
+digest after signature verification. A full window or missed schedule slot is
+reported as a missed offer. The query actor retains sequential submission so
+an additional query cannot be mistaken for in-flight search cancellation.
+At the phase boundary the flood stops new offers and drains only existing
+requests for at most five seconds. An invalid reply, transport failure or
+unanswered request fails pressure qualification. The peak pending count and
+unanswered count remain visible; a cost refusal does not excuse later failure.
+This drain is part of the hostile worker's lifetime and precedes the existing
+recovery clock. The original offer rate and cohort deadlines do not change.
 Recovery waits for the original offered effects to resolve, then submits one new
 marker through each sending Controller. All eight Controllers must become current
 and receive a remote recovery marker. Its thirty-second measurement starts at attack stop,

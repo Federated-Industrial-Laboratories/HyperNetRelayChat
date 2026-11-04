@@ -24,6 +24,7 @@ use std::{
 type Result<T> = std::result::Result<T, String>;
 const MESSAGE_EXCHANGE_LIMIT_NS: u64 = 500_000_000;
 const COHORT_OBSERVATION_SECONDS: u64 = 30;
+const FLOOD_PENDING_LIMIT: usize = 8;
 struct PhaseWindow {
     start: Instant,
     seconds: u64,
@@ -78,6 +79,8 @@ struct Metrics {
     tail_offered: usize,
     tail_missed: usize,
     pressure_cost_refusals: usize,
+    peak_pending_pressure: usize,
+    unanswered_pressure: usize,
 }
 fn emit(value: serde_json::Value) {
     println!("{value}");
@@ -1008,13 +1011,15 @@ fn record_pressure_result(metrics: &mut Metrics, result: &client::Result<Respons
     record_result(metrics, result);
 }
 fn hostile(endpoint: Endpoint, room: RoomId, window: &PhaseWindow) -> (Endpoint, Metrics) {
+    if endpoint.index == 8 {
+        return flood(endpoint, room, window);
+    }
     let (start, seconds) = (window.start, window.seconds);
     let mut m = Metrics {
         endpoint: endpoint.index,
         ..Metrics::default()
     };
-    let flood = endpoint.index == 8;
-    let period = if flood { 100 } else { 500 };
+    let period = 500;
     let offers = (seconds + COHORT_OBSERVATION_SECONDS) * 1000 / period;
     for index in 0..offers {
         if window.finished(Instant::now()) {
@@ -1033,18 +1038,10 @@ fn hostile(endpoint: Endpoint, room: RoomId, window: &PhaseWindow) -> (Endpoint,
             continue;
         }
         m.started += 1;
-        let action = if flood {
-            endpoint.client.prepare_as(
-                Operation::MessageSend,
-                Target::Room(room),
-                &message(format!("flood offer{index}")),
-                None,
-            )
-        } else {
+        let action =
             endpoint
                 .client
-                .prepare_as(Operation::SearchQuery, Target::Room(room), &query(), None)
-        };
+                .prepare_as(Operation::SearchQuery, Target::Room(room), &query(), None);
         let result = action.and_then(|action| {
             let signed = endpoint.client.sign(&action)?;
             m.signed_action_bytes += signed.len();
@@ -1078,6 +1075,148 @@ fn hostile(endpoint: Endpoint, room: RoomId, window: &PhaseWindow) -> (Endpoint,
         thread::sleep(Duration::from_millis(10));
     }
     (endpoint, m)
+}
+
+struct FloodPending {
+    home: ServiceId,
+    actions: BTreeMap<(Id, Id), Id>,
+}
+impl FloodPending {
+    fn insert(&mut self, action: &Action) -> Result<()> {
+        let key = (action.operation_id.window, action.operation_id.operation);
+        ensure(
+            action.home == self.home
+                && self.actions.len() < FLOOD_PENDING_LIMIT
+                && !self.actions.contains_key(&key),
+            "FloodPendingBound",
+        )?;
+        self.actions
+            .insert(key, action_digest(action).map_err(|_| "FloodDigest")?);
+        Ok(())
+    }
+    fn accept(&mut self, response: &Response) -> Result<()> {
+        let key = (
+            response.operation_id.window,
+            response.operation_id.operation,
+        );
+        ensure(
+            response.home == self.home && self.actions.get(&key) == Some(&response.action_digest),
+            "FloodResponseBinding",
+        )?;
+        self.actions.remove(&key);
+        Ok(())
+    }
+}
+
+fn flood(endpoint: Endpoint, room: RoomId, window: &PhaseWindow) -> (Endpoint, Metrics) {
+    let mut metrics = Metrics {
+        endpoint: endpoint.index,
+        ..Metrics::default()
+    };
+    let mut pending = FloodPending {
+        home: endpoint.client.profile.server.home,
+        actions: BTreeMap::new(),
+    };
+    let result = (|| -> Result<()> {
+        let stream = net(endpoint.client.session())?.stream_handle();
+        let key = VerifyingKey::from_bytes(endpoint.client.profile.server.signing_key.as_bytes())
+            .map_err(|_| "ServerKey")?;
+        let mut index = 0;
+        let mut drain_end = None;
+        loop {
+            let now = Instant::now();
+            if drain_end.is_none() && window.finished(now) {
+                // Stop offers at the original phase boundary. Only already sent
+                // requests may drain, within one fixed five-second allowance.
+                drain_end = Some(now + Duration::from_secs(5));
+            }
+            if let Some(end) = drain_end {
+                if pending.actions.is_empty() {
+                    return Ok(());
+                }
+                ensure(now < end, "FloodDrainDeadline")?;
+            }
+            let scheduled = window.start + Duration::from_millis(index * 100);
+            if drain_end.is_none() && now >= scheduled {
+                index += 1;
+                metrics.offered += 1;
+                let tail = usize::from(scheduled >= window.offer_end());
+                metrics.tail_offered += tail;
+                if now >= scheduled + Duration::from_millis(100)
+                    || pending.actions.len() == FLOOD_PENDING_LIMIT
+                {
+                    metrics.missed += 1;
+                    metrics.tail_missed += tail;
+                } else {
+                    let action = net(endpoint.client.prepare_as(
+                        Operation::MessageSend,
+                        Target::Room(room),
+                        &message(format!("flood offer{}", index - 1)),
+                        None,
+                    ))?;
+                    let signed = net(endpoint.client.sign(&action))?;
+                    metrics.signed_action_bytes += signed.len();
+                    let frame = Frame::new(FrameKind::Action, signed).map_err(|_| "FloodFrame")?;
+                    pending.insert(&action)?;
+                    // Partial writes leave an unresolved request, never an invented refusal.
+                    metrics.started += 1;
+                    metrics.peak_pending_pressure =
+                        metrics.peak_pending_pressure.max(pending.actions.len());
+                    io::send(
+                        &stream,
+                        &frame,
+                        window
+                            .observation_end()
+                            .saturating_duration_since(Instant::now())
+                            .min(Duration::from_secs(2)),
+                    )
+                    .map_err(|_| "FloodWrite")?;
+                }
+                continue;
+            }
+            let end = drain_end.unwrap_or(window.observation_end());
+            let wait = end
+                .saturating_duration_since(now)
+                .min(Duration::from_millis(20));
+            let wait = if drain_end.is_none() {
+                wait.min(scheduled.saturating_duration_since(now))
+            } else {
+                wait
+            };
+            if !stream.wait_readable(wait).map_err(|_| "FloodTransport")? {
+                continue;
+            }
+            let frame = io::receive(
+                &stream,
+                end.saturating_duration_since(Instant::now())
+                    .min(Duration::from_secs(2)),
+            )
+            .map_err(|_| "FloodResponseDeadline")?;
+            ensure(frame.kind == FrameKind::Response, "FloodResponseFrame")?;
+            let response = verify_response(&frame.payload, &key).map_err(|_| "FloodSignature")?;
+            let response = response.value();
+            ensure(
+                matches!(
+                    response.outcome,
+                    Outcome::Committed { .. } | Outcome::Rejected { .. } | Outcome::Refused { .. }
+                ),
+                "FloodUnknownOutcome",
+            )?;
+            pending.accept(response)?;
+            metrics.committed += usize::from(matches!(response.outcome, Outcome::Committed { .. }));
+            record_pressure_result(&mut metrics, &Ok(response.clone()));
+        }
+    })();
+    metrics.unanswered_pressure = pending.actions.len();
+    if let Err(code) = result {
+        metrics.unresolved = true;
+        *metrics.results.entry(code).or_default() += 1;
+    }
+    // A failure remains disqualifying for the whole scheduled phase.
+    while !window.finished(Instant::now()) {
+        thread::sleep(Duration::from_millis(10));
+    }
+    (endpoint, metrics)
 }
 fn slow_reader(
     mut endpoint: Endpoint,
@@ -1947,6 +2086,93 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn flood_action(number: u8) -> Action {
+        let id = |n| Id::from_bytes([n; 32]);
+        let home = ServiceId {
+            network: NetworkId {
+                network: id(1),
+                incarnation: id(2),
+            },
+            service: id(3),
+        };
+        Action {
+            home,
+            operation_id: OperationId {
+                window: id(4),
+                operation: id(number),
+            },
+            actor: Actor::Direct {
+                acting: EndpointActor {
+                    account: AccountId {
+                        origin: home.network,
+                        local: id(5),
+                    },
+                    endpoint: id(6),
+                    security_generation: 1,
+                    enrolment_generation: 1,
+                    binding_digest: id(7),
+                },
+            },
+            target: Target::Room(RoomId { home, local: id(8) }),
+            operation: Operation::MessageSend,
+            body: Value::serialized(&message("pressure".into())).unwrap(),
+            expected: BTreeMap::new(),
+            approval: None,
+            agreement: None,
+        }
+    }
+    fn flood_reply(action: &Action) -> Response {
+        Response {
+            home: action.home,
+            operation_id: action.operation_id,
+            action_digest: action_digest(action).unwrap(),
+            outcome: Outcome::Refused {
+                code: ErrorCode::RateLimited,
+                detail: "OperationBudget".into(),
+                retry_after_ms: Some(1000),
+            },
+        }
+    }
+    #[test]
+    fn flood_window_stays_bounded_until_an_exact_reply_frees_capacity() {
+        let mut pending = FloodPending {
+            home: flood_action(10).home,
+            actions: BTreeMap::new(),
+        };
+        for number in 10..18 {
+            pending.insert(&flood_action(number)).unwrap();
+        }
+        assert!(pending.insert(&flood_action(18)).is_err());
+        assert!(pending.insert(&flood_action(10)).is_err());
+        // Replies can arrive out of order; a later exact reply frees just its slot.
+        let reply = flood_reply(&flood_action(17));
+        pending.accept(&reply).unwrap();
+        assert!(pending.accept(&reply).is_err());
+        pending.insert(&flood_action(18)).unwrap();
+        assert_eq!(pending.actions.len(), FLOOD_PENDING_LIMIT);
+    }
+    #[test]
+    fn flood_rejects_substitution_without_losing_the_original_outstanding_request() {
+        let action = flood_action(10);
+        let mut pending = FloodPending {
+            home: action.home,
+            actions: BTreeMap::new(),
+        };
+        pending.insert(&action).unwrap();
+        for field in 0..3 {
+            let mut reply = flood_reply(&action);
+            let wrong = Id::from_bytes([99; 32]);
+            match field {
+                0 => reply.home.service = wrong,
+                1 => reply.operation_id.operation = wrong,
+                _ => reply.action_digest = wrong,
+            }
+            assert!(pending.accept(&reply).is_err());
+            assert_eq!(pending.actions.len(), 1);
+        }
+        pending.accept(&flood_reply(&action)).unwrap();
+        assert!(pending.actions.is_empty());
+    }
     fn setup_fixture() -> (SetupEffect, client::Delivery, client::Completion) {
         let id = |n| Id::from_bytes([n; 32]);
         let room = RoomId {
