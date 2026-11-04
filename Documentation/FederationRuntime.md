@@ -573,6 +573,23 @@ still current at the origin. Dirty-first work and account-ordered round-robin
 renewal are separate bounded queries; a busy account cannot hide untouched
 recipients from renewal. No network operation holds the home writer.
 
+Foreground forwarding and freshness maintenance share one admitted gateway
+stream per configured agreement. Agreement lookup does not depend on the stream
+being idle. At most 32 foreground calls, including the active call, wait in FIFO
+order under their original operation deadlines. Known source cancellation and
+service shutdown remove waiting calls. Admission does not grant authority: the
+current agreement is checked after waiting, and the existing current-authority
+and final effect checks still apply.
+
+The maintenance worker reserves one turn without blocking work on the other
+configured route. When foreground and maintenance work are both waiting, their
+completed turns alternate. A maintenance reservation persists until its next
+ordinary poll, and shutdown withdraws it. The current owner retains the stream
+through the complete correlated request and response; no second stream or
+parallel exchange is introduced. Maintenance keeps its existing bounded cycle
+and polling interval. A slow exchange can still outlast an identity observation;
+the five-second freshness bound and resulting availability barrier are unchanged.
+
 The receiving home accepts observations only for independently pinned,
 completely imported identities in that gateway's admission scope. It checks
 the original signed expiry and records a conservative receiving boot deadline.
@@ -643,7 +660,7 @@ actor/represented-account budgets into a single gateway identity.
 | Identity propagation | At most 256 persistent watched accounts per agreement; pages and freshness batches at most 32 accounts. Freshness lasts at most five seconds and cannot survive a home restart without new authenticated observation. Missed renewal is an availability barrier, not permission to retain stale recipients. |
 | Pending proof work | One page fetch per peer, two service-wide; at most 256 KiB unverified staging. No proof fetch holds a home transaction or extends a challenge. |
 | Checks and handshakes | At most four fresh checks per companion, one per incoming stream, including ordinary clients; respect the upstream serialized endpoint read. At most four HRC handshakes service-wide. |
-| Exchange | One active forwarded operation per gateway stream; queue before challenge issuance. At most four pending home challenges service-wide, two per gateway and one per exact subject. |
+| Exchange | One active exchange per gateway stream; at most 32 active or waiting foreground calls per route, queued before challenge issuance and sharing fair turns with freshness maintenance. At most four pending home challenges service-wide, two per gateway and one per exact subject. |
 | Challenge admission | Gateway sustained two requests/s, burst four, plus actor/represented-account and service budgets. Invalid/expired attempts still consume bounded admission work. |
 | Controls | Existing four costly workers with one reserved for authenticated controls; 64 KiB reserved within the global queue budget, four control operations/s and 8-KiB maximum reserved-control frames. Proof pages use ordinary metadata budgets, not this reserve. |
 | Queues and output | Existing 32 pending operations/actor, 64/room, 512 KiB outbound/stream and 16-MiB aggregate queue cap; 256 KiB/s output/peer and 1 MiB/s service. All lower applicable bounds win. |

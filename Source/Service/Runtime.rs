@@ -104,7 +104,7 @@ struct Shared {
     diagnostics: Option<Mutex<Budget>>,
     diagnostic_lines: AtomicUsize,
     authority_admission: admission::Admission,
-    federation_routes: Vec<Mutex<federation_origin::Outbound>>,
+    federation_routes: Vec<federation_origin::OutboundRoute>,
     stop: Arc<AtomicBool>,
 }
 impl Shared {

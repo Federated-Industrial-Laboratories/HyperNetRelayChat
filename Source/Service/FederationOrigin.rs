@@ -6,9 +6,17 @@ use crate::{
     service::federation::Route,
 };
 use serde::Serialize;
+#[path = "FederationAdmission.rs"]
+mod route_admission;
 #[path = "FederationWatch.rs"]
 mod watch;
 pub(super) use watch::Maintenance;
+
+pub(super) struct OutboundRoute {
+    agreement: AgreementRef,
+    admission: route_admission::Admission,
+    outbound: Mutex<Outbound>,
+}
 
 pub(super) struct Outbound {
     route: Route,
@@ -25,24 +33,36 @@ struct Connection {
     home_key: VerifyingKey,
     service_boot: Id,
 }
-pub(super) fn load(directory: &Path) -> Result<Vec<Mutex<Outbound>>> {
+pub(super) fn load(directory: &Path) -> Result<Vec<OutboundRoute>> {
     crate::service::federation::load(directory)
         .map_err(|_| Error::Configuration)?
         .into_iter()
         .map(|route| {
             let gateway_key = files::key(&route.gateway_key).map_err(|_| Error::Configuration)?;
             let attestor = files::key(&route.attestor_key).map_err(|_| Error::Configuration)?;
-            Ok(Mutex::new(Outbound {
-                route,
-                gateway_key,
-                attestor,
-                connected: None,
-                synchronized: Default::default(),
-                watch_after: None,
-                import_progress: Default::default(),
-            }))
+            Ok(OutboundRoute {
+                agreement: route.agreement,
+                admission: route_admission::Admission::default(),
+                outbound: Mutex::new(Outbound {
+                    route,
+                    gateway_key,
+                    attestor,
+                    connected: None,
+                    synchronized: Default::default(),
+                    watch_after: None,
+                    import_progress: Default::default(),
+                }),
+            })
         })
         .collect()
+}
+fn admission_error(error: route_admission::Error) -> Error {
+    match error {
+        route_admission::Error::Busy => Error::AuthorityAdmissionBusy,
+        route_admission::Error::Stopped => Error::AuthorityAdmissionStopped,
+        route_admission::Error::Expired => Error::AuthorityAdmissionExpired,
+        route_admission::Error::Unavailable => Error::State,
+    }
 }
 fn domain_error(error: federation::Error) -> Error {
     match error {
@@ -532,6 +552,19 @@ fn forward(
     reference: AgreementRef,
     end: u64,
 ) -> Result<Frame> {
+    let route = shared
+        .federation_routes
+        .iter()
+        .find(|route| route.agreement == reference)
+        .ok_or(Error::Configuration)?;
+    let stopped = || shared.stop.load(Ordering::Acquire) || !source.check_authority_supported();
+    let _turn = route
+        .admission
+        .foreground(end, stopped)
+        .map_err(admission_error)?;
+    // Admission owns the whole correlated exchange. Release the stream lock before its turn.
+    let mut outbound = route.outbound.try_lock().map_err(|_| Error::State)?;
+    // Waiting grants no authority: inspect the current agreement after admission.
     let state = shared
         .home
         .lock()
@@ -541,12 +574,10 @@ fn forward(
             shared.config.clock.sample().map_err(|_| Error::Clock)?,
         )
         .map_err(domain_error)?;
-    let mut outbound = shared
-        .federation_routes
-        .iter()
-        .filter_map(|route| route.try_lock().ok())
-        .find(|route| route.route.agreement == reference)
-        .ok_or(Error::AuthorityAdmissionBusy)?;
+    if stopped() {
+        return Err(Error::AuthorityAdmissionStopped);
+    }
+    remaining(end)?;
     let result = (|| {
         outbound.connect(shared, &state.agreement, end)?;
         let prepared = shared
@@ -898,12 +929,33 @@ pub(super) fn notify_withdrawal(
         return Ok(state);
     }
     let end = clock::boot_ms().map_err(|_| Error::Clock)? + 15000;
-    let mut outbound = shared
+    let route = shared
         .federation_routes
         .iter()
-        .filter_map(|route| route.try_lock().ok())
-        .find(|route| route.route.agreement == reference)
+        .find(|route| route.agreement == reference)
         .ok_or(Error::Configuration)?;
+    let stopped = || shared.stop.load(Ordering::Acquire);
+    let _turn = route
+        .admission
+        .foreground(end, stopped)
+        .map_err(admission_error)?;
+    let mut outbound = route.outbound.try_lock().map_err(|_| Error::State)?;
+    let state = shared
+        .home
+        .lock()
+        .map_err(|_| Error::State)?
+        .federation_inspect(reference)
+        .map_err(|_| Error::State)?;
+    if !state.withdrawn || state.agreement.origin != shared.config.descriptor.home {
+        return Err(Error::Authentication);
+    }
+    if state.barrier_position.is_some() {
+        return Ok(state);
+    }
+    if stopped() {
+        return Err(Error::AuthorityAdmissionStopped);
+    }
+    remaining(end)?;
     outbound.connect(shared, &state.agreement, end)?;
     let now = shared.config.clock.sample().map_err(|_| Error::Clock)?;
     let request_id = Id::random().map_err(|_| Error::State)?;
