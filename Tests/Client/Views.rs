@@ -43,7 +43,13 @@ fn partial(_room: RoomId, account: AccountId) -> CommunityPage {
 
 #[test]
 fn partial_policy_holds_history_and_continues_one_component_without_renewing_end() {
-    let (_fixture, mut worker, room) = worker();
+    let (fixture, mut worker, room) = worker();
+    worker
+        .client
+        .install_closed_view_test_session(&fixture.root);
+    worker.refresh_sent_room(room, true);
+    worker.refresh_sent_room(room, true);
+    assert!(worker.pending_room_due(Instant::now()));
     let mut state = CommunityAssembly::new(&mut worker, room).unwrap();
     let end = state.end;
     let issued = state.next_request().unwrap();
@@ -63,6 +69,11 @@ fn partial_policy_holds_history_and_continues_one_component_without_renewing_end
     );
     assert!(worker.snapshot.notifications.is_empty());
     assert!(worker.client.community_modes.is_empty());
+    assert!(worker.shared.snapshot.lock().unwrap().updating);
+    assert!(
+        worker.pending_room_due(Instant::now()),
+        "partial policy must not satisfy the queued view update"
+    );
     let next = state.next_request().unwrap();
     assert!(next.filters.is_some() && next.history.is_none() && next.restrictions.is_none());
     assert_eq!(next.context, Some(Id::from_bytes([81; 32])));

@@ -30,3 +30,10 @@ requirements. Update an exact-version mapping when necessary; do not carry a
 previous version's notice over silently. Package generation uses these pinned
 inputs offline and refuses missing or changed texts. It does not run network
 retrieval or infer a new licence from a filename.
+
+Release publication accompanies the binary and source archives with `SHA256SUMS`
+and an OpenSSH signature, `SHA256SUMS.sig`. The publisher principal is
+`HyperNetPublisher`; the signature namespace is `HyperNetRelayChatRelease1`.
+Publish `Documentation/PublisherKey.txt` as `PublisherKey.txt` beside the assets.
+The installation guide pins its fingerprint and verifies the signature before
+all listed checksums. The package tool does not load publisher signing keys.

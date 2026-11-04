@@ -39,6 +39,11 @@
           "label": "Linux installation and upgrades"
         },
         {
+          "source": "Documentation/PublisherKey.txt",
+          "slug": "publisher-key",
+          "label": "Release publisher key"
+        },
+        {
           "source": "Documentation/ConversationSetup.md",
           "slug": "setup",
           "label": "Service and client setup"

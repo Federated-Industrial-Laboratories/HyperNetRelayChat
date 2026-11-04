@@ -24,19 +24,34 @@ private directory permissions. There is no direct Internet fallback.
 
 ## Verify and unpack
 
-Obtain the archive and its SHA-256 from the authenticated release channel. A digest
-detects changed bytes; it does not independently establish who published them.
-Verify the archive before extracting it into a new user-owned directory. Keep the
-installation separate from every service directory, endpoint profile and guard.
+Obtain the selected binary archive, source archive, `SHA256SUMS`, its
+`SHA256SUMS.sig` OpenSSH signature, and `PublisherKey.txt` from the release channel.
+Verify the publisher key against this independently pinned SHA-256 fingerprint:
+
+`SHA256:XaKyGFow6q4DkZee5rQLUXN66AxQogVEtWb1sQS6m24`
+
+The checksum signature uses principal `HyperNetPublisher` and namespace
+`HyperNetRelayChatRelease1`. A downloaded key alone does not establish publisher
+identity. Confirm its fingerprint before creating the allowed-signers file, then
+verify the signature before checking every listed digest. Stop on any failure.
 
 ```sh
-sha256sum HRC-VERSION-linux-x86_64.tar.gz
+(
+set -eu
+test "$(ssh-keygen -lf PublisherKey.txt -E sha256 | awk '{print $2}')" = \
+  'SHA256:XaKyGFow6q4DkZee5rQLUXN66AxQogVEtWb1sQS6m24'
+awk '{ print "HyperNetPublisher " $0 }' PublisherKey.txt > HRC.allowed_signers
+ssh-keygen -Y verify -f HRC.allowed_signers -I HyperNetPublisher \
+  -n HyperNetRelayChatRelease1 -s SHA256SUMS.sig < SHA256SUMS
+sha256sum --check SHA256SUMS
 mkdir -m 700 /private/hrc-install
 tar --no-same-owner -xzf HRC-VERSION-linux-x86_64.tar.gz -C /private/hrc-install
 /private/hrc-install/HRC-VERSION-linux-x86_64/Bin/hrc --version
 /private/hrc-install/HRC-VERSION-linux-x86_64/Bin/hrc --help
+)
 ```
 
+Keep the installation separate from service directories, endpoint profiles and guards.
 Replace `VERSION` and the private path with the selected release and destination.
 Run `gui --profile PROFILE`, `tui --profile PROFILE` or the documented CLI command
 using that binary. Add its `Bin` directory to the user's chosen PATH if desired.

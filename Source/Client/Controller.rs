@@ -190,6 +190,7 @@ impl Controller {
                     poll_room: 0,
                     refresh_cycle: None,
                     refresh_yield: false,
+                    pending_room: None,
                 };
                 if let Err(e) = w.deliveries() {
                     w.error(e);
@@ -348,6 +349,11 @@ fn bounded_scope(g: &delegation::Create) -> bool {
         && g.operations.len() <= 16
         && g.purpose.len() <= 1024
 }
+struct PendingRoomRefresh {
+    room: RoomId,
+    oldest: Instant,
+    committed: u8,
+}
 struct Worker {
     client: Client,
     snapshot: Snapshot,
@@ -364,6 +370,7 @@ struct Worker {
     poll_room: usize,
     refresh_cycle: Option<views::RefreshCycle>,
     refresh_yield: bool,
+    pending_room: Option<PendingRoomRefresh>,
 }
 impl Worker {
     fn run(&mut self, receiver: mpsc::Receiver<Queued>, local_receiver: mpsc::Receiver<Queued>) {
@@ -378,6 +385,13 @@ impl Worker {
             }
             if self.shared.disconnect.swap(false, Ordering::AcqRel) {
                 self.offline();
+            }
+            // A finite send burst cannot keep its first room update waiting by
+            // replacing the age with each newer commit. Network work already in
+            // flight retains its own original deadline and cancellation.
+            if self.pending_room_due(Instant::now()) {
+                self.flush_pending_room();
+                continue;
             }
             // Preserve the bounded local lane before servicing due metadata, even
             // with a busy command queue. Recheck controls and original admission
@@ -404,6 +418,12 @@ impl Worker {
                     }
                     Admission::Run => {}
                 }
+                if !self.pending_room_allows(&queued.command) {
+                    self.flush_pending_room();
+                    // A failed view can change connection state; this held command
+                    // must pass admission again before its effect begins.
+                    continue;
+                }
                 // A reconnect can finish after admission expiry; the check above is
                 // repeated before this one consumption, never after an effect begins.
                 let queued = held.take().expect("held command");
@@ -429,7 +449,10 @@ impl Worker {
                     held = Some(queued);
                 }
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
-                Err(mpsc::RecvTimeoutError::Timeout) => self.tick(),
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    self.flush_pending_room();
+                    self.tick();
+                }
             }
         }
         self.offline();
@@ -616,11 +639,15 @@ impl Worker {
             self.snapshot.status = None;
         }
         self.snapshot.revision = self.snapshot.revision.wrapping_add(1);
+        // Public progress includes a deferred room update. Keep the worker's
+        // own flag reserved for update_view nesting and active read lifetime.
+        let mut published = self.snapshot.clone();
+        published.updating |= self.pending_room.is_some();
         *self
             .shared
             .snapshot
             .lock()
-            .unwrap_or_else(|e| e.into_inner()) = Arc::new(self.snapshot.clone());
+            .unwrap_or_else(|e| e.into_inner()) = Arc::new(published);
     }
     fn stale(&mut self) {
         if let Some(room) = &mut self.snapshot.selected {
@@ -632,6 +659,7 @@ impl Worker {
         self.snapshot.federation_privacy = None;
     }
     fn offline(&mut self) {
+        self.clear_pending_room();
         self.refresh_cycle = None;
         self.desired = false;
         self.client.disconnect();
@@ -644,6 +672,7 @@ impl Worker {
         self.publish();
     }
     fn error(&mut self, e: Error) {
+        self.clear_pending_room();
         self.refresh_cycle = None;
         self.snapshot.status = Some(Status {
             request_id: self.request,
@@ -682,6 +711,7 @@ impl Worker {
         }
     }
     fn connect(&mut self) -> Result<()> {
+        self.clear_pending_room();
         self.refresh_cycle = None;
         let reuse = matches!(self.snapshot.connection, ConnectionState::Backoff { .. })
             && self.client.session().is_ok();

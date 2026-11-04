@@ -516,10 +516,14 @@ impl Worker {
         self.delivery_room = Some(room);
         self.remember(&action)?;
         let response = self.client.execute_controller_send(prepared)?;
+        let direct_commit = grant.is_none()
+            && matches!(
+                response.response.outcome,
+                Outcome::Committed { event: Some(_), .. }
+            );
         self.response_observed(response.response, response.exchange_ns)?;
         self.clear_matching_draft(&action)?;
-        let view = self.refresh_after_send(room);
-        self.finish_view(view);
+        self.refresh_sent_room(room, direct_commit);
         Ok(())
     }
     pub(super) fn search(&mut self, query: messaging::Search, append: bool) -> Result<()> {

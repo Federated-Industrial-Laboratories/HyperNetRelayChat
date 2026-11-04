@@ -29,7 +29,9 @@ A failed full attempt also waits that interval before another metadata attempt;
 connection backoff can require a longer wait. Failure never makes a view current.
 
 Snapshots distinguish `updating` from stale room or inspection state. The GUI and
-TUI show "refreshing views" while reads run. Starting an ordinary refresh retains
+TUI show "refreshing views" while reads run or a committed community send has a
+bounded room update pending. Pending work does not make retained policy current
+and does not extend the lifetime of any authority observation. Starting an ordinary refresh retains
 the last successfully synchronized view; it does not itself signal lost access.
 Cached or already-stale views remain stale until their required current reads
 succeed. A failed view scope marks its retained views stale, including local
@@ -139,7 +141,19 @@ local persistence succeeds. A later room, grant or inspection refresh can fail
 without changing that confirmed outcome or replaying the effect. The original
 durable delivery is published before follow-up view reads start. A normal send
 refreshes recipient filters, the affected room and the companion privacy
-observation. Unrelated room-list, account, service, grant and agent metadata wait
+observation. Direct committed sends to the selected, unfocused local community
+room may share this work when bounded views are negotiated and no history gap is
+present. At most two committed sends share one pull. The first pending update's
+one-second age is never reset by newer sends; the next worker turn flushes at
+that age or after the second commit. An in-flight operation keeps its existing
+deadline and cancellation checks. Idle time and an incompatible room or context
+command flush sooner. Reserved disconnect and shutdown can discard pending view
+work and leave the room stale; they never replay a committed effect.
+Delegated and approval sends, confidential conversations, focused history,
+background-room sends and unsupported view paths retain their immediate refresh.
+The existing finite metadata turns and five-second cadence continue between
+commands, and a targeted pull supersedes its matching partial room assembly.
+Unrelated room-list, account, service, grant and agent metadata wait
 until the existing full-refresh deadline. The affected-room pull retains current
 room authorization, filtered history and restriction inspection; focused history
 also receives its current context check. Membership and policy mutations still

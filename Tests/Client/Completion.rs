@@ -54,6 +54,7 @@ pub(super) fn worker() -> (Fixture, Worker, RoomId) {
         poll_room: 0,
         refresh_cycle: None,
         refresh_yield: false,
+        pending_room: None,
     };
     worker.select(room).unwrap();
     worker.snapshot.selected.as_mut().unwrap().stale = false;

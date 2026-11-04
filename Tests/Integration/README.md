@@ -26,6 +26,12 @@ separate limits; neither overrides a lower route profile. These are explicit
 fixture policy settings, not changes to HyperNet's capacity implementation or
 HRC's performance thresholds.
 
+The installed HRC fixture selects a 1,200-second route and stream ceiling so
+setup and the complete workload fit within the same consented transport policy.
+Other installed fixture workflows retain their 120-second ceiling. The
+30-second idle limit and each operation, readiness and workload deadline remain
+unchanged; the longer route ceiling does not renew expired action authority.
+
 After offline profile validation, the eight interactive profiles start directly
 in production Controllers. Their ordinary commands connect, join the room, set
 recipient ignore and select the room. A filter-bound cursor gap receives one
