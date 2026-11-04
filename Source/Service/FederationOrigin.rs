@@ -79,6 +79,47 @@ fn domain_error(error: federation::Error) -> Error {
         federation::Error::Storage(_) => Error::State,
     }
 }
+#[derive(Clone, Copy)]
+enum OriginAuthorityFailure {
+    IdentityCheckpointChanged,
+    IdentityAuthorityRead,
+    IdentityAuthorityBeforePage,
+    IdentityPageUnavailable,
+    IdentityAuthorityAfterPage,
+    ChallengeNotCurrent,
+    OriginAuthorityRead,
+    AssertionEvidenceUnavailable,
+    AssertionClockOrBinding,
+    AssertionLifetime,
+    AssertionPrivacy,
+    AssertionNoLongerPermitted,
+}
+impl OriginAuthorityFailure {
+    fn code(self) -> &'static str {
+        match self {
+            Self::IdentityCheckpointChanged => "IdentityCheckpointChanged",
+            Self::IdentityAuthorityRead => "IdentityAuthorityRead",
+            Self::IdentityAuthorityBeforePage => "IdentityAuthorityBeforePage",
+            Self::IdentityPageUnavailable => "IdentityPageUnavailable",
+            Self::IdentityAuthorityAfterPage => "IdentityAuthorityAfterPage",
+            Self::ChallengeNotCurrent => "ChallengeNotCurrent",
+            Self::OriginAuthorityRead => "OriginAuthorityRead",
+            Self::AssertionEvidenceUnavailable => "AssertionEvidenceUnavailable",
+            Self::AssertionClockOrBinding => "AssertionClockOrBinding",
+            Self::AssertionLifetime => "AssertionLifetime",
+            Self::AssertionPrivacy => "AssertionPrivacy",
+            Self::AssertionNoLongerPermitted => "AssertionNoLongerPermitted",
+        }
+    }
+}
+fn authority_failure(
+    shared: &Shared,
+    reason: OriginAuthorityFailure,
+    check: Option<&crate::hypernet::AuthorityCheck>,
+) -> Error {
+    shared.report_check("FederationOriginAuthorityFailure", reason.code(), check);
+    Error::Authority
+}
 fn key(value: Id) -> Result<VerifyingKey> {
     VerifyingKey::from_bytes(value.as_bytes()).map_err(|_| Error::Authentication)
 }
@@ -327,7 +368,13 @@ fn source_assertion(
     let start = clock::boot_ms().map_err(|_| Error::Clock)?;
     let now = shared.config.clock.sample().map_err(|_| Error::Clock)?;
     let after = clock::boot_ms().map_err(|_| Error::Clock)?;
-    let evidence = check.attestation().ok_or(Error::Authority)?;
+    let evidence = check.attestation().ok_or_else(|| {
+        authority_failure(
+            shared,
+            OriginAuthorityFailure::AssertionEvidenceUnavailable,
+            Some(check),
+        )
+    })?;
     let identity = evidence.identity();
     let Peer::Incoming(peer) = stream.peer() else {
         return Err(Error::Authentication);
@@ -348,7 +395,11 @@ fn source_assertion(
         || identity.session != stream.peer().session()
         || identity.generation != stream.peer().generation()
     {
-        return Err(Error::Authority);
+        return Err(authority_failure(
+            shared,
+            OriginAuthorityFailure::AssertionClockOrBinding,
+            Some(check),
+        ));
     }
     let authority = evidence.authority();
     let not_after = now
@@ -357,7 +408,11 @@ fn source_assertion(
         .min(authority.expires_at_ms())
         .min(challenge.expires_ms);
     if not_after <= now.upper_ms || not_after.saturating_sub(now.lower_ms) > 5000 {
-        return Err(Error::Authority);
+        return Err(authority_failure(
+            shared,
+            OriginAuthorityFailure::AssertionLifetime,
+            Some(check),
+        ));
     }
     let assertion = OriginAssertion {
         profile: FEDERATION_PROFILE,
@@ -396,7 +451,17 @@ fn source_assertion(
             expires_at_ms: authority.expires_at_ms(),
         },
         checkpoints: prepared.checkpoints.clone(),
-        source_privacy: super::federation_gateway::privacy(check)?,
+        source_privacy: super::federation_gateway::privacy(check).map_err(|error| {
+            if matches!(error, Error::Authority) {
+                authority_failure(
+                    shared,
+                    OriginAuthorityFailure::AssertionPrivacy,
+                    Some(check),
+                )
+            } else {
+                error
+            }
+        })?,
         source_evaluated_ms: now.lower_ms,
         source_not_after_ms: not_after,
         source_uncertainty_ms: uncertainty,
@@ -412,7 +477,11 @@ fn source_assertion(
         )
         .map_err(domain_error)?;
     if !evidence.permitted() {
-        return Err(Error::Authority);
+        return Err(authority_failure(
+            shared,
+            OriginAuthorityFailure::AssertionNoLongerPermitted,
+            Some(check),
+        ));
     }
     sign_origin_assertion(&assertion, attestor)
         .map(Blob)
@@ -458,7 +527,11 @@ fn export_proofs(
             verify_origin_identity_checkpoint(&signed.0, &shared.signer.verifying_key())
                 .map_err(|_| Error::Authentication)?;
         if checkpoint.digest() != reference.checkpoint_digest {
-            return Err(Error::Authority);
+            return Err(authority_failure(
+                shared,
+                OriginAuthorityFailure::IdentityCheckpointChanged,
+                None,
+            ));
         }
         if outbound.synchronized.get(&reference.account) == Some(&checkpoint.digest()) {
             continue;
@@ -474,15 +547,31 @@ fn export_proofs(
             .filter(|(digest, _)| *digest == checkpoint.digest())
             .map_or(0, |(_, after)| *after);
         loop {
-            let check = shared.check_authority(
-                source,
-                prepared.subject.digest(),
-                Some(end),
-                &Cancellation::default(),
-                "FederationIdentityExport",
-            )?;
+            let check = shared
+                .check_authority(
+                    source,
+                    prepared.subject.digest(),
+                    Some(end),
+                    &Cancellation::default(),
+                    "FederationIdentityExport",
+                )
+                .map_err(|error| {
+                    if matches!(error, Error::Authority) {
+                        authority_failure(
+                            shared,
+                            OriginAuthorityFailure::IdentityAuthorityRead,
+                            None,
+                        )
+                    } else {
+                        error
+                    }
+                })?;
             if !current(&check, Some(end)) {
-                return Err(Error::Authority);
+                return Err(authority_failure(
+                    shared,
+                    OriginAuthorityFailure::IdentityAuthorityBeforePage,
+                    Some(&check),
+                ));
             }
             let page = {
                 let mut home = shared.home.lock().map_err(|_| Error::State)?;
@@ -496,12 +585,22 @@ fn export_proofs(
                     4,
                     now,
                 )
-                .map_err(|_| Error::Authority)?
+                .map_err(|_| {
+                    authority_failure(
+                        shared,
+                        OriginAuthorityFailure::IdentityPageUnavailable,
+                        Some(&check),
+                    )
+                })?
             };
             let verified = verify_origin_identity_page(&page.0, &shared.signer.verifying_key())
                 .map_err(|_| Error::Authentication)?;
             if !current(&check, Some(end)) {
-                return Err(Error::Authority);
+                return Err(authority_failure(
+                    shared,
+                    OriginAuthorityFailure::IdentityAuthorityAfterPage,
+                    Some(&check),
+                ));
             }
             let complete: bool = outbound.control(
                 shared,
@@ -641,19 +740,31 @@ fn forward(
         }
         let now = shared.config.clock.sample().map_err(|_| Error::Clock)?;
         if !now.permits(c.issued_ms, c.expires_ms) {
-            return Err(Error::Authority);
+            return Err(authority_failure(
+                shared,
+                OriginAuthorityFailure::ChallengeNotCurrent,
+                None,
+            ));
         }
         let end = end.min(
             now.boot_ms
                 .saturating_add(c.expires_ms.saturating_sub(now.upper_ms)),
         );
-        let check = shared.check_authority(
-            source,
-            prepared.subject.digest(),
-            Some(end),
-            &Cancellation::default(),
-            "FederationOriginAuthority",
-        )?;
+        let check = shared
+            .check_authority(
+                source,
+                prepared.subject.digest(),
+                Some(end),
+                &Cancellation::default(),
+                "FederationOriginAuthority",
+            )
+            .map_err(|error| {
+                if matches!(error, Error::Authority) {
+                    authority_failure(shared, OriginAuthorityFailure::OriginAuthorityRead, None)
+                } else {
+                    error
+                }
+            })?;
         let assertion = source_assertion(
             shared,
             source,
@@ -855,6 +966,23 @@ pub(super) fn action(
 }
 
 // This origin-signed result describes only forwarding availability. It is never a home operation outcome.
+fn refusal_outcome(error: Error) -> Outcome {
+    let (code, detail, retry_after_ms) = match error {
+        Error::ForwardRefused {
+            code,
+            detail,
+            retry_after_ms,
+        } => (code, detail, retry_after_ms),
+        Error::AuthorityAdmissionBusy => (ErrorCode::Overloaded, error.code().into(), Some(1000)),
+        Error::Authentication | Error::Frame => (ErrorCode::Denied, error.code().into(), None),
+        _ => (ErrorCode::Unavailable, error.code().into(), Some(1000)),
+    };
+    Outcome::Refused {
+        code,
+        detail,
+        retry_after_ms,
+    }
+}
 fn refusal(
     shared: &Shared,
     source: &Stream,
@@ -877,16 +1005,7 @@ fn refusal(
             action_digest,
         ),
     };
-    let (code, detail, retry_after_ms) = match error {
-        Error::ForwardRefused {
-            code,
-            detail,
-            retry_after_ms,
-        } => (code, detail, retry_after_ms),
-        Error::AuthorityAdmissionBusy => (ErrorCode::Overloaded, error.code().into(), Some(1000)),
-        Error::Authentication | Error::Frame => (ErrorCode::Denied, error.code().into(), None),
-        _ => (ErrorCode::Unavailable, error.code().into(), Some(1000)),
-    };
+    let outcome = refusal_outcome(error);
     let now = shared.config.clock.sample().map_err(|_| Error::Clock)?;
     let response = FederationControl::Result {
         profile: FEDERATION_PROFILE,
@@ -896,11 +1015,7 @@ fn refusal(
         request,
         operation,
         request_digest,
-        outcome: Outcome::Refused {
-            code,
-            detail,
-            retry_after_ms,
-        },
+        outcome,
         created_ms: now.lower_ms,
         expires_ms: now.lower_ms + 5000,
     };
@@ -1003,3 +1118,7 @@ pub(super) fn notify_withdrawal(
         )
         .map_err(|_| Error::Authority)
 }
+
+#[cfg(test)]
+#[path = "../../Tests/Service/FederationOrigin.rs"]
+mod tests;

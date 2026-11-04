@@ -673,6 +673,19 @@ addresses are not actor identities. Diagnostic output contains fixed categories
 and bounded references, never message plaintext, keys or admission secrets.
 No response automatically generates another response or onward federation event.
 
+When service diagnostics are enabled, failed origin authority conversions emit
+`FederationOriginAuthorityFailure` through the existing rate-limited, 128-record
+service budget. Fixed reason codes distinguish identity checkpoint changes,
+identity-export checks and page failures, challenge validity, and assertion
+evidence, binding, lifetime, privacy and final currentness. Records include only
+the existing authority freshness fields when a check was returned. Checkpoint
+mismatch, challenge expiry and failed check calls have no `AuthorityCheck`, so
+their authority field is null. No identity, message, key or nonce data is added.
+Successful forwarding emits no such record. These local categories do not change
+the signed public `Unavailable` / `CurrentAuthorityUnavailable` refusal or its
+retry guidance. Missing diagnostic output is not evidence of successful authority;
+the existing budget and best-effort sink can omit records.
+
 Implementation qualification must demonstrate two independently administered
 networks and distinct actual gateway admissions, including refusal on either
 leg. Representative scenarios cover foreign direct and delegated sends; exact
