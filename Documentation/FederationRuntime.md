@@ -421,6 +421,27 @@ source check. The final home authorization is before the earliest bound.
 Durable completion may follow authorization; a late response does not imply
 that an effect was rejected.
 
+An origin can recertify the same prepared subject once when a currently permitted
+receipt leaves no safe assertion lifetime before forwarding. For an Action,
+it can also recertify once after an exactly bound, home-signed
+`Refused/Unavailable/SourceAuthorityExpired` response. This response rejects the
+source evidence before effect dispatch or challenge consumption. Both cases
+share one retry allowance, the same home challenge, exact Action bytes and
+original clipped forwarding end. The origin rechecks current account,
+checkpoint and endpoint generations before the new authority call and before
+signing. It honours the signed retry delay within that end; insufficient time
+returns the original refusal, including expiry while waiting to retry. That
+known refusal is retained only until the new attempt starts; it cannot replace
+an uncertain outcome from the new attempt. No new challenge or retry window is
+created.
+Expired or consumed challenges, changed identity, denial, unknown outcomes,
+transport failures, invalid signatures and other refusal details do not enter
+this path. Session-control destination refusals retain their existing handling.
+A second short receipt or source-expiry response ends the attempt. The new check
+never extends the old receipt, and every destination effect check remains in
+place. This bounded recovery cannot guarantee availability within the remaining
+permission lifetime.
+
 `sourcePrivacy` is a closed normalized record from the verified fresh incoming
 observation: `{endpointMode, transportProtection, relayArrival, provenance,
 relayService, attachmentProfileDigest, physicalIndependenceVerified,

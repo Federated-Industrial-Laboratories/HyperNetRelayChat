@@ -395,7 +395,7 @@ fn source_assertion(
     challenge: &Verified<FederationChallenge>,
     check: &crate::hypernet::AuthorityCheck,
     attestor: &SigningKey,
-) -> Result<Blob> {
+) -> Result<Option<Blob>> {
     let start = clock::boot_ms().map_err(|_| Error::Clock)?;
     let now = shared.config.clock.sample().map_err(|_| Error::Clock)?;
     let after = clock::boot_ms().map_err(|_| Error::Clock)?;
@@ -425,15 +425,25 @@ fn source_assertion(
         ));
     }
     let authority = evidence.authority();
-    let (uncertainty, not_after) = assertion_time(
+    let (uncertainty, not_after) = match assertion_time(
         now,
         start,
         after,
         evidence.not_after_boot_ms(),
         authority.expires_at_ms(),
         challenge.expires_ms,
-    )
-    .map_err(|reason| authority_failure(shared, reason, Some(check)))?;
+    ) {
+        Ok(bounds) => bounds,
+        Err(OriginAuthorityFailure::AssertionLifetime) => {
+            authority_failure(
+                shared,
+                OriginAuthorityFailure::AssertionLifetime,
+                Some(check),
+            );
+            return Ok(None);
+        }
+        Err(reason) => return Err(authority_failure(shared, reason, Some(check))),
+    };
     let assertion = OriginAssertion {
         profile: FEDERATION_PROFILE,
         origin: shared.config.descriptor.home,
@@ -504,7 +514,7 @@ fn source_assertion(
         ));
     }
     sign_origin_assertion(&assertion, attestor)
-        .map(Blob)
+        .map(|bytes| Some(Blob(bytes)))
         .map_err(|_| Error::Frame)
 }
 
@@ -663,6 +673,110 @@ fn export_proofs(
     Ok(())
 }
 
+// Only these two pre-effect expiry cases may request one new certification.
+// The home challenge and exact prepared subject stay owned by the caller.
+enum SourceAttempt {
+    Complete(Frame),
+    LocalLifetime,
+    HomeExpired {
+        response: Frame,
+        retry_after_ms: Option<u64>,
+    },
+}
+fn recertify_source(
+    end: u64,
+    stopped: impl Fn() -> bool,
+    mut attempt: impl FnMut(u64) -> Result<SourceAttempt>,
+) -> Result<Frame> {
+    let mut refused = None;
+    for number in 0..2 {
+        if stopped() {
+            return Err(Error::AuthorityAdmissionStopped);
+        }
+        if let Err(error) = remaining(end) {
+            if matches!(error, Error::HandshakeExpired)
+                && let Some(response) = refused.take()
+            {
+                return Ok(response);
+            }
+            return Err(error);
+        }
+        // Once the next attempt starts, its outcome may be uncertain. An older
+        // pre-effect refusal can no longer describe that new attempt.
+        drop(refused.take());
+        match attempt(end)? {
+            SourceAttempt::Complete(response) => return Ok(response),
+            SourceAttempt::LocalLifetime if number == 0 => {}
+            SourceAttempt::LocalLifetime => return Err(Error::Authority),
+            SourceAttempt::HomeExpired {
+                response,
+                retry_after_ms,
+            } => {
+                if number != 0 {
+                    return Ok(response);
+                }
+                let now = clock::boot_ms().map_err(|_| Error::Clock)?;
+                let retry_at = now.saturating_add(retry_after_ms.unwrap_or(0));
+                if retry_at >= end {
+                    return Ok(response);
+                }
+                refused = Some(response);
+                loop {
+                    if stopped() {
+                        return Err(Error::AuthorityAdmissionStopped);
+                    }
+                    let left = retry_at.saturating_sub(clock::boot_ms().map_err(|_| Error::Clock)?);
+                    if left == 0 {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(left.min(25)));
+                }
+            }
+        }
+    }
+    unreachable!("one source recertification is bounded")
+}
+fn forwarded_action_attempt(
+    response: Frame,
+    action: &VerifiedAction,
+    home_key: &VerifyingKey,
+) -> Result<SourceAttempt> {
+    let verified = if action.action().operation.is_crypto_transition() {
+        if response.kind != FrameKind::CryptoResponse {
+            return Err(Error::Frame);
+        }
+        verify_crypto_response(&response.payload, home_key)
+    } else {
+        if response.kind != FrameKind::Response {
+            return Err(Error::Frame);
+        }
+        verify_response(&response.payload, home_key)
+    }
+    .map_err(|_| Error::Authentication)?;
+    let result = verified.value();
+    if result.home != action.action().home
+        || result.operation_id != action.action().operation_id
+        || result.action_digest != action.digest()
+    {
+        return Err(Error::Authentication);
+    }
+    // evidence_in rejects this exact detail before dispatch or challenge use.
+    // Final-effect guard failures have a different detail and are not retried.
+    if let Outcome::Refused {
+        code: ErrorCode::Unavailable,
+        detail,
+        retry_after_ms,
+    } = &result.outcome
+        && detail == "SourceAuthorityExpired"
+    {
+        return Ok(SourceAttempt::HomeExpired {
+            response,
+            retry_after_ms: *retry_after_ms,
+        });
+    }
+    Ok(SourceAttempt::Complete(response))
+}
+
 fn forward(
     shared: &Shared,
     source: &Stream,
@@ -770,141 +884,143 @@ fn forward(
             now.boot_ms
                 .saturating_add(c.expires_ms.saturating_sub(now.upper_ms)),
         );
-        let check = shared
-            .check_authority(
-                source,
-                prepared.subject.digest(),
-                Some(end),
-                &Cancellation::default(),
-                "FederationOriginAuthority",
-            )
-            .map_err(|error| {
-                if matches!(error, Error::Authority) {
-                    authority_failure(shared, OriginAuthorityFailure::OriginAuthorityRead, None)
-                } else {
-                    error
-                }
-            })?;
-        let assertion = source_assertion(
-            shared,
-            source,
-            session,
-            &prepared,
-            &verified,
-            &check,
-            &outbound.attestor,
-        )?;
-        match subject {
-            SourceSubject::Session(request) => {
-                let ready: Blob = outbound.control(
+        recertify_source(end, stopped, |end| {
+            let now = shared.config.clock.sample().map_err(|_| Error::Clock)?;
+            if !now.permits(c.issued_ms, c.expires_ms) {
+                return Err(authority_failure(
                     shared,
-                    &state.agreement,
-                    Operation::FederationSession,
-                    &RemoteSessionExchange {
-                        request,
-                        endpoint_binding: prepared.endpoint_binding,
-                        challenge,
-                        origin_assertion: assertion,
-                    },
-                    end,
-                )?;
-                let home_key = &outbound
-                    .connected
-                    .as_ref()
-                    .ok_or(Error::Transport)?
-                    .home_key;
-                let verified = verify_remote_session_ready(&ready.0, home_key)
-                    .map_err(|_| Error::Authentication)?;
-                let FederationSubject::Session {
-                    request_digest,
-                    request,
-                } = prepared.subject
-                else {
-                    return Err(Error::Frame);
-                };
-                if verified.value().home != state.agreement.home
-                    || verified.value().origin != state.agreement.origin
-                    || verified.value().agreement != reference
-                    || verified.value().admission != admission.reference
-                    || verified.value().request != request
-                    || verified.value().request_digest != request_digest
-                    || verified.value().acting != prepared.acting
-                {
-                    return Err(Error::Authentication);
-                }
-                Frame::new(FrameKind::FederationControl, ready.0).map_err(|_| Error::Frame)
+                    OriginAuthorityFailure::ChallengeNotCurrent,
+                    None,
+                ));
             }
-            SourceSubject::Action(action) => {
-                let verified_action = verify_action(&action.0, &key(session.signer)?)
-                    .map_err(|_| Error::Authentication)?;
-                let crypto = verified_action.action().operation.is_crypto_transition();
-                let envelope = FederationEnvelope {
-                    profile: FEDERATION_PROFILE,
-                    admission: admission.reference,
-                    agreement: reference,
-                    action,
-                    endpoint_binding: prepared.endpoint_binding,
-                    challenge,
-                    origin_assertion: assertion,
-                };
-                let connection = outbound.connected.as_ref().ok_or(Error::Transport)?;
-                if !current(&check, Some(end)) {
-                    return Err(Error::Authority);
-                }
-                frame(
-                    &connection.stream,
-                    if crypto {
-                        FrameKind::CryptoFederation
+            shared
+                .home
+                .lock()
+                .map_err(|_| Error::State)?
+                .federation_origin_current(&prepared, session, now)
+                .map_err(domain_error)?;
+            let check = shared
+                .check_authority(
+                    source,
+                    prepared.subject.digest(),
+                    Some(end),
+                    &Cancellation::default(),
+                    "FederationOriginAuthority",
+                )
+                .map_err(|error| {
+                    if matches!(error, Error::Authority) {
+                        authority_failure(shared, OriginAuthorityFailure::OriginAuthorityRead, None)
                     } else {
-                        FrameKind::Federation
-                    },
-                    encode_federation(&envelope).map_err(|_| Error::Frame)?,
-                    remaining(end)?,
-                )?;
-                // Durable completion may follow the last authorization; a late response remains an uncertain outcome.
-                if verified_action.action().operation == Operation::SearchQuery {
-                    loop {
-                        let interrupted = match source.wait_readable(Duration::from_millis(1)) {
-                            Ok(false) => false,
-                            Ok(true) | Err(_) => true,
-                        };
-                        if interrupted || shared.stop.load(Ordering::Acquire) {
-                            connection.stream.close();
-                            return Err(Error::Transport);
-                        }
-                        if connection
-                            .stream
-                            .wait_readable(remaining(end)?.min(Duration::from_millis(25)))
-                            .map_err(|_| Error::Transport)?
-                        {
-                            break;
-                        }
+                        error
                     }
-                }
-                let response = io::receive(&connection.stream, Duration::from_secs(5))
-                    .map_err(|_| Error::Transport)?;
-                let result = if crypto {
-                    if response.kind != FrameKind::CryptoResponse {
+                })?;
+            let Some(assertion) = source_assertion(
+                shared,
+                source,
+                session,
+                &prepared,
+                &verified,
+                &check,
+                &outbound.attestor,
+            )?
+            else {
+                return Ok(SourceAttempt::LocalLifetime);
+            };
+            match &subject {
+                SourceSubject::Session(request) => {
+                    let ready: Blob = outbound.control(
+                        shared,
+                        &state.agreement,
+                        Operation::FederationSession,
+                        &RemoteSessionExchange {
+                            request: request.clone(),
+                            endpoint_binding: prepared.endpoint_binding.clone(),
+                            challenge: challenge.clone(),
+                            origin_assertion: assertion,
+                        },
+                        end,
+                    )?;
+                    let home_key = &outbound
+                        .connected
+                        .as_ref()
+                        .ok_or(Error::Transport)?
+                        .home_key;
+                    let verified = verify_remote_session_ready(&ready.0, home_key)
+                        .map_err(|_| Error::Authentication)?;
+                    let FederationSubject::Session {
+                        request_digest,
+                        request,
+                    } = &prepared.subject
+                    else {
                         return Err(Error::Frame);
+                    };
+                    if verified.value().home != state.agreement.home
+                        || verified.value().origin != state.agreement.origin
+                        || verified.value().agreement != reference
+                        || verified.value().admission != admission.reference
+                        || verified.value().request != *request
+                        || verified.value().request_digest != *request_digest
+                        || verified.value().acting != prepared.acting
+                    {
+                        return Err(Error::Authentication);
                     }
-                    verify_crypto_response(&response.payload, &connection.home_key)
-                } else {
-                    if response.kind != FrameKind::Response {
-                        return Err(Error::Frame);
+                    Frame::new(FrameKind::FederationControl, ready.0)
+                        .map(SourceAttempt::Complete)
+                        .map_err(|_| Error::Frame)
+                }
+                SourceSubject::Action(action) => {
+                    let verified_action = verify_action(&action.0, &key(session.signer)?)
+                        .map_err(|_| Error::Authentication)?;
+                    let crypto = verified_action.action().operation.is_crypto_transition();
+                    let envelope = FederationEnvelope {
+                        profile: FEDERATION_PROFILE,
+                        admission: admission.reference,
+                        agreement: reference,
+                        action: action.clone(),
+                        endpoint_binding: prepared.endpoint_binding.clone(),
+                        challenge: challenge.clone(),
+                        origin_assertion: assertion,
+                    };
+                    let connection = outbound.connected.as_ref().ok_or(Error::Transport)?;
+                    if !current(&check, Some(end)) {
+                        return Err(Error::Authority);
                     }
-                    verify_response(&response.payload, &connection.home_key)
+                    frame(
+                        &connection.stream,
+                        if crypto {
+                            FrameKind::CryptoFederation
+                        } else {
+                            FrameKind::Federation
+                        },
+                        encode_federation(&envelope).map_err(|_| Error::Frame)?,
+                        remaining(end)?,
+                    )?;
+                    // Durable completion may follow the last authorization; a late response remains an uncertain outcome.
+                    if verified_action.action().operation == Operation::SearchQuery {
+                        loop {
+                            let interrupted = match source.wait_readable(Duration::from_millis(1)) {
+                                Ok(false) => false,
+                                Ok(true) | Err(_) => true,
+                            };
+                            if interrupted || shared.stop.load(Ordering::Acquire) {
+                                connection.stream.close();
+                                return Err(Error::Transport);
+                            }
+                            if connection
+                                .stream
+                                .wait_readable(remaining(end)?.min(Duration::from_millis(25)))
+                                .map_err(|_| Error::Transport)?
+                            {
+                                break;
+                            }
+                        }
+                    }
+                    let response = io::receive(&connection.stream, Duration::from_secs(5))
+                        .map_err(|_| Error::Transport)?;
+                    forwarded_action_attempt(response, &verified_action, &connection.home_key)
                 }
-                .map_err(|_| Error::Authentication)?;
-                let action = verified_action.action();
-                if result.value().home != action.home
-                    || result.value().operation_id != action.operation_id
-                    || result.value().action_digest != verified_action.digest()
-                {
-                    return Err(Error::Authentication);
-                }
-                Ok(response)
             }
-        }
+        })
     })();
     if let Err(error) = &result {
         outbound.failed(error);
