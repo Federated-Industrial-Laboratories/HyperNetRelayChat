@@ -24,13 +24,25 @@ metadata refresh cannot occupy every intervening command turn. Initial connectio
 and membership or policy changes still complete their required refresh before
 reporting readiness.
 Room selection and targeted post-send reads do not postpone that deadline.
+A selected community page with authenticated `has_more` schedules a finite
+catch-up burst without waiting for the next metadata interval. Each turn reads
+one bounded grouped component, then yields to queued commands; due metadata has
+priority. Up to eight additional history pages share the first page's original
+ten-second end, including time spent on intervening work. Incomplete recipient
+policy cannot publish history. Each completed page advances the authenticated
+cursor; an unchanged position with `has_more` is rejected. Initial catch-up does
+not emit live notifications. A completed command pull supersedes matching partial
+work without extending its end or page allowance. Cancellation, disconnection,
+room or focused-context changes, gaps and failures stop continuation. A finite
+burst that exhausts its time or page allowance leaves `has_more` visible; the next
+ordinary refresh can resume it. No read grants authority to a subsequent read.
 A slow full refresh does not schedule an immediate second full refresh.
 A failed full attempt also waits that interval before another metadata attempt;
 connection backoff can require a longer wait. Failure never makes a view current.
 
 Snapshots distinguish `updating` from stale room or inspection state. The GUI and
 TUI show "refreshing views" while reads run or a committed community send has a
-bounded room update pending. Pending work does not make retained policy current
+bounded room update or selected-room catch-up pending. Pending work does not make retained policy current
 and does not extend the lifetime of any authority observation. Starting an ordinary refresh retains
 the last successfully synchronized view; it does not itself signal lost access.
 Cached or already-stale views remain stale until their required current reads

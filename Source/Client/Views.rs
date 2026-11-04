@@ -195,6 +195,7 @@ pub(super) struct CommunityAssembly {
     request: CommunityRequest,
     rounds: u8,
     restart_available: bool,
+    initial_cursor: Option<Blob>,
     components: [u8; 2],
     filters: Vec<moderation::FilterState>,
     restrictions: Vec<moderation::RestrictionState>,
@@ -208,6 +209,7 @@ impl CommunityAssembly {
             end: deadline()?,
             rounds: 0,
             restart_available: cached.cursor.is_some(),
+            initial_cursor: cached.cursor.clone(),
             components: [0; 2],
             filters: Vec::new(),
             restrictions: Vec::new(),
@@ -241,6 +243,7 @@ impl CommunityAssembly {
             Err(error) => {
                 if self.restart_available && cache::cursor_context_changed(&error) {
                     self.restart_available = false;
+                    self.initial_cursor = None;
                     worker.clear_room_presentation(self.room, None);
                     cache::restart_community(&mut worker.client.store, self.room, None)
                         .map_err(|_| Error::Storage)?;
@@ -373,6 +376,22 @@ impl CommunityAssembly {
             .sample()
             .map_err(|_| Error::Clock)?
             .upper_ms;
+        if history.has_more {
+            let next = verify_cursor(&history.cursor.0, &key).map_err(|_| Error::Input)?;
+            let previous = self
+                .initial_cursor
+                .as_ref()
+                .map(|cursor| {
+                    verify_cursor(&cursor.0, &key)
+                        .map(|verified| verified.value().sequence)
+                        .map_err(|_| Error::Input)
+                })
+                .transpose()?
+                .unwrap_or(0);
+            if next.value().sequence <= previous {
+                return Err(Error::Input);
+            }
+        }
         cache::receive(
             &mut worker.client.store,
             self.room,
@@ -402,6 +421,30 @@ impl CommunityAssembly {
         }
         worker.present_room_page(self.room, response.inspection.into(), history)?;
         Ok(true)
+    }
+}
+// A continuation is view work, not a lease or an unbounded subscription. Each
+// component yields to commands; a finite burst shares the first page's end.
+pub(super) struct SelectedCatchup {
+    room: RoomId,
+    end: u64,
+    pages_left: u8,
+    assembly: Option<CommunityAssembly>,
+}
+impl SelectedCatchup {
+    fn eligible(&self, worker: &Worker, now: u64) -> bool {
+        now < self.end
+            && self.pages_left != 0
+            && !worker.shared.stop.load(Ordering::Acquire)
+            && !worker.shared.disconnect.load(Ordering::Acquire)
+            && worker.snapshot.connection == ConnectionState::Online
+            && worker.snapshot.selected.as_ref().is_some_and(|view| {
+                view.summary.room == self.room
+                    && view.summary.joined
+                    && view.focus.is_none()
+                    && view.gap.is_none()
+                    && view.summary.confidentiality == RoomConfidentiality::Community
+            })
     }
 }
 enum Stage {
@@ -492,6 +535,7 @@ impl RefreshCycle {
             }
             Stage::Room(state, background) => {
                 if state.step(worker, state.end)? {
+                    worker.continue_selected(state.room, state.end);
                     self.stage = if *background {
                         Stage::Privacy
                     } else {
@@ -508,6 +552,106 @@ impl RefreshCycle {
     }
 }
 impl Worker {
+    fn continue_selected(&mut self, room: RoomId, end: u64) {
+        if !self.snapshot.selected.as_ref().is_some_and(|view| {
+            view.summary.room == room
+                && view.summary.joined
+                && view.has_more
+                && view.focus.is_none()
+                && view.gap.is_none()
+                && !view.stale
+        }) {
+            if self
+                .selected_catchup
+                .as_ref()
+                .is_some_and(|pending| pending.room == room)
+            {
+                self.selected_catchup = None;
+            }
+            return;
+        }
+        let pending = self
+            .selected_catchup
+            .take()
+            .filter(|pending| pending.room == room)
+            .map_or(
+                SelectedCatchup {
+                    room,
+                    end,
+                    pages_left: 8,
+                    assembly: None,
+                },
+                |mut pending| {
+                    pending.end = pending.end.min(end);
+                    pending.pages_left = pending.pages_left.saturating_sub(1);
+                    pending.assembly = None;
+                    pending
+                },
+            );
+        // A command's completed page supersedes a partial assembly, but cannot
+        // extend either the original end or its remaining page allowance.
+        if pending.pages_left != 0 {
+            self.selected_catchup = Some(pending);
+        }
+    }
+    pub(super) fn catchup_turn(&mut self) -> Result<()> {
+        self.catchup_turn_with(|state, worker| state.step(worker, state.end))
+    }
+    fn catchup_turn_with(
+        &mut self,
+        read: impl FnOnce(&mut CommunityAssembly, &mut Worker) -> Result<bool>,
+    ) -> Result<()> {
+        let Some(mut pending) = self.selected_catchup.take() else {
+            return Ok(());
+        };
+        let room = pending.room;
+        let result = self.update_view(|worker| {
+            let now = crate::clock::boot_ms().map_err(|_| Error::Clock)?;
+            if !pending.eligible(worker, now) || !worker.grouped_room(pending.room) {
+                return Ok(());
+            }
+            let mut state = match pending.assembly.take() {
+                Some(state) => state,
+                None => {
+                    let mut state = CommunityAssembly::new(worker, pending.room)?;
+                    state.end = pending.end;
+                    state
+                }
+            };
+            if read(&mut state, worker)? {
+                if let Some(cycle) = &mut worker.refresh_cycle {
+                    cycle.room_updated(pending.room);
+                }
+                pending.pages_left -= 1;
+                if worker
+                    .snapshot
+                    .selected
+                    .as_ref()
+                    .is_none_or(|view| !view.has_more)
+                {
+                    return Ok(());
+                }
+            } else {
+                pending.assembly = Some(state);
+            }
+            if pending.eligible(worker, crate::clock::boot_ms().map_err(|_| Error::Clock)?) {
+                worker.selected_catchup = Some(pending);
+            }
+            Ok(())
+        });
+        if result.is_err() {
+            self.snapshot.notifications.clear();
+            self.snapshot.search = None;
+            let gap = self
+                .snapshot
+                .selected
+                .as_ref()
+                .filter(|view| view.summary.room == room)
+                .and_then(|view| view.gap.clone());
+            self.clear_room_presentation(room, gap);
+        }
+        result
+    }
     pub(super) fn grouped_room(&mut self, room: RoomId) -> bool {
         self.client.bounded_views()
             && self
@@ -548,6 +692,7 @@ impl Worker {
         if let Some(cycle) = &mut self.refresh_cycle {
             cycle.room_updated(room);
         }
+        self.continue_selected(room, state.end);
         Ok(())
     }
     pub(super) fn grouped_refresh(&mut self) -> Result<()> {

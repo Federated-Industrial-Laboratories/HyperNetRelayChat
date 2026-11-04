@@ -53,6 +53,7 @@ pub(super) fn worker() -> (Fixture, Worker, RoomId) {
         delivery_room: None,
         poll_room: 0,
         refresh_cycle: None,
+        selected_catchup: None,
         refresh_yield: false,
         pending_room: None,
     };

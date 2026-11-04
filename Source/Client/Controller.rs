@@ -189,6 +189,7 @@ impl Controller {
                     delivery_room: None,
                     poll_room: 0,
                     refresh_cycle: None,
+                    selected_catchup: None,
                     refresh_yield: false,
                     pending_room: None,
                 };
@@ -369,6 +370,7 @@ struct Worker {
     delivery_room: Option<RoomId>,
     poll_room: usize,
     refresh_cycle: Option<views::RefreshCycle>,
+    selected_catchup: Option<views::SelectedCatchup>,
     refresh_yield: bool,
     pending_room: Option<PendingRoomRefresh>,
 }
@@ -396,7 +398,7 @@ impl Worker {
             // Preserve the bounded local lane before servicing due metadata, even
             // with a busy command queue. Recheck controls and original admission
             // deadlines after the potentially slow reads.
-            if self.metadata_due() && !self.refresh_yield {
+            if self.view_turn_due() && !self.refresh_yield {
                 self.tick();
                 self.refresh_yield = true;
                 continue;
@@ -500,7 +502,15 @@ impl Worker {
                 self.error(error);
             }
             self.publish();
+        } else if self.selected_catchup.is_some() {
+            if let Err(error) = self.catchup_turn() {
+                self.error(error);
+            }
+            self.publish();
         }
+    }
+    fn view_turn_due(&self) -> bool {
+        self.metadata_due() || self.selected_catchup.is_some()
     }
     fn metadata_due(&self) -> bool {
         matches!(
@@ -642,7 +652,7 @@ impl Worker {
         // Public progress includes a deferred room update. Keep the worker's
         // own flag reserved for update_view nesting and active read lifetime.
         let mut published = self.snapshot.clone();
-        published.updating |= self.pending_room.is_some();
+        published.updating |= self.pending_room.is_some() || self.selected_catchup.is_some();
         *self
             .shared
             .snapshot
@@ -650,6 +660,7 @@ impl Worker {
             .unwrap_or_else(|e| e.into_inner()) = Arc::new(published);
     }
     fn stale(&mut self) {
+        self.selected_catchup = None;
         if let Some(room) = &mut self.snapshot.selected {
             room.stale = true;
         }
@@ -661,6 +672,7 @@ impl Worker {
     fn offline(&mut self) {
         self.clear_pending_room();
         self.refresh_cycle = None;
+        self.selected_catchup = None;
         self.desired = false;
         self.client.disconnect();
         self.stale();
@@ -674,6 +686,7 @@ impl Worker {
     fn error(&mut self, e: Error) {
         self.clear_pending_room();
         self.refresh_cycle = None;
+        self.selected_catchup = None;
         self.snapshot.status = Some(Status {
             request_id: self.request,
             code: e.code().into(),
@@ -713,6 +726,7 @@ impl Worker {
     fn connect(&mut self) -> Result<()> {
         self.clear_pending_room();
         self.refresh_cycle = None;
+        self.selected_catchup = None;
         let reuse = matches!(self.snapshot.connection, ConnectionState::Backoff { .. })
             && self.client.session().is_ok();
         self.desired = true;

@@ -50,6 +50,9 @@ fn clock(client: &mut Client, root: &Path) {
 }
 
 impl Client {
+    pub(in crate::client) fn install_view_test_clock(&mut self, root: &Path) {
+        clock(self, root);
+    }
     pub(in crate::client) fn install_closed_view_test_session(&mut self, root: &Path) {
         self.session = Some(network::tests::closed_view_session(root, &self.profile));
     }

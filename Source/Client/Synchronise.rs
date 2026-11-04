@@ -280,6 +280,7 @@ impl Worker {
         self.update_view(|worker| worker.select_current(room))
     }
     fn select_current(&mut self, room: RoomId) -> Result<()> {
+        self.selected_catchup = None;
         let summary = self
             .snapshot
             .rooms

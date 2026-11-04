@@ -264,3 +264,6 @@ fn ordinary_bounded_polling_reclaims_expired_candidates_and_old_drafts_once_per_
         "failed component work retains its bounded retry interval"
     );
 }
+
+#[path = "Catchup.rs"]
+mod catchup;
