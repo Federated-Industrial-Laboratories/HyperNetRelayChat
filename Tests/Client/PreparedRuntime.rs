@@ -3,10 +3,9 @@
 use super::*;
 use crate::client::tests::Fixture;
 use ed25519_dalek::Signer;
-use std::fs;
+use std::{fs, io::Write, os::unix::fs::OpenOptionsExt, sync::mpsc, thread, time::Duration};
 
-fn clock(client: &mut Client, root: &Path) {
-    let key = SigningKey::from_bytes(&[53; 32]);
+fn write_clock(path: &Path, key: &SigningKey) {
     let now = crate::clock::TimeBounds::test_now();
     let boot = fs::read_to_string("/proc/sys/kernel/random/boot_id").unwrap();
     let payload = canonical_encode(
@@ -41,17 +40,67 @@ fn clock(client: &mut Client, root: &Path) {
         4096,
     )
     .unwrap();
+    // A reader sees one complete signed test observation, never a partial rewrite.
+    let next = path.with_extension("Next");
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&next)
+        .unwrap();
+    file.write_all(&signed).unwrap();
+    drop(file);
+    fs::rename(next, path).unwrap();
+}
+fn clock(client: &mut Client, root: &Path) -> SigningKey {
+    let key = SigningKey::from_bytes(&[53; 32]);
     let path = root.join("CurrentClock");
-    fs::write(&path, signed).unwrap();
+    write_clock(&path, &key);
     client.profile.clock = crate::clock::Config {
         observation: path,
-        monitor_key: hex::encode(public),
+        monitor_key: hex::encode(key.verifying_key().to_bytes()),
     };
+    key
+}
+
+pub(in crate::client) struct ViewTestClock {
+    stop: mpsc::Sender<()>,
+    worker: Option<thread::JoinHandle<()>>,
+}
+impl Drop for ViewTestClock {
+    fn drop(&mut self) {
+        let _ = self.stop.send(());
+        if let Some(worker) = self.worker.take() {
+            let result = worker.join();
+            if !thread::panicking() {
+                result.expect("signed test clock publisher failed");
+            }
+        }
+    }
 }
 
 impl Client {
     pub(in crate::client) fn install_view_test_clock(&mut self, root: &Path) {
         clock(self, root);
+    }
+    pub(in crate::client) fn start_view_test_clock(&mut self, root: &Path) -> ViewTestClock {
+        let key = clock(self, root);
+        let path = self.profile.clock.observation.clone();
+        let (stop, receive) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            // Model the running monitor during durable cache work. Every export
+            // retains the production verifier's exact one-second lifetime.
+            while matches!(
+                receive.recv_timeout(Duration::from_millis(100)),
+                Err(mpsc::RecvTimeoutError::Timeout)
+            ) {
+                write_clock(&path, &key);
+            }
+        });
+        ViewTestClock {
+            stop,
+            worker: Some(worker),
+        }
     }
     pub(in crate::client) fn install_closed_view_test_session(&mut self, root: &Path) {
         self.session = Some(network::tests::closed_view_session(root, &self.profile));

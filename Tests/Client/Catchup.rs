@@ -273,6 +273,7 @@ fn catchup_failure_and_nonadvancing_cursor_never_claim_current_or_retry_forever(
 #[test]
 fn partial_catchup_policy_yields_without_admitting_history_or_notifications() {
     let (fixture, mut worker, room) = receiver();
+    let _clock = worker.client.start_view_test_clock(&fixture.root);
     first_page(&mut worker, room);
     let ignored = history(&worker, room, 33, 64, true).history.unwrap().events[0]
         .actor
@@ -300,7 +301,6 @@ fn partial_catchup_policy_yields_without_admitting_history_or_notifications() {
             .len(),
         32
     );
-    worker.client.install_view_test_clock(&fixture.root);
     worker
         .catchup_turn_with(|state, worker| {
             let issued = state.next_request()?;
