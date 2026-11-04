@@ -46,11 +46,20 @@ This setup avoids replacing eight temporary streams at once. The four supporting
 profiles retain one Client owner each, and no profile is opened twice.
 
 One scoped worker performs supporting health reads while the helper observes
-Controller state and dispatches commands. It stops and joins within the same
-readiness gate. All eight room views, inspection state and privacy observations
-must be current; ordinary background refresh remains enabled throughout both
-measurements. Presentation filtering is checked through the recipient Controller;
-the final raw history and search checks remain mandatory service-side evidence.
+Controller state and dispatches commands. It stops and joins before readiness
+is accepted. An already-started bounded read can finish after the readiness end;
+the post-join deadline check then refuses acceptance. The original 45-second
+end also bounds the marker, filtering
+checks, supporting inspections and final readiness observation. A transient
+noncurrent room view may recover within that remaining interval. The final
+observer waits for all eight current views, joins its bounded supporting
+keepalive worker, then rechecks currentness before starting the pilot. A change
+during the join resumes observation under the same end. Expiry reports each
+Controller's freshness and gap state; it never starts another readiness window.
+All eight room views, inspection state and privacy observations must be current;
+ordinary background refresh remains enabled throughout both measurements.
+Presentation filtering is checked through the recipient Controller; the final
+raw history and search checks remain mandatory service-side evidence.
 
 The Rust helper has an original 360-second deadline inside the unchanged
 900-second outer fixture, with time retained for process cleanup. It measures a

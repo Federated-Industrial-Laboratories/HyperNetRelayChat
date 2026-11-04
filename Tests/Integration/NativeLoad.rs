@@ -635,14 +635,51 @@ fn readiness_state(index: usize, view: &Snapshot, room: RoomId) -> serde_json::V
         "status":view.status.as_ref().map(|s|bounded_reason(&s.code)),
         "statusRequest":view.status.as_ref().and_then(|s|s.request_id)})
 }
+// A current snapshot before a supporting worker joins is not the final gate.
+// Re-observe after that join, without renewing the original readiness interval.
+fn await_pilot_readiness(
+    end: Instant,
+    keepalive_period: Duration,
+    mut keepalive: impl FnMut(&AtomicBool) + Send,
+    mut observe: impl FnMut() -> bool,
+) -> Result<()> {
+    let mut next_keepalive = Instant::now() + keepalive_period;
+    loop {
+        with_keepalive(
+            end,
+            Duration::from_millis(20),
+            |stopped| {
+                // Rejoining the observer must not postpone supporting stream health.
+                if Instant::now() >= next_keepalive {
+                    keepalive(stopped);
+                    next_keepalive = Instant::now() + keepalive_period;
+                }
+            },
+            || loop {
+                ensure(Instant::now() < end, "EightControllerReadinessDeadline")?;
+                let ready = observe();
+                ensure(Instant::now() < end, "EightControllerReadinessDeadline")?;
+                if ready {
+                    return Ok(());
+                }
+                thread::sleep(Duration::from_millis(20));
+            },
+        )?;
+        ensure(Instant::now() < end, "EightControllerReadinessDeadline")?;
+        let ready = observe();
+        ensure(Instant::now() < end, "EightControllerReadinessDeadline")?;
+        if ready {
+            return Ok(());
+        }
+    }
+}
 fn open_controllers(
     paths: &[PathBuf],
     room: RoomId,
     ignored: AccountId,
     supporting: &mut [Endpoint],
-    overall: Instant,
+    end: Instant,
 ) -> Result<Vec<Interactive>> {
-    let end = overall.min(Instant::now() + Duration::from_secs(45));
     let mut controllers = Vec::new();
     emit(
         json!({"case":"NativeLoadControllerStartup", "bootMs":hrc::clock::boot_ms().ok(),
@@ -1722,86 +1759,117 @@ fn run(args: &Arguments) -> Result<bool> {
         }
     }
     let subject = supporting[0].client.profile.registration.account;
-    let controllers = open_controllers(&request.profiles, room, subject, &mut supporting, end)?;
-    let marker = committed(send_exact(
-        &mut supporting[0].client,
+    let readiness_end = end.min(Instant::now() + Duration::from_secs(45));
+    let controllers = open_controllers(
+        &request.profiles,
         room,
-        &message("loadmarker visible only to non-ignoring recipients".into()),
-        end,
-    )?)?
-    .0
-    .ok_or("LoadMarkerEvent")?;
-    let mut marker_query = query();
-    marker_query.terms = vec!["loadmarker".into()];
-    marker_query.sender = Some(subject);
-    let result = operation(
-        &mut supporting[2].client,
-        Operation::SearchQuery,
-        Target::Room(room),
-        &marker_query,
-        end,
+        subject,
+        &mut supporting,
+        readiness_end,
     )?;
-    let Outcome::Result { body } = result else {
-        return Err("MarkerSearchUnavailable".into());
-    };
-    let page: messaging::PageResult = body.deserialized().map_err(|_| "MarkerSearchShape")?;
-    ensure(
-        page.events.iter().any(|e| e.event == marker),
-        "UnfilteredMarkerMissing",
-    )?;
-    // The marker exists before checking the production recipient's filtered view.
-    let recipient = &controllers[7].controller;
-    let refresh = recipient
-        .dispatch(Command::Refresh)
-        .map_err(|_| "FilteredRefreshDispatch")?;
-    wait_command(recipient, refresh, end)?;
-    let view = recipient.snapshot();
-    ensure(current(&view, room), "FilteredHistoryUnavailable")?;
-    ensure(
-        view.selected
-            .as_ref()
-            .is_some_and(|r| r.events.iter().all(|e| e.actor.acting().account != subject)),
-        "IgnoredHistoryLeak",
-    )?;
-    let mut filtered_query = query();
-    filtered_query.terms = vec!["loadmarker".into()];
-    filtered_query.sender = Some(subject);
-    let search = recipient
-        .dispatch(Command::Search(filtered_query))
-        .map_err(|_| "FilteredSearchDispatch")?;
-    wait_command(recipient, search, end)?;
-    ensure(
-        recipient
-            .snapshot()
-            .search
-            .as_ref()
-            .is_some_and(|s| s.room == room && !s.running && !s.cancelled && s.events.is_empty()),
-        "IgnoredSearchLeak",
-    )?;
-    for endpoint in &mut supporting {
-        emit(
-            json!({"case":"NativeLoadSetupStep","endpoint":endpoint.index,"operation":"ServiceInspect"}),
-        );
+    let readiness = (|| {
+        let marker = committed(send_exact(
+            &mut supporting[0].client,
+            room,
+            &message("loadmarker visible only to non-ignoring recipients".into()),
+            readiness_end,
+        )?)?
+        .0
+        .ok_or("LoadMarkerEvent")?;
+        let mut marker_query = query();
+        marker_query.terms = vec!["loadmarker".into()];
+        marker_query.sender = Some(subject);
         let result = operation(
-            &mut endpoint.client,
-            Operation::ServiceInspect,
-            Target::Service,
-            &Value::Map(vec![]),
-            end,
-        );
-        pilot_support_current(endpoint.index, result)?;
-    }
-    ensure(Instant::now() < end, "PilotEntryDeadline")?;
-    for ui in &controllers {
-        let view = ui.controller.snapshot();
-        if !current(&view, room) {
-            let mut state = readiness_state(ui.index, &view, room);
-            state["case"] = json!("NativeLoadControllerReadiness");
-            state["passed"] = json!(false);
-            state["bootMs"] = json!(hrc::clock::boot_ms().ok());
-            emit(state);
-            return Err(format!("PilotControllerNotCurrent:endpoint={}", ui.index));
+            &mut supporting[2].client,
+            Operation::SearchQuery,
+            Target::Room(room),
+            &marker_query,
+            readiness_end,
+        )?;
+        let Outcome::Result { body } = result else {
+            return Err("MarkerSearchUnavailable".into());
+        };
+        let page: messaging::PageResult = body.deserialized().map_err(|_| "MarkerSearchShape")?;
+        ensure(
+            page.events.iter().any(|e| e.event == marker),
+            "UnfilteredMarkerMissing",
+        )?;
+        // The marker exists before checking the production recipient's filtered view.
+        let recipient = &controllers[7].controller;
+        ensure(
+            Instant::now() < readiness_end,
+            "EightControllerReadinessDeadline",
+        )?;
+        let refresh = recipient
+            .dispatch(Command::Refresh)
+            .map_err(|_| "FilteredRefreshDispatch")?;
+        wait_command(recipient, refresh, readiness_end)?;
+        let view = recipient.snapshot();
+        ensure(current(&view, room), "FilteredHistoryUnavailable")?;
+        ensure(
+            view.selected
+                .as_ref()
+                .is_some_and(|r| r.events.iter().all(|e| e.actor.acting().account != subject)),
+            "IgnoredHistoryLeak",
+        )?;
+        let mut filtered_query = query();
+        filtered_query.terms = vec!["loadmarker".into()];
+        filtered_query.sender = Some(subject);
+        ensure(
+            Instant::now() < readiness_end,
+            "EightControllerReadinessDeadline",
+        )?;
+        let search = recipient
+            .dispatch(Command::Search(filtered_query))
+            .map_err(|_| "FilteredSearchDispatch")?;
+        wait_command(recipient, search, readiness_end)?;
+        ensure(
+            recipient.snapshot().search.as_ref().is_some_and(|s| {
+                s.room == room && !s.running && !s.cancelled && s.events.is_empty()
+            }),
+            "IgnoredSearchLeak",
+        )?;
+        for endpoint in &mut supporting {
+            emit(
+                json!({"case":"NativeLoadSetupStep","endpoint":endpoint.index,"operation":"ServiceInspect"}),
+            );
+            let result = operation(
+                &mut endpoint.client,
+                Operation::ServiceInspect,
+                Target::Service,
+                &Value::Map(vec![]),
+                readiness_end,
+            );
+            pilot_support_current(endpoint.index, result)?;
         }
+        await_pilot_readiness(
+            readiness_end,
+            Duration::from_secs(8),
+            |stopped| {
+                for endpoint in &mut supporting {
+                    if stopped.load(Ordering::Acquire) || Instant::now() >= readiness_end {
+                        break;
+                    }
+                    let _ = health(&mut endpoint.client);
+                }
+            },
+            || {
+                controllers
+                    .iter()
+                    .all(|ui| current(&ui.controller.snapshot(), room))
+            },
+        )
+    })();
+    if let Err(error) = readiness {
+        emit(
+            json!({"case":"NativeLoadControllerReadiness", "passed":false,
+            "stage":"PilotEntry", "code":error,
+            "bootMs":hrc::clock::boot_ms().ok(),
+            "states":controllers.iter().map(|ui|
+                readiness_state(ui.index, &ui.controller.snapshot(), room)
+            ).collect::<Vec<_>>()}),
+        );
+        return Err(error);
     }
     emit(
         json!({"case":"NativeLoadPilotReady","phase":"baseline","authenticatedStreams":12,
@@ -2191,6 +2259,80 @@ mod tests {
             },
         );
         assert_eq!(result.unwrap(), 7);
+    }
+    #[test]
+    fn pilot_readiness_waits_for_transient_recovery_and_rechecks_after_join() {
+        let mut observations = 0;
+        await_pilot_readiness(
+            Instant::now() + Duration::from_secs(10),
+            Duration::from_secs(8),
+            |_| panic!("short observation must not need a supporting read"),
+            || {
+                observations += 1;
+                observations >= 2
+            },
+        )
+        .unwrap();
+        assert_eq!(observations, 3, "recovery is checked again after the join");
+    }
+    #[test]
+    fn pilot_readiness_does_not_accept_persistent_noncurrent_views() {
+        // Stale views and retained gaps both fail the unchanged current() predicate.
+        // A completed setup command cannot substitute for a current observation.
+        let result = await_pilot_readiness(
+            Instant::now() + Duration::from_millis(40),
+            Duration::from_secs(8),
+            |_| panic!("bounded observation must not need a supporting read"),
+            || false,
+        );
+        assert_eq!(result.unwrap_err(), "EightControllerReadinessDeadline");
+    }
+    #[test]
+    fn pilot_readiness_does_not_replace_the_end_consumed_by_support_setup() {
+        let result = await_pilot_readiness(
+            Instant::now(),
+            Duration::ZERO,
+            |_| panic!("expired readiness cannot start a supporting read"),
+            || panic!("expired readiness cannot accept an earlier current state"),
+        );
+        assert_eq!(result.unwrap_err(), "EightControllerReadinessDeadline");
+    }
+    #[test]
+    fn pilot_readiness_observes_changes_during_support_join() {
+        let (entered, started) = std::sync::mpsc::channel();
+        let stale = AtomicBool::new(false);
+        let mut first = true;
+        let mut observations = 0;
+        let end = Instant::now() + Duration::from_secs(10);
+        await_pilot_readiness(
+            end,
+            Duration::ZERO,
+            |stopped| {
+                if first {
+                    first = false;
+                    entered.send(()).unwrap();
+                    while !stopped.load(Ordering::Acquire) && Instant::now() < end {
+                        thread::sleep(Duration::from_millis(1));
+                    }
+                    stale.store(true, Ordering::Release);
+                }
+            },
+            || {
+                observations += 1;
+                if observations == 1 {
+                    started.recv_timeout(Duration::from_secs(2)).unwrap();
+                    return true;
+                }
+                if observations == 2 {
+                    assert!(stale.load(Ordering::Acquire));
+                    return false;
+                }
+                stale.store(false, Ordering::Release);
+                true
+            },
+        )
+        .unwrap();
+        assert_eq!(observations, 4, "a pre-join snapshot cannot pass the gate");
     }
     #[test]
     fn pilot_entry_requires_a_current_support_result_and_retains_failure_context() {
