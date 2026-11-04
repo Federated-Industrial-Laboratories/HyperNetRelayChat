@@ -15,7 +15,7 @@ use std::{
     path::PathBuf,
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     thread,
     time::{Duration, Instant},
@@ -23,6 +23,24 @@ use std::{
 
 type Result<T> = std::result::Result<T, String>;
 const MESSAGE_EXCHANGE_LIMIT_NS: u64 = 500_000_000;
+const COHORT_OBSERVATION_SECONDS: u64 = 30;
+struct PhaseWindow {
+    start: Instant,
+    seconds: u64,
+    pending_senders: AtomicUsize,
+}
+impl PhaseWindow {
+    fn offer_end(&self) -> Instant {
+        self.start + Duration::from_secs(self.seconds)
+    }
+    fn observation_end(&self) -> Instant {
+        self.offer_end() + Duration::from_secs(COHORT_OBSERVATION_SECONDS)
+    }
+    fn finished(&self, now: Instant) -> bool {
+        now >= self.observation_end()
+            || (now >= self.offer_end() && self.pending_senders.load(Ordering::Acquire) == 0)
+    }
+}
 #[derive(Parser)]
 struct Arguments {
     #[arg(long)]
@@ -47,6 +65,7 @@ struct Metrics {
     started: usize,
     committed: usize,
     committed_in_window: usize,
+    committed_within_observation: usize,
     missed: usize,
     results: BTreeMap<String, usize>,
     completion_ms: Vec<u64>,
@@ -56,6 +75,9 @@ struct Metrics {
     decoded_response_bytes: usize,
     unresolved: bool,
     controller_offers_seen_refused: usize,
+    tail_offered: usize,
+    tail_missed: usize,
+    pressure_cost_refusals: usize,
 }
 fn emit(value: serde_json::Value) {
     println!("{value}");
@@ -786,10 +808,10 @@ fn interactive(
     mut ui: Interactive,
     room: RoomId,
     ignored: AccountId,
-    start: Instant,
-    seconds: u64,
+    window: &PhaseWindow,
     phase: &str,
 ) -> (Interactive, Metrics) {
+    let (start, seconds) = (window.start, window.seconds);
     let expected = if ui.index < 5 { seconds as usize } else { 0 };
     let mut m = Metrics {
         endpoint: ui.index,
@@ -810,8 +832,9 @@ fn interactive(
     let mut state_ms = BTreeMap::<String, u64>::new();
     let mut revisions = BTreeSet::new();
     let mut previous = start;
+    let mut cohort_reported = ui.index >= 5;
     wait_until(start);
-    while Instant::now() < end {
+    while !window.finished(Instant::now()) {
         let now = Instant::now();
         let view = observe(&mut ui, room);
         let state = match (&view.connection, current(&view, room)) {
@@ -839,7 +862,7 @@ fn interactive(
                 }
             }
         }
-        while next < expected {
+        while now < end && next < expected {
             let scheduled = start
                 + Duration::from_secs(next as u64)
                 + Duration::from_millis(ui.index as u64 * 200);
@@ -859,6 +882,16 @@ fn interactive(
             }
             next += 1;
         }
+        // Stop offering at the fixed boundary, but observe the entire cohort.
+        // Other endpoints retain pressure until all five senders finish or the
+        // fixed observation bound expires. No effect is resubmitted here.
+        if now >= end
+            && !cohort_reported
+            && ui.offers[first_offer..].iter().all(|offer| offer.terminal)
+        {
+            cohort_reported = true;
+            window.pending_senders.fetch_sub(1, Ordering::AcqRel);
+        }
         thread::sleep(Duration::from_millis(10));
     }
     m.missed += expected - next;
@@ -870,6 +903,7 @@ fn interactive(
         if let Some(at) = offer.committed_at {
             m.committed += 1;
             m.committed_in_window += usize::from(at <= end);
+            m.committed_within_observation += usize::from(at <= window.observation_end());
             m.completion_ms
                 .push(millis(at.saturating_duration_since(offer.scheduled)));
             if let Some(exchange_ns) = offer.exchange_ns {
@@ -887,19 +921,24 @@ fn interactive(
     );
     (ui, m)
 }
-fn idle(mut endpoint: Endpoint, start: Instant, seconds: u64) -> (Endpoint, Metrics) {
+fn keep_alive_until_end(endpoint: &mut Endpoint, m: &mut Metrics, window: &PhaseWindow) {
+    let mut next = window.start + Duration::from_millis(endpoint.index as u64 * 50);
+    while !window.finished(Instant::now()) {
+        if Instant::now() >= next {
+            let result = health(&mut endpoint.client);
+            record_result(m, &result);
+            next = Instant::now() + Duration::from_secs(8);
+        } else {
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+}
+fn idle(mut endpoint: Endpoint, window: &PhaseWindow) -> (Endpoint, Metrics) {
     let mut m = Metrics {
         endpoint: endpoint.index,
         ..Metrics::default()
     };
-    for offset in (0..seconds).step_by(8) {
-        wait_until(
-            start + Duration::from_secs(offset) + Duration::from_millis(endpoint.index as u64 * 50),
-        );
-        let result = health(&mut endpoint.client);
-        record_result(&mut m, &result);
-    }
-    wait_until(start + Duration::from_secs(seconds));
+    keep_alive_until_end(&mut endpoint, &mut m, window);
     (endpoint, m)
 }
 fn query() -> messaging::Search {
@@ -913,22 +952,49 @@ fn query() -> messaging::Search {
         limit: 50,
     }
 }
-fn hostile(endpoint: Endpoint, room: RoomId, start: Instant, seconds: u64) -> (Endpoint, Metrics) {
+fn record_pressure_result(metrics: &mut Metrics, result: &client::Result<Response>) {
+    if matches!(
+        result,
+        Ok(Response {
+            outcome: Outcome::Refused {
+                code: ErrorCode::RateLimited | ErrorCode::Overloaded,
+                ..
+            } | Outcome::Rejected {
+                code: ErrorCode::RateLimited | ErrorCode::Overloaded,
+                ..
+            },
+            ..
+        })
+    ) {
+        metrics.pressure_cost_refusals += 1;
+    }
+    record_result(metrics, result);
+}
+fn hostile(endpoint: Endpoint, room: RoomId, window: &PhaseWindow) -> (Endpoint, Metrics) {
+    let (start, seconds) = (window.start, window.seconds);
     let mut m = Metrics {
         endpoint: endpoint.index,
         ..Metrics::default()
     };
     let flood = endpoint.index == 8;
     let period = if flood { 100 } else { 500 };
-    let offers = seconds * 1000 / period;
-    m.offered = offers as usize;
+    let offers = (seconds + COHORT_OBSERVATION_SECONDS) * 1000 / period;
     for index in 0..offers {
+        if window.finished(Instant::now()) {
+            break;
+        }
         let scheduled = start + Duration::from_millis(index * period);
+        wait_until(scheduled);
+        if window.finished(Instant::now()) {
+            break;
+        }
+        m.offered += 1;
+        m.tail_offered += usize::from(scheduled >= window.offer_end());
         if m.unresolved || Instant::now() >= scheduled + Duration::from_millis(period) {
             m.missed += 1;
+            m.tail_missed += usize::from(scheduled >= window.offer_end());
             continue;
         }
-        wait_until(scheduled);
         m.started += 1;
         let action = if flood {
             endpoint.client.prepare_as(
@@ -967,9 +1033,13 @@ fn hostile(endpoint: Endpoint, room: RoomId, start: Instant, seconds: u64) -> (E
             m.committed += 1;
         }
         m.unresolved = result.is_err();
-        record_result(&mut m, &result);
+        record_pressure_result(&mut m, &result);
     }
-    wait_until(start + Duration::from_secs(seconds));
+    // The last scheduled slot can finish before the hard observation boundary.
+    // Wait without adding supporting traffic to the attack's evidence.
+    while !window.finished(Instant::now()) {
+        thread::sleep(Duration::from_millis(10));
+    }
     (endpoint, m)
 }
 fn slow_reader(
@@ -1120,9 +1190,14 @@ fn run_phase(
     room: RoomId,
     seconds: u64,
     overload: bool,
-) -> (Vec<Interactive>, Vec<Endpoint>, bool) {
+) -> (Vec<Interactive>, Vec<Endpoint>, bool, Instant) {
     let phase = if overload { "overload" } else { "baseline" };
     let start = Instant::now() + Duration::from_secs(1);
+    let window = PhaseWindow {
+        start,
+        seconds,
+        pending_senders: AtomicUsize::new(5),
+    };
     let subject = endpoints
         .iter()
         .find(|e| e.index == 8)
@@ -1134,21 +1209,33 @@ fn run_phase(
     emit(
         json!({"case":"NativeLoadPhaseStarted","phase":phase,"seconds":seconds,"offeredNormalPerSecond":5,
         "observationBootMs":hrc::clock::boot_ms().ok(),
-        "productionControllers":8,"backgroundRefreshEnabled":true}),
+        "productionControllers":8,"backgroundRefreshEnabled":true,
+        "maximumCohortObservationTailSeconds":COHORT_OBSERVATION_SECONDS}),
     );
     let (ui_pairs, pairs) = thread::scope(|scope| {
+        let window = &window;
         let ui_handles: Vec<_> = controllers
             .into_iter()
-            .map(|u| scope.spawn(move || interactive(u, room, subject, start, seconds, phase)))
+            .map(|u| scope.spawn(move || interactive(u, room, subject, window, phase)))
             .collect();
         let handles: Vec<_> = endpoints
             .into_iter()
             .map(|e| {
-                scope.spawn(move || match e.index {
-                    8 | 9 if overload => hostile(e, room, start, seconds),
-                    11 if overload => slow_reader(e, room, start, seconds),
-                    10 if overload => moderator(e, room, subject, start, seconds),
-                    _ => idle(e, start, seconds),
+                scope.spawn(move || {
+                    let (endpoint, metrics) = match e.index {
+                        8 | 9 if overload => hostile(e, room, window),
+                        10 | 11 if overload => {
+                            let (mut endpoint, mut metrics) = if e.index == 11 {
+                                slow_reader(e, room, start, seconds)
+                            } else {
+                                moderator(e, room, subject, start, seconds)
+                            };
+                            keep_alive_until_end(&mut endpoint, &mut metrics, window);
+                            (endpoint, metrics)
+                        }
+                        _ => idle(e, window),
+                    };
+                    (endpoint, metrics, Instant::now())
                 })
             })
             .collect();
@@ -1163,6 +1250,8 @@ fn run_phase(
                 .collect::<Vec<_>>(),
         )
     });
+    let completed_at = Instant::now();
+    let pressure_ended = pairs[0].2.max(pairs[1].2);
     let normal: Vec<_> = ui_pairs.iter().take(5).map(|(_, m)| m).collect();
     let completion_latencies: Vec<_> = normal
         .iter()
@@ -1175,6 +1264,7 @@ fn run_phase(
     let offered: usize = normal.iter().map(|m| m.offered).sum();
     let committed: usize = normal.iter().map(|m| m.committed).sum();
     let in_window: usize = normal.iter().map(|m| m.committed_in_window).sum();
+    let within_observation: usize = normal.iter().map(|m| m.committed_within_observation).sum();
     let missed: usize = normal.iter().map(|m| m.missed).sum();
     let started: usize = normal.iter().map(|m| m.started).sum();
     let rejected: usize = normal
@@ -1200,14 +1290,15 @@ fn run_phase(
     let moderator = &pairs[2].1;
     let attacks_exercised = !overload || attacks_pass(&pairs[0].1, &pairs[1].1, &pairs[3].1);
     let controllers_current = ui_pairs.iter().all(|(_, m)| !m.unresolved);
-    let passed = rate_pass(
+    let passed = cohort_pass(
         seconds,
         offered,
-        in_window,
+        within_observation,
         missed,
         exchange_latencies.len(),
         exchange_p95_ns,
     ) && attacks_exercised
+        && normal.iter().all(|m| m.controller_offers_seen_refused == 0)
         && distinct_events.len() == committed
         && controllers_current
         && (!overload
@@ -1216,6 +1307,15 @@ fn run_phase(
         json!({"case":"NativeLoadPhaseResult","phase":phase,"passed":passed,"offered":offered,"committed":committed,
         "observationBootMs":hrc::clock::boot_ms().ok(),
         "committedWithinMeasurementWindow":in_window,"distinctCommittedEvents":distinct_events.len(),"missedOffers":missed,"commitsPerSecond":in_window as f64/seconds as f64,
+        "committedAfterOfferWindow":committed-in_window,"offeredNormalPerSecond":5,
+        "uncommittedAtOfferWindowEnd":offered-in_window,
+        "committedWithinObservationBound":within_observation,
+        "cohortObservationElapsedMs":millis(completed_at.saturating_duration_since(start)),
+        "cohortObservationTailMs":millis(completed_at.saturating_duration_since(window.offer_end())),
+        "maximumCohortObservationTailSeconds":COHORT_OBSERVATION_SECONDS,
+        "cohortCommitsPerElapsedSecond":committed as f64/completed_at.duration_since(start).as_secs_f64(),
+        "overloadPressureScheduledThroughCohortObservation":overload,
+        "supportJoinAfterPressureMs":millis(completed_at.saturating_duration_since(pressure_ended)),
         "offersCurrentlyRejectedOrRefused":rejected,"fractionStartedOffersRejectedOrRefused":if started==0 {None} else {Some(rejected as f64/started as f64)},
         "uncommittedFractionOfOffered":(offered-committed) as f64/offered as f64,
         "p95MessageExchangeMs":exchange_ms(exchange_p95_ns),
@@ -1231,13 +1331,14 @@ fn run_phase(
         "messageExchangeBoundary":"already-encoded message write on authenticated stream to complete valid committed-ack payload receipt",
         "messageExchangeExcludes":"connection setup, queueing, local persistence, frame encoding, response decoding and UI work",
         "scheduledToObservedCommitIncludesClientWork":true,"controllerMetrics":ui_pairs.iter().map(|(_,m)|m).collect::<Vec<_>>(),
-        "supportingEndpointMetrics":pairs.iter().map(|(_,m)|m).collect::<Vec<_>>(),
+        "supportingEndpointMetrics":pairs.iter().map(|(_,m,_)|m).collect::<Vec<_>>(),
         "byteAccounting":"Controller bytes are unobserved; supporting sessions count signed actions and decoded response CBOR only"}),
     );
     (
         ui_pairs.into_iter().map(|(u, _)| u).collect(),
-        pairs.into_iter().map(|(e, _)| e).collect(),
+        pairs.into_iter().map(|(e, _, _)| e).collect(),
         passed,
+        pressure_ended,
     )
 }
 fn attacks_pass(flood: &Metrics, queries: &Metrics, slow: &Metrics) -> bool {
@@ -1249,21 +1350,18 @@ fn attacks_pass(flood: &Metrics, queries: &Metrics, slow: &Metrics) -> bool {
         && flood.started > 8
         && queries.started > 1
         && flood.results.contains_key("Rejected:Denied:RoomSilenced")
-        && flood
-            .results
-            .keys()
-            .any(|r| r.contains("RateLimited") || r.contains("Overloaded"))
+        && flood.pressure_cost_refusals > 0
 }
-fn rate_pass(
+fn cohort_pass(
     seconds: u64,
     offered: usize,
-    in_window: usize,
+    cohort_committed: usize,
     missed: usize,
     exchange_samples: usize,
     exchange_p95_ns: Option<u64>,
 ) -> bool {
     offered == seconds as usize * 5
-        && in_window == offered
+        && cohort_committed == offered
         && missed == 0
         && exchange_samples == offered
         && exchange_p95_ns.is_some_and(|ns| ns < MESSAGE_EXCHANGE_LIMIT_NS)
@@ -1299,22 +1397,37 @@ fn check_filter(c: &mut Client, room: RoomId, subject: AccountId, end: Instant) 
     let page: messaging::PageResult = body.deserialized().map_err(|_| "SearchShape")?;
     ensure(page.events.is_empty(), "IgnoredSearchLeak")
 }
+struct RecoveryWindow {
+    began: Instant,
+    deadline: Instant,
+}
+impl RecoveryWindow {
+    fn new(overall: Instant, pressure_ended: Instant) -> Self {
+        Self {
+            began: pressure_ended,
+            deadline: overall.min(pressure_ended + Duration::from_secs(30)),
+        }
+    }
+    fn expired(&self, now: Instant) -> bool {
+        now >= self.deadline
+    }
+}
 fn recovery(
     controllers: &mut [Interactive],
     supporting: &mut [Endpoint],
     room: RoomId,
     overall: Instant,
+    pressure_ended: Instant,
 ) -> Result<bool> {
+    let window = RecoveryWindow::new(overall, pressure_ended);
     emit(
         json!({"case":"NativeLoadRecoveryStarted","phase":"recovery",
         "observationBootMs":hrc::clock::boot_ms().ok()}),
     );
-    let began = Instant::now();
-    let deadline = overall.min(began + Duration::from_secs(30));
     let mut probes = [None; 5];
     let mut last_health = Instant::now();
     let mut received = [false; 8];
-    loop {
+    while !window.expired(Instant::now()) {
         let mut all_current = true;
         for ui in controllers.iter_mut() {
             let view = observe(ui, room);
@@ -1344,9 +1457,6 @@ fn recovery(
         if markers.len() == 5 && all_current && received.iter().all(|v| *v) {
             break;
         }
-        if Instant::now() >= deadline {
-            break;
-        }
         if last_health.elapsed() >= Duration::from_secs(8) {
             for e in supporting.iter_mut().filter(|e| e.index != 11) {
                 let _ = health(&mut e.client);
@@ -1363,7 +1473,7 @@ fn recovery(
             "current":current(&view,room),"unresolvedOffers":unresolved,"freshRemoteRecoveryMarker":received[ui.index],
             "status":view.status.as_ref().map(|s|&s.code)})
     }).collect();
-    let elapsed = millis(began.elapsed());
+    let elapsed = millis(window.began.elapsed());
     let passed = results.iter().all(|r| r["passed"] == true) && elapsed < 30000;
     emit(
         json!({"case":"NativeLoadRecoveryResult","passed":passed,"elapsedMs":elapsed,"limitMs":30000,
@@ -1697,10 +1807,11 @@ fn run(args: &Arguments) -> Result<bool> {
         json!({"case":"NativeLoadPilotReady","phase":"baseline","authenticatedStreams":12,
         "productionControllers":8,"backgroundRefreshEnabled":true,"room":room}),
     );
-    let (controllers, supporting, baseline) = run_phase(controllers, supporting, room, 30, false);
-    let (mut controllers, mut supporting, overload) =
+    let (controllers, supporting, baseline, _) =
+        run_phase(controllers, supporting, room, 30, false);
+    let (mut controllers, mut supporting, overload, pressure_ended) =
         run_phase(controllers, supporting, room, 45, true);
-    let recovered = recovery(&mut controllers, &mut supporting, room, end)?;
+    let recovered = recovery(&mut controllers, &mut supporting, room, end, pressure_ended)?;
     for mut ui in controllers {
         ui.controller.shutdown();
         drop(ui);
@@ -2291,6 +2402,7 @@ mod tests {
     fn earlier_refusals_cannot_hide_an_attack_stream_that_stopped_early() {
         let mut flood = Metrics {
             started: 9,
+            pressure_cost_refusals: 1,
             results: BTreeMap::from([
                 ("Rejected:Denied:RoomSilenced".into(), 1),
                 ("Refused:RateLimited".into(), 1),
@@ -2313,6 +2425,49 @@ mod tests {
         queries.unresolved = false;
         slow.unresolved = true;
         assert!(!attacks_pass(&flood, &queries, &slow));
+    }
+    #[test]
+    fn supporting_refusal_cannot_qualify_an_unlimited_flood() {
+        let (_, delivery, _) = setup_fixture();
+        let refusal = Ok(Response {
+            home: delivery.room.unwrap().home,
+            operation_id: delivery.operation_id,
+            action_digest: delivery.action_digest,
+            outcome: Outcome::Refused {
+                code: ErrorCode::Overloaded,
+                detail: "AuthorityAdmissionBusy".into(),
+                retry_after_ms: Some(1000),
+            },
+        });
+        let mut flood = Metrics {
+            started: 9,
+            results: BTreeMap::from([("Rejected:Denied:RoomSilenced".into(), 1)]),
+            ..Metrics::default()
+        };
+        let queries = Metrics {
+            started: 2,
+            ..Metrics::default()
+        };
+        let slow = Metrics::default();
+        record_result(&mut flood, &refusal);
+        assert!(!attacks_pass(&flood, &queries, &slow));
+        record_pressure_result(&mut flood, &refusal);
+        assert!(attacks_pass(&flood, &queries, &slow));
+    }
+    #[test]
+    fn delayed_support_join_cannot_restart_recovery_time() {
+        let stopped = Instant::now();
+        let joined = stopped + Duration::from_secs(8);
+        let window = RecoveryWindow::new(stopped + Duration::from_secs(90), stopped);
+        assert_eq!(
+            window.deadline.duration_since(joined),
+            Duration::from_secs(22)
+        );
+        assert!(!window.expired(stopped + Duration::from_secs(29)));
+        assert!(window.expired(stopped + Duration::from_secs(30)));
+        assert!(window.expired(joined + Duration::from_secs(23)));
+        let clipped = RecoveryWindow::new(joined, stopped);
+        assert!(clipped.expired(joined));
     }
     #[test]
     fn message_exchange_samples_exclude_controller_wait_and_recovery() {
@@ -2347,14 +2502,34 @@ mod tests {
         assert_eq!(recovered.exchange_ns, None);
     }
     #[test]
+    fn final_offer_keeps_a_bounded_observation_tail_with_pressure() {
+        let start = Instant::now();
+        let window = PhaseWindow {
+            start,
+            seconds: 30,
+            pending_senders: AtomicUsize::new(1),
+        };
+        let last_offer = start + Duration::from_millis(29_800);
+        let last_commit = last_offer + Duration::from_millis(499);
+        assert!(!window.finished(last_commit));
+        assert!(last_commit > window.offer_end());
+        assert!(cohort_pass(30, 150, 150, 0, 150, Some(499_000_000)));
+        window.pending_senders.store(0, Ordering::Release);
+        assert!(!window.finished(last_offer));
+        assert!(window.finished(last_commit));
+        window.pending_senders.store(1, Ordering::Release);
+        assert!(!window.finished(window.observation_end() - Duration::from_nanos(1)));
+        assert!(window.finished(window.observation_end()));
+    }
+    #[test]
     fn offered_load_cannot_pass_with_missing_or_slow_commits() {
-        assert!(rate_pass(30, 150, 150, 0, 150, Some(499_999_999)));
-        assert!(!rate_pass(30, 149, 149, 0, 149, Some(1)));
-        assert!(!rate_pass(30, 150, 149, 0, 149, Some(1)));
-        assert!(!rate_pass(30, 150, 150, 1, 150, Some(1)));
-        assert!(!rate_pass(30, 150, 150, 0, 150, Some(500_000_000)));
-        assert!(!rate_pass(30, 150, 150, 0, 150, None));
-        assert!(!rate_pass(30, 150, 150, 0, 149, Some(1)));
+        assert!(cohort_pass(30, 150, 150, 0, 150, Some(499_999_999)));
+        assert!(!cohort_pass(30, 149, 149, 0, 149, Some(1)));
+        assert!(!cohort_pass(30, 150, 149, 0, 149, Some(1)));
+        assert!(!cohort_pass(30, 150, 150, 1, 150, Some(1)));
+        assert!(!cohort_pass(30, 150, 150, 0, 150, Some(500_000_000)));
+        assert!(!cohort_pass(30, 150, 150, 0, 150, None));
+        assert!(!cohort_pass(30, 150, 150, 0, 149, Some(1)));
         assert_eq!(percentile(&(1..=100).collect::<Vec<_>>(), 95), Some(95));
     }
 }

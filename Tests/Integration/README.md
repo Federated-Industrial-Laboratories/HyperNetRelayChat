@@ -58,8 +58,25 @@ The Rust helper has an original 360-second deadline inside the unchanged
 one send command each second, staggered by 200 milliseconds. The schedule keeps
 offering commands while earlier work is queued. Queue refusals and missed
 scheduled offers are counted instead of slowing the offered schedule. Every
-normal offered message must commit within the measurement window; missed,
-refused, unknown or late outcomes fail the throughput gate.
+normal offered message must have an exactly bound committed outcome and direct
+exchange sample. After each fixed offer window, observation continues until the
+five sending Controllers have terminal outcomes, for at most 30 additional
+seconds. This observation does not renew product deadlines or resubmit effects.
+It avoids imposing a 200-millisecond total-completion limit on the final offer.
+Missing, refused, unknown or unsampled outcomes fail cohort qualification.
+The original 360-second helper deadline remains unchanged.
+
+During the observation tail, hostile send and search schedules continue at their
+original rates. Their additional offers and misses remain counted. Background
+refresh and supporting keepalives also continue. All eight Controllers must be
+current when observation ends. Results separately report commits within the
+fixed offer window, commits after it, tail duration, and completed messages per
+actual elapsed second. Tail commits never become in-window throughput. A passing
+cohort does not claim that its broader client completion delay is below the
+transport latency target. Only send/search refusals count as evidence of flood limits; supporting health
+refusals do not qualify that check. The recovery clock starts when the last
+hostile worker finishes. Joining supporting workers consumes that same original
+30-second recovery budget.
 
 The primary message-latency sample starts immediately before writing an already
 encoded message frame on an established authenticated stream. It ends when the
