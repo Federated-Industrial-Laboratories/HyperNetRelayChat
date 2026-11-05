@@ -2,6 +2,207 @@
 //! Partial grouped reads cannot admit history, filters or a new authority lease.
 use super::super::completion_tests::worker;
 use super::*;
+use std::{io::Write, os::unix::net::UnixStream};
+
+fn live_worker() -> (crate::client::tests::Fixture, Worker, RoomId, UnixStream) {
+    let (fixture, mut worker, room) = worker();
+    let peer = worker.client.install_live_view_test_session(&fixture.root);
+    worker.shared.stop.store(false, Ordering::Release);
+    worker.shared.disconnect.store(false, Ordering::Release);
+    (fixture, worker, room, peer)
+}
+fn after(end: u64) {
+    loop {
+        let now = crate::clock::boot_ms().unwrap();
+        if now > end {
+            return;
+        }
+        thread::sleep(Duration::from_millis((end - now + 1).min(10)));
+    }
+}
+
+#[test]
+fn expired_queued_view_dispatches_nothing_and_retains_its_session() {
+    let (fixture, mut worker, room, mut peer) = live_worker();
+    let _clock = worker.client.start_view_test_clock(&fixture.root);
+    let stream = worker.client.session().unwrap().stream_handle();
+    let mut state = CommunityAssembly::new(&mut worker, room).unwrap();
+    state.end = 0;
+    let before = worker.client.store.usage().unwrap().commit_counter;
+    assert!(matches!(
+        state.step(&mut worker, 0),
+        Err(Error::ReadDeadlineExpired)
+    ));
+    peer.set_nonblocking(true).unwrap();
+    let mut byte = [0];
+    assert_eq!(
+        std::io::Read::read(&mut peer, &mut byte)
+            .unwrap_err()
+            .kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+    assert!(!stream.privacy().is_historical());
+    assert_eq!(state.end, 0);
+    assert_eq!(worker.client.store.usage().unwrap().commit_counter, before);
+    assert!(worker.snapshot.notifications.is_empty());
+}
+
+#[test]
+fn fragmented_late_view_reply_is_drained_without_publishing_or_reconnecting() {
+    let (fixture, mut worker, room, peer) = live_worker();
+    let _clock = worker.client.start_view_test_clock(&fixture.root);
+    let stream = worker.client.session().unwrap().stream_handle();
+    let mut state = CommunityAssembly::new(&mut worker, room).unwrap();
+    let end = crate::clock::boot_ms().unwrap() + 500;
+    state.end = end;
+    let page = partial(room, worker.snapshot.account);
+    let mut first = true;
+    let server = worker.client.view_test_responses(
+        peer,
+        vec![
+            (
+                Operation::CommunitySync,
+                Some(Outcome::Result {
+                    body: Value::serialized(&page).unwrap(),
+                }),
+            ),
+            (
+                Operation::ServiceInspect,
+                Some(Outcome::Result { body: Value::Null }),
+            ),
+        ],
+        move |peer, frame| {
+            if first {
+                first = false;
+                peer.write_all(&frame[..3]).unwrap();
+                after(end);
+                peer.write_all(&frame[3..]).unwrap();
+            } else {
+                peer.write_all(frame).unwrap();
+            }
+        },
+    );
+    let before = worker.client.store.usage().unwrap().commit_counter;
+    let result = state.step(&mut worker, end);
+    assert!(matches!(result, Err(Error::ReadDeadlineExpired)));
+    assert_eq!(state.end, end);
+    assert_eq!(worker.client.store.usage().unwrap().commit_counter, before);
+    assert!(state.history.is_none() && state.filters.is_empty() && state.restrictions.is_empty());
+    assert!(worker.snapshot.inspection.filters.is_empty());
+    assert!(worker.snapshot.inspection.restrictions.is_empty());
+    assert!(worker.snapshot.notifications.is_empty());
+    assert!(
+        cache::room(&mut worker.client.store, room)
+            .unwrap()
+            .cursor
+            .is_none()
+    );
+    assert!(worker.client.community_modes.is_empty());
+    assert!(!stream.privacy().is_historical());
+    let next: Value = worker
+        .read(
+            Operation::ServiceInspect,
+            Target::Service,
+            &Value::Map(vec![]),
+        )
+        .unwrap();
+    assert_eq!(next, Value::Null);
+    assert_eq!(server.join().unwrap().len(), 2);
+    assert!(worker.client.pending().unwrap().is_empty());
+}
+
+#[test]
+fn late_view_refusal_keeps_terminal_meaning_and_stops_temporary_retries() {
+    for code in [ErrorCode::Denied, ErrorCode::Expired, ErrorCode::Overloaded] {
+        let (fixture, mut worker, _, peer) = live_worker();
+        let _clock = worker.client.start_view_test_clock(&fixture.root);
+        let end = crate::clock::boot_ms().unwrap() + 500;
+        let server = worker.client.view_test_responses(
+            peer,
+            vec![(
+                Operation::ServiceInspect,
+                Some(Outcome::Refused {
+                    code,
+                    detail: "ViewRefused".into(),
+                    retry_after_ms: Some(250),
+                }),
+            )],
+            move |peer, frame| {
+                peer.write_all(&frame[..3]).unwrap();
+                after(end);
+                peer.write_all(&frame[3..]).unwrap();
+            },
+        );
+        let result: Result<Value> = worker.read_view_until(
+            Operation::ServiceInspect,
+            Target::Service,
+            &Value::Map(vec![]),
+            end,
+        );
+        if code == ErrorCode::Overloaded {
+            assert!(matches!(result, Err(Error::ReadDeadlineExpired)));
+        } else {
+            assert!(matches!(result, Err(Error::Refused { code: actual, .. }) if actual == code));
+        }
+        assert_eq!(server.join().unwrap().len(), 1);
+        assert!(worker.client.pending().unwrap().is_empty());
+    }
+}
+
+#[test]
+fn view_read_retries_exact_bytes_but_partial_reply_at_original_read_end_closes() {
+    let (fixture, mut worker, _, peer) = live_worker();
+    let _clock = worker.client.start_view_test_clock(&fixture.root);
+    let stream = worker.client.session().unwrap().stream_handle();
+    let read_end = crate::clock::boot_ms().unwrap() + 800;
+    let view_end = read_end + 2000;
+    let mut first = true;
+    let (release, wait) = std::sync::mpsc::channel();
+    let server = worker.client.view_test_responses(
+        peer,
+        vec![
+            (
+                Operation::ServiceInspect,
+                Some(Outcome::Refused {
+                    code: ErrorCode::Overloaded,
+                    detail: "ViewBusy".into(),
+                    retry_after_ms: Some(250),
+                }),
+            ),
+            (
+                Operation::ServiceInspect,
+                Some(Outcome::Result { body: Value::Null }),
+            ),
+        ],
+        move |peer, frame| {
+            if first {
+                first = false;
+                peer.write_all(frame).unwrap();
+            } else {
+                peer.write_all(&frame[..3]).unwrap();
+                wait.recv_timeout(Duration::from_secs(2)).unwrap();
+            }
+        },
+    );
+    let result: Result<Value> = worker.read_with_deadlines(
+        Operation::ServiceInspect,
+        Target::Service,
+        &Value::Map(vec![]),
+        read_end,
+        Some(view_end),
+    );
+    assert!(matches!(
+        result,
+        Err(Error::Network(crate::client::network::Error::Transport))
+    ));
+    assert!(crate::clock::boot_ms().unwrap() < view_end);
+    assert!(stream.privacy().is_historical());
+    release.send(()).unwrap();
+    let received = server.join().unwrap();
+    assert_eq!(received.len(), 2);
+    assert_eq!(received[0], received[1]);
+    assert!(worker.client.pending().unwrap().is_empty());
+}
 
 fn partial(_room: RoomId, account: AccountId) -> CommunityPage {
     CommunityPage {

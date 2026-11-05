@@ -105,6 +105,22 @@ impl Client {
     pub(in crate::client) fn install_closed_view_test_session(&mut self, root: &Path) {
         self.session = Some(network::tests::closed_view_session(root, &self.profile));
     }
+    pub(in crate::client) fn install_live_view_test_session(
+        &mut self,
+        root: &Path,
+    ) -> std::os::unix::net::UnixStream {
+        let (session, peer) = network::tests::live_view_session(root, &self.profile);
+        self.session = Some(session);
+        peer
+    }
+    pub(in crate::client) fn view_test_responses(
+        &self,
+        peer: std::os::unix::net::UnixStream,
+        replies: Vec<(Operation, Option<Outcome>)>,
+        reply: impl FnMut(&mut std::os::unix::net::UnixStream, &[u8]) + Send + 'static,
+    ) -> thread::JoinHandle<Vec<Vec<u8>>> {
+        signed_responses_with(peer, self.key.verifying_key(), replies, reply)
+    }
 }
 
 fn fixture() -> (Fixture, Client, RoomId) {
@@ -207,9 +223,19 @@ fn live_fixture() -> (
 // Reuse the companion handoff and session fixture, then authenticate real HRC
 // frames. This exercises response binding without asserting HyperNet authority.
 fn signed_responses(
+    peer: std::os::unix::net::UnixStream,
+    key: VerifyingKey,
+    replies: Vec<(Operation, Option<Outcome>)>,
+) -> thread::JoinHandle<Vec<Vec<u8>>> {
+    signed_responses_with(peer, key, replies, |peer, frame| {
+        peer.write_all(frame).unwrap();
+    })
+}
+fn signed_responses_with(
     mut peer: std::os::unix::net::UnixStream,
     key: VerifyingKey,
     replies: Vec<(Operation, Option<Outcome>)>,
+    mut reply: impl FnMut(&mut std::os::unix::net::UnixStream, &[u8]) + Send + 'static,
 ) -> thread::JoinHandle<Vec<Vec<u8>>> {
     thread::spawn(move || {
         use std::io::Read;
@@ -242,7 +268,7 @@ fn signed_responses(
             .unwrap()
             .encode()
             .unwrap();
-            peer.write_all(&frame).unwrap();
+            reply(&mut peer, &frame);
         }
         received
     })

@@ -28,7 +28,14 @@ A selected community page with authenticated `has_more` schedules a finite
 catch-up burst without waiting for the next metadata interval. Each turn reads
 one bounded grouped component, then yields to queued commands; due metadata has
 priority. Up to eight additional history pages share the first page's original
-ten-second end, including time spent on intervening work. Incomplete recipient
+ten-second admission and currentness end, including time spent on intervening work.
+Each newly dispatched read separately owns the existing ten-second exchange bound,
+captured before signing. Its exact retries cannot restart that bound. A read already
+in flight may finish after the view end, within its own original exchange bound;
+total completion can extend the logical view end only by that bounded in-flight
+read. Such a late reply is consumed and authenticated without publishing its content,
+advancing a cursor, installing filters or scheduling another continuation. No new
+request starts after the view end. Incomplete recipient
 policy cannot publish history. Each completed page advances the authenticated
 cursor; an unchanged position with `has_more` is rejected. Initial catch-up does
 not emit live notifications. A completed command pull supersedes matching partial
@@ -129,11 +136,13 @@ shutdown interrupt retry waiting; synchronous direct reads retain the same fixed
 budget. This read path cannot submit mutations or recreate a
 pending message. Room lists stop when the final partial page is received.
 
-A read budget that ends before dispatch or after a complete verified response
+A read or logical view budget that ends before dispatch or after a complete verified response
 reports `ReadDeadlineExpired`. Late content cannot make a view current. The
 Controller retains the synchronized session, marks affected views stale and uses
 its existing bounded backoff. Terminal refusals retain their authority meaning;
-an incomplete exchange or actual socket timeout still requires reconnection.
+an incomplete exchange at its own read deadline or actual socket failure still
+requires reconnection. A logical view deadline never shortens an already dispatched
+frame exchange. Neither deadline grants authority or permits mutation retries.
 
 The command queue contains at most 32 bounded commands. Dispatch returns a local
 request number. Immutable snapshots carry that number on command status and

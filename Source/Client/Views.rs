@@ -15,8 +15,16 @@ fn read_page<T: serde::de::DeserializeOwned + serde::Serialize, B: serde::Serial
     request: &B,
     end: u64,
 ) -> Result<T> {
-    let body: Value = worker.read_until(operation, target, request, end)?;
-    home::views::decode(&body).ok_or(Error::Input)
+    let body: Value = worker.read_view_until(operation, target, request, end)?;
+    let page = home::views::decode(&body).ok_or(Error::Input)?;
+    current(end)?;
+    Ok(page)
+}
+fn current(end: u64) -> Result<()> {
+    if crate::clock::boot_ms().map_err(|_| Error::Clock)? >= end {
+        return Err(Error::ReadDeadlineExpired);
+    }
+    Ok(())
 }
 
 fn page() -> home::InspectPage {
@@ -327,6 +335,7 @@ impl CommunityAssembly {
         issued: CommunityRequest,
         response: CommunityPage,
     ) -> Result<bool> {
+        current(self.end)?;
         if response.inspection.confidentiality != RoomConfidentiality::Community
             || self.request.context.is_some_and(|c| c != response.context)
         {

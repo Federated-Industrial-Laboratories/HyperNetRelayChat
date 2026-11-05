@@ -947,8 +947,41 @@ impl Worker {
         body: &B,
         end: u64,
     ) -> Result<T> {
+        self.read_with_deadlines(op, target, body, end, None)
+    }
+    fn read_view_until<T: serde::de::DeserializeOwned, B: serde::Serialize>(
+        &mut self,
+        op: Operation,
+        target: Target,
+        body: &B,
+        view_end: u64,
+    ) -> Result<T> {
+        // A new request owns its full existing exchange bound. The view's older
+        // end controls admission and publication, not an in-flight frame's tail.
+        let read_end = crate::clock::boot_ms()
+            .map_err(|_| Error::Clock)?
+            .saturating_add(10_000);
+        self.read_with_deadlines(op, target, body, read_end, Some(view_end))
+    }
+    fn read_with_deadlines<T: serde::de::DeserializeOwned, B: serde::Serialize>(
+        &mut self,
+        op: Operation,
+        target: Target,
+        body: &B,
+        read_end: u64,
+        view_end: Option<u64>,
+    ) -> Result<T> {
         if !home::is_read_operation(op) {
             return Err(Error::Input);
+        }
+        let view_expired = || -> Result<bool> {
+            match view_end {
+                Some(end) => Ok(crate::clock::boot_ms().map_err(|_| Error::Clock)? >= end),
+                None => Ok(false),
+            }
+        };
+        if view_expired()? {
+            return Err(Error::ReadDeadlineExpired);
         }
         let action = self.client.prepare(
             op,
@@ -961,15 +994,32 @@ impl Worker {
                 .map_err(|_| Error::Input)?;
         let shared = Arc::clone(&self.shared);
         let r = retry_read(
-            end,
+            read_end,
             || shared.stop.load(Ordering::Acquire) || shared.disconnect.load(Ordering::Acquire),
             |end| {
+                if view_expired()? {
+                    return Err(Error::ReadDeadlineExpired);
+                }
                 let response = self
                     .client
                     .session()?
                     .submit_read_until(&signed, &key, end)
                     .map(|response| response.value().clone())
                     .map_err(Error::from)?;
+                if view_expired()? {
+                    // Consume and authenticate the complete reply, but never
+                    // install late content or replace a terminal denial with expiry.
+                    if matches!(
+                        response.outcome,
+                        Outcome::Rejected { .. } | Outcome::Refused { .. }
+                    ) {
+                        let error = Error::from_outcome(response.outcome);
+                        if error.retry_delay_ms().is_none() {
+                            return Err(error);
+                        }
+                    }
+                    return Err(Error::ReadDeadlineExpired);
+                }
                 self.observe_read(action.operation, &action.target, &response);
                 Ok(response)
             },
