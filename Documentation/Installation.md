@@ -4,8 +4,8 @@ HRC packages contain the GUI, TUI, CLI and deterministic bot in one `Bin/hrc`
 executable. HyperNet Core and Suite are separate prerequisites. Installing HRC
 does not create a network, grant application access or start a service.
 
-HRC 0.1.0 release qualification is pending. Check the package's release notes and
-qualification record for its stated platform and capacity limits.
+HRC 0.1.0 is qualified for the [bounded Linux pilot](IntegrationProfile.md#8-linux-pilot-qualification).
+Use its measured platform, topology and workload limits when planning deployment.
 
 ## Requirements
 
@@ -33,7 +33,7 @@ private directory permissions. There is no direct Internet fallback.
 Obtain the selected binary archive, source archive, `SHA256SUMS`, its
 `SHA256SUMS.sig` OpenSSH signature, and `PublisherKey.txt` from the
 [private v0.1.0 release](https://github.com/Federated-Industrial-Laboratories/HyperNetRelayChat/releases/tag/v0.1.0)
-once published. Access requires an authorized repository account. Repository and
+Access requires an authorized repository account. Repository and
 package distribution remain private; published manuals do not provide public
 download access.
 Verify the publisher key against this independently pinned SHA-256 fingerprint:

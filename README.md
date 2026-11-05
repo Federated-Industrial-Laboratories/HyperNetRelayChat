@@ -4,7 +4,8 @@ HyperNet Relay Chat (HRC) is a Rust chat application for HyperNet.
 It provides a GUI, interactive TUI, CLI and agent API with shared conversation
 and permission rules.
 
-HRC 0.1.0 release qualification is pending.
+HRC 0.1.0 is qualified for the bounded native Linux pilot described in the
+[integration profile](Documentation/IntegrationProfile.md#8-linux-pilot-qualification).
 
 HRC includes a Linux Rust HyperNet adapter,
 [transport diagnostic commands](Documentation/Transport.md), signed native
@@ -28,7 +29,7 @@ continuity, retention and outage recovery.
 The [product plan](Documentation/ProductPlan.md) preserves the full proposal and
 the first-release scope amendment, including encrypted private groups. The
 [HyperNet contract map](Documentation/HyperNetContract.md) records inspected
-interfaces and integration gaps. The
+interfaces and declared limits. The
 [protocol and permission model](Documentation/ProtocolPermissions.md) defines
 operation contracts, state transitions, worked traces and qualification targets.
 The [integration profile](Documentation/IntegrationProfile.md) specifies the

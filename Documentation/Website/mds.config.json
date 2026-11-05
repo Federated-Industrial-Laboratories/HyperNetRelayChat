@@ -3,13 +3,13 @@
   "site": {
     "id": "hypernet-hrc-docs",
     "title": "HyperNet Relay Chat",
-    "description": "HRC 0.1.0 manuals. Release qualification remains in progress.",
+    "description": "HRC 0.1.0 manuals for the qualified native Linux pilot.",
     "language": "en-GB",
     "version": "0.1.0",
-    "channel": "preview",
+    "channel": "stable",
     "homeUrl": "/docs/",
     "footer": "Federated Industrial Laboratories | HyperNet Relay Chat 0.1.0",
-    "indexable": false,
+    "indexable": true,
     "origin": "https://hypernet.federatedindustrial.com"
   },
   "paths": {
@@ -181,62 +181,62 @@
   "publicationEdits": [
     {
       "source": "Documentation/HyperNetContract.md",
-      "from": "https://github.com/Federated-Industrial-Laboratories/HyperNet/blob/a3593815b7ad04ac59f76853661705c433782032/Documentation/ApplicationStreams.md",
+      "from": "https://github.com/Federated-Industrial-Laboratories/HyperNet/blob/4cf491891e2b2c5a21cba339c3e0dd2730fed370/Documentation/ApplicationStreams.md",
       "to": "/docs/core/application-streams/"
     },
     {
       "source": "Documentation/HyperNetContract.md",
-      "from": "https://github.com/Federated-Industrial-Laboratories/HyperNet/blob/a3593815b7ad04ac59f76853661705c433782032/Documentation/PermissionScopes.md",
+      "from": "https://github.com/Federated-Industrial-Laboratories/HyperNet/blob/4cf491891e2b2c5a21cba339c3e0dd2730fed370/Documentation/PermissionScopes.md",
       "to": "/docs/core/permission-scopes/"
     },
     {
       "source": "Documentation/HyperNetContract.md",
-      "from": "https://github.com/Federated-Industrial-Laboratories/HyperNet/blob/a3593815b7ad04ac59f76853661705c433782032/Documentation/Applications.md",
+      "from": "https://github.com/Federated-Industrial-Laboratories/HyperNet/blob/4cf491891e2b2c5a21cba339c3e0dd2730fed370/Documentation/Applications.md",
       "to": "/docs/core/applications/"
     },
     {
       "source": "Documentation/HyperNetContract.md",
-      "from": "https://github.com/Federated-Industrial-Laboratories/HyperNetSuite/blob/cdead8ec6ce7debb694725a87808dd2af1b769b3/SDK/README.md",
+      "from": "https://github.com/Federated-Industrial-Laboratories/HyperNetSuite/blob/ae11f4ab11a3dff6c537e173a1952add0a03c266/SDK/README.md",
       "to": "/docs/suite/sdk/"
     },
     {
       "source": "Documentation/HyperNetContract.md",
-      "from": "https://github.com/Federated-Industrial-Laboratories/HyperNet/blob/a3593815b7ad04ac59f76853661705c433782032/Documentation/ApplicationChecks.md",
+      "from": "https://github.com/Federated-Industrial-Laboratories/HyperNet/blob/4cf491891e2b2c5a21cba339c3e0dd2730fed370/Documentation/ApplicationChecks.md",
       "to": "/docs/core/application-checks/"
     },
     {
       "source": "Documentation/HyperNetContract.md",
-      "from": "https://github.com/Federated-Industrial-Laboratories/HyperNetSuite/blob/cdead8ec6ce7debb694725a87808dd2af1b769b3/Documentation/ApplicationContext.md",
+      "from": "https://github.com/Federated-Industrial-Laboratories/HyperNetSuite/blob/ae11f4ab11a3dff6c537e173a1952add0a03c266/Documentation/ApplicationContext.md",
       "to": "/docs/suite/application-context/"
     },
     {
       "source": "Documentation/HyperNetContract.md",
-      "from": "https://github.com/Federated-Industrial-Laboratories/HyperNet/blob/a3593815b7ad04ac59f76853661705c433782032/Documentation/Federation.md",
+      "from": "https://github.com/Federated-Industrial-Laboratories/HyperNet/blob/4cf491891e2b2c5a21cba339c3e0dd2730fed370/Documentation/Federation.md",
       "to": "/docs/core/federation/"
     },
     {
       "source": "Documentation/HyperNetContract.md",
-      "from": "https://github.com/Federated-Industrial-Laboratories/HyperNetSuite/blob/cdead8ec6ce7debb694725a87808dd2af1b769b3/ReadMe.md",
+      "from": "https://github.com/Federated-Industrial-Laboratories/HyperNetSuite/blob/ae11f4ab11a3dff6c537e173a1952add0a03c266/ReadMe.md",
       "to": "/docs/suite/overview/"
     },
     {
       "source": "Documentation/IntegrationProfile.md",
-      "from": "https://github.com/Federated-Industrial-Laboratories/HyperNet/blob/a3593815b7ad04ac59f76853661705c433782032/Documentation/AuthorityContract.md",
+      "from": "https://github.com/Federated-Industrial-Laboratories/HyperNet/blob/4cf491891e2b2c5a21cba339c3e0dd2730fed370/Documentation/AuthorityContract.md",
       "to": "/docs/core/authority-contract/"
     },
     {
       "source": "Documentation/IntegrationProfile.md",
-      "from": "https://github.com/Federated-Industrial-Laboratories/HyperNet/blob/a3593815b7ad04ac59f76853661705c433782032/Documentation/ApplicationChecks.md",
+      "from": "https://github.com/Federated-Industrial-Laboratories/HyperNet/blob/4cf491891e2b2c5a21cba339c3e0dd2730fed370/Documentation/ApplicationChecks.md",
       "to": "/docs/core/application-checks/"
     },
     {
       "source": "Documentation/IntegrationProfile.md",
-      "from": "https://github.com/Federated-Industrial-Laboratories/HyperNetSuite/blob/cdead8ec6ce7debb694725a87808dd2af1b769b3/Documentation/ApplicationContext.md",
+      "from": "https://github.com/Federated-Industrial-Laboratories/HyperNetSuite/blob/ae11f4ab11a3dff6c537e173a1952add0a03c266/Documentation/ApplicationContext.md",
       "to": "/docs/suite/application-context/"
     },
     {
       "source": "Documentation/IntegrationProfile.md",
-      "from": "https://github.com/Federated-Industrial-Laboratories/HyperNet/blob/a3593815b7ad04ac59f76853661705c433782032/Documentation/PrivateRoutes.md",
+      "from": "https://github.com/Federated-Industrial-Laboratories/HyperNet/blob/4cf491891e2b2c5a21cba339c3e0dd2730fed370/Documentation/PrivateRoutes.md",
       "to": "/docs/core/private-routes/"
     }
   ],

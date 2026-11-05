@@ -11,7 +11,8 @@ policies. Include other traffic sharing those policies. This does not increase
 the companion's sixteen application-stream slots. See the
 [integration profile](IntegrationProfile.md) for the distinct bounds.
 
-HRC 0.1.0 release qualification is pending.
+HRC 0.1.0 qualification covers the [bounded Linux profile](IntegrationProfile.md#8-linux-pilot-qualification)
+and the separately recorded conversation and federation workflows.
 
 The service is authoritative for accounts, rooms, delegation, moderation and
 ordered history. Each client owns a separate endpoint signing key and encrypted

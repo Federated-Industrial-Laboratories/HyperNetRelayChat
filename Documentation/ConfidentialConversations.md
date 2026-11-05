@@ -5,7 +5,8 @@ for the [persistent MLS boundary](CryptoRuntime.md). Encrypted direct conversati
 and private groups use the same ordered encrypted-room lifecycle. Community rooms
 remain service-readable.
 
-HRC 0.1.0 release qualification is pending.
+HRC 0.1.0 qualification covers the [bounded Linux profile](IntegrationProfile.md#8-linux-pilot-qualification)
+and the separately recorded conversation and federation workflows.
 
 ## Admission and identity
 

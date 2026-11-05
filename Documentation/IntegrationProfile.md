@@ -1,23 +1,23 @@
 # HRC transport authority and federation profile
 
-Revision 5, 5 November 2026. [Protocol contract](ProtocolPermissions.md) · [HyperNet contract map](HyperNetContract.md)
+Revision 6, 5 November 2026. [Protocol contract](ProtocolPermissions.md) · [HyperNet contract map](HyperNetContract.md)
 
 This profile describes the implemented current-authority, privacy and remote-actor
-boundaries against the checked Core 0.10.2 and Suite 0.10.1 release candidates.
-Source links pin `a3593815b7ad04ac59f76853661705c433782032` and
-`cdead8ec6ce7debb694725a87808dd2af1b769b3`, respectively. These are inspected
-candidate revisions, not a publication or complete native qualification claim.
-The HRC adapter and smallest local conversation retain their separate
-representative integration evidence. The accepted pilot and history defaults
-remain unchanged; the full release gates remain open.
+boundaries for Core 0.10.2, Suite 0.10.1 and HRC 0.1.0. Source links pin the matching
+upstream release commits. The qualified runtime code was built from Core
+`a3593815b7ad04ac59f76853661705c433782032`, Suite
+`cdead8ec6ce7debb694725a87808dd2af1b769b3` and HRC
+`037cc258e5842a07136055f98919f0ba21636b9a`; final publication changes only release
+documentation. Section 8 gives the native pilot results and limits. Earlier
+conversation, federation and upgrade evidence retains its original artifact scope.
 
 ## 1. Existing authority semantics
 
-Core already performs fresh quorum `Stream::Permit` reads for an exact admitted session. Only that stream's registered route endpoint can request the read. The evaluator checks the session generation and open state, original caller capability, service, route and current governance. A service owner cannot replace the endpoint requester. `Inspect` and the caller's slot `Lookup` serve different purposes. [Permit evaluation](https://github.com/Federated-Industrial-Laboratories/HyperNet/blob/a3593815b7ad04ac59f76853661705c433782032/Source/Authority/Domains/AuthorityStreamsEvaluation.rs)
+Core already performs fresh quorum `Stream::Permit` reads for an exact admitted session. Only that stream's registered route endpoint can request the read. The evaluator checks the session generation and open state, original caller capability, service, route and current governance. A service owner cannot replace the endpoint requester. `Inspect` and the caller's slot `Lookup` serve different purposes. [Permit evaluation](https://github.com/Federated-Industrial-Laboratories/HyperNet/blob/4cf491891e2b2c5a21cba339c3e0dd2730fed370/Source/Authority/Domains/AuthorityStreamsEvaluation.rs)
 
-The route runtime uses these reads to renew protected transport writes. Its fresh read path verifies quorum evidence, challenges, context and retained floors. A fresh read does not append an HRC message to authority history or prevent the next authority change. [Read verification](https://github.com/Federated-Industrial-Laboratories/HyperNet/blob/a3593815b7ad04ac59f76853661705c433782032/Source/Routing/RouteAuthorityRead.rs) · [Stream renewal](https://github.com/Federated-Industrial-Laboratories/HyperNet/blob/a3593815b7ad04ac59f76853661705c433782032/Source/Routing/ApplicationStreamRuntime.rs)
+The route runtime uses these reads to renew protected transport writes. Its fresh read path verifies quorum evidence, challenges, context and retained floors. A fresh read does not append an HRC message to authority history or prevent the next authority change. [Read verification](https://github.com/Federated-Industrial-Laboratories/HyperNet/blob/4cf491891e2b2c5a21cba339c3e0dd2730fed370/Source/Routing/RouteAuthorityRead.rs) · [Stream renewal](https://github.com/Federated-Industrial-Laboratories/HyperNet/blob/4cf491891e2b2c5a21cba339c3e0dd2730fed370/Source/Routing/ApplicationStreamRuntime.rs)
 
-The current HyperNet contract bounds ordinary stream-control challenges to 5,000 ms end to end. Committed revocation prevents new permits; a permit issued before an unknown revocation retains only its original remaining lifetime. Known local withdrawal stops further use immediately. HRC inherits this finite freshness model. It does not promise that independent authority and database commits are globally atomic. The 15-second Page-federation maintenance exception does not apply to HRC. [Authority time and revocation contract](https://github.com/Federated-Industrial-Laboratories/HyperNet/blob/a3593815b7ad04ac59f76853661705c433782032/Documentation/AuthorityContract.md)
+The current HyperNet contract bounds ordinary stream-control challenges to 5,000 ms end to end. Committed revocation prevents new permits; a permit issued before an unknown revocation retains only its original remaining lifetime. Known local withdrawal stops further use immediately. HRC inherits this finite freshness model. It does not promise that independent authority and database commits are globally atomic. The 15-second Page-federation maintenance exception does not apply to HRC. [Authority time and revocation contract](https://github.com/Federated-Industrial-Laboratories/HyperNet/blob/4cf491891e2b2c5a21cba339c3e0dd2730fed370/Documentation/AuthorityContract.md)
 
 HRC's own pause, revocation, membership and agreement controls remain strictly ordered by the receiving home service. Acknowledged HRC revocation rejects effects ordered after it. This is a stronger local ordering guarantee than observing a remote HyperNet revocation, and the UI must distinguish them.
 
@@ -25,7 +25,7 @@ HRC's own pause, revocation, membership and agreement controls remain strictly o
 
 The version-2 companion exposes `checkAuthority` alongside `connect`, `accept`, `status` and `cancel`. Its connection list and original peer context remain distinct from a fresh authority read. Socket liveness, an HRC ping, old admission evidence and status error prose cannot authorise an action waiting in an HRC queue.
 
-**Implemented upstream contract: `checkAuthority-v2` for an exact active incoming connection.** Core's existing endpoint remains the authority requester and the companion remains the local verification boundary. HRC receives neither an endpoint signing key nor an arbitrary authority-query facility. [Core check contract](https://github.com/Federated-Industrial-Laboratories/HyperNet/blob/a3593815b7ad04ac59f76853661705c433782032/Documentation/ApplicationChecks.md) · [Suite API](https://github.com/Federated-Industrial-Laboratories/HyperNetSuite/blob/cdead8ec6ce7debb694725a87808dd2af1b769b3/Documentation/ApplicationContext.md)
+**Implemented upstream contract: `checkAuthority-v2` for an exact active incoming connection.** Core's existing endpoint remains the authority requester and the companion remains the local verification boundary. HRC receives neither an endpoint signing key nor an arbitrary authority-query facility. [Core check contract](https://github.com/Federated-Industrial-Laboratories/HyperNet/blob/4cf491891e2b2c5a21cba339c3e0dd2730fed370/Documentation/ApplicationChecks.md) · [Suite API](https://github.com/Federated-Industrial-Laboratories/HyperNetSuite/blob/ae11f4ab11a3dff6c537e173a1952add0a03c266/Documentation/ApplicationContext.md)
 
 | Request or result | Implemented meaning and HRC obligation |
 | --- | --- |
@@ -40,13 +40,13 @@ The version-2 companion exposes `checkAuthority` alongside `connect`, `accept`, 
 
 The endpoint performs a new `Stream::Permit` read after the request arrives. It verifies certified authority, rechecks current gates, clock health and exact forwarding/session liveness, and signs a receipt bound to the full request. The companion verifies the signature and accepted binding before exposing typed results. Only `permitted` and `denied` carry certified observation metadata. Neither is a portable quorum proof or a reusable application grant. Changed content, another connection or a new control generation cannot reuse it.
 
-The separate endpoint-initiated `Ingress/Checks.sock` channel preserves opaque application bytes and mapped ingress-directory isolation. The endpoint sees `/Application/Checks.sock`, not the user's native command socket, profile or unrelated files. A signed challenge/ready exchange binds the accepted binding digest, nonce, companion/endpoint instances, control generation and verified host boot. Both sides require zero monotonic/boot-time namespace offsets. Framing retains the 16,384-byte ceiling; the endpoint control schema uses its existing canonical TrustWire signed envelope, while caller IPC uses versioned JSON. HRC implements the caller boundary, not a second endpoint verifier. [Canonical control schema](https://github.com/Federated-Industrial-Laboratories/HyperNet/blob/a3593815b7ad04ac59f76853661705c433782032/Source/Authority/Domains/ApplicationStreamControl.rs)
+The separate endpoint-initiated `Ingress/Checks.sock` channel preserves opaque application bytes and mapped ingress-directory isolation. The endpoint sees `/Application/Checks.sock`, not the user's native command socket, profile or unrelated files. A signed challenge/ready exchange binds the accepted binding digest, nonce, companion/endpoint instances, control generation and verified host boot. Both sides require zero monotonic/boot-time namespace offsets. Framing retains the 16,384-byte ceiling; the endpoint control schema uses its existing canonical TrustWire signed envelope, while caller IPC uses versioned JSON. HRC implements the caller boundary, not a second endpoint verifier. [Canonical control schema](https://github.com/Federated-Industrial-Laboratories/HyperNet/blob/4cf491891e2b2c5a21cba339c3e0dd2730fed370/Source/Authority/Domains/ApplicationStreamControl.rs)
 
 Capability status separates API support, authenticated endpoint-channel readiness and eligibility of an exact accepted incoming connection. Outgoing streams cannot use a receiving-end check. Version-1 payload clients retain their contract, but an HRC service requiring fresh effect checks refuses a companion without `checkAuthority-v2`. A temporarily unready channel yields unavailable effects; repeated `status` calls are not a fallback.
 
-The companion deadline crosses Core's queue and authority read unchanged. Its authority challenge has a separate immutable ceiling at the original companion start plus 5,000 ms, decreasing with queue time even for a one-second caller wait. This supports the authority uncertainty window without extending transport waiting or permitting a late result. A renewable clock observation may be refreshed during the read; the delivered receipt is clipped by current clock validity, caller/session bounds, consent/gates and certified expiry. HRC must preserve the minimum of its original call deadline and the verified receipt's `notAfterBootMs`, never restart a relative lifetime, and invalidate known closure/control changes. Restart invalidates pending work. Foreign assertions use section 5; another host's boot-clock number is not comparable. [SDK result lifetime](https://github.com/Federated-Industrial-Laboratories/HyperNetSuite/blob/cdead8ec6ce7debb694725a87808dd2af1b769b3/SDK/hypernet_streams/context.py)
+The companion deadline crosses Core's queue and authority read unchanged. Its authority challenge has a separate immutable ceiling at the original companion start plus 5,000 ms, decreasing with queue time even for a one-second caller wait. This supports the authority uncertainty window without extending transport waiting or permitting a late result. A renewable clock observation may be refreshed during the read; the delivered receipt is clipped by current clock validity, caller/session bounds, consent/gates and certified expiry. HRC must preserve the minimum of its original call deadline and the verified receipt's `notAfterBootMs`, never restart a relative lifetime, and invalidate known closure/control changes. Restart invalidates pending work. Foreign assertions use section 5; another host's boot-clock number is not comparable. [SDK result lifetime](https://github.com/Federated-Industrial-Laboratories/HyperNetSuite/blob/ae11f4ab11a3dff6c537e173a1952add0a03c266/SDK/hypernet_streams/context.py)
 
-The candidates allow one pending check per stream and four total checks across
+The upstream implementations allow one pending check per stream and four total checks across
 queued and in-flight work, including cancellation draining after reconnect.
 Suite pipelines requests with exact reply correlation. Core overlaps immutable
 network exchanges while one actor retains all challenge, current-state and
@@ -83,10 +83,12 @@ unused application reserves; connection allocation alone does not establish the
 pilot's latency or fairness gates.
 
 The channel consumes no application connection slot. HRC admits four concurrent
-exchanges within its existing 32-caller queue and charges work to its service and
-actor budgets. Original deadlines, current gates and final authority checks still
-apply. Neither concurrency nor earlier interoperability establishes the accepted
-pilot's latency or fairness.
+checks within 32 total tickets, including active work. Service-owned classes and
+account turns reserve capacity for both interactive operations and reads; each
+class uses at most three active checks. Verified delegated owners share their
+account limits. The [permission specification](ProtocolPermissions.md) defines
+these bounds. Queue admission never replaces current authority or final-effect
+checks. Section 8 qualifies the measured pilot, not every unused connection slot.
 
 Preparation errors remain distinct from these authority dispositions. Suite
 reports local `Capacity`, accept or tagged transport `Timeout`, and tagged setup
@@ -113,9 +115,9 @@ HRC control acknowledgement is precise: an acknowledged pause/revoke means every
 
 ## 4. Directional privacy evidence
 
-Application streams already invoke Suite's relay connector. It connects to the relay, admits the transit voucher and establishes inner endpoint TLS before application handoff. `Organisation` and `Independent` are assurance profiles, not a direct-Internet switch. Independent assurance checks distinct declared operator keys and domains; it does not prove actual noncollusion. [Companion connector](https://github.com/Federated-Industrial-Laboratories/HyperNetSuite/blob/cdead8ec6ce7debb694725a87808dd2af1b769b3/Source/Applications/ApplicationStreamsAgent.rs) · [Route connector](https://github.com/Federated-Industrial-Laboratories/HyperNetSuite/blob/cdead8ec6ce7debb694725a87808dd2af1b769b3/Source/Routing/RouteConnector.rs) · [Privacy guarantees](https://github.com/Federated-Industrial-Laboratories/HyperNet/blob/a3593815b7ad04ac59f76853661705c433782032/Documentation/PrivateRoutes.md)
+Application streams already invoke Suite's relay connector. It connects to the relay, admits the transit voucher and establishes inner endpoint TLS before application handoff. `Organisation` and `Independent` are assurance profiles, not a direct-Internet switch. Independent assurance checks distinct declared operator keys and domains; it does not prove actual noncollusion. [Companion connector](https://github.com/Federated-Industrial-Laboratories/HyperNetSuite/blob/ae11f4ab11a3dff6c537e173a1952add0a03c266/Source/Applications/ApplicationStreamsAgent.rs) · [Route connector](https://github.com/Federated-Industrial-Laboratories/HyperNetSuite/blob/ae11f4ab11a3dff6c537e173a1952add0a03c266/Source/Routing/RouteConnector.rs) · [Privacy guarantees](https://github.com/Federated-Industrial-Laboratories/HyperNet/blob/4cf491891e2b2c5a21cba339c3e0dd2730fed370/Documentation/PrivateRoutes.md)
 
-**Implemented upstream contract: version-2 directional privacy with explicit evidence provenance.** Saved profile labels remain insufficient. Outgoing metadata records the actual nested TLS path and configured route settings. A matching certified destination lookup contributes `certifiedEndpointProfile`; `certifiedRelayProfile` remains null without corresponding evidence. A retained voucher or a saved profile does not establish new currentness. [Preparation path](https://github.com/Federated-Industrial-Laboratories/HyperNetSuite/blob/cdead8ec6ce7debb694725a87808dd2af1b769b3/Source/Applications/ApplicationStreamsClient.rs)
+**Implemented upstream contract: version-2 directional privacy with explicit evidence provenance.** Saved profile labels remain insufficient. Outgoing metadata records the actual nested TLS path and configured route settings. A matching certified destination lookup contributes `certifiedEndpointProfile`; `certifiedRelayProfile` remains null without corresponding evidence. A retained voucher or a saved profile does not establish new currentness. [Preparation path](https://github.com/Federated-Industrial-Laboratories/HyperNetSuite/blob/ae11f4ab11a3dff6c537e173a1952add0a03c266/Source/Applications/ApplicationStreamsClient.rs)
 
 | Property | Outgoing connection | Incoming connection |
 | --- | --- | --- |
@@ -125,9 +127,9 @@ Application streams already invoke Suite's relay connector. It connects to the r
 | Profile provenance and separation | Matching certified destination-profile reference when available; no automatic certified relay-profile or physical-independence claim | Attested attachment service/profile digest; no current-profile or physical-independence claim |
 | HRC message encryption | Determined separately by the room's validated crypto state | Same rule; transport TLS does not establish E2EE |
 
-A public endpoint (`mode2`) accepts inner TLS directly and its existing application proof does not bind a transit voucher. Consequently, incoming peer context alone cannot prove that a remote client used a relay. This does not change the supported Suite client's enforced outgoing route. [Endpoint paths](https://github.com/Federated-Industrial-Laboratories/HyperNet/blob/a3593815b7ad04ac59f76853661705c433782032/Source/Routing/RouteRuntime.rs) · [Application proof and binding](https://github.com/Federated-Industrial-Laboratories/HyperNet/blob/a3593815b7ad04ac59f76853661705c433782032/Source/Authority/Domains/ApplicationStreamBinding.rs)
+A public endpoint (`mode2`) accepts inner TLS directly and its existing application proof does not bind a transit voucher. Consequently, incoming peer context alone cannot prove that a remote client used a relay. This does not change the supported Suite client's enforced outgoing route. [Endpoint paths](https://github.com/Federated-Industrial-Laboratories/HyperNet/blob/4cf491891e2b2c5a21cba339c3e0dd2730fed370/Source/Routing/RouteRuntime.rs) · [Application proof and binding](https://github.com/Federated-Industrial-Laboratories/HyperNet/blob/4cf491891e2b2c5a21cba339c3e0dd2730fed370/Source/Authority/Domains/ApplicationStreamBinding.rs)
 
-A deployment requiring destination-verifiable relay arrival can use an attached endpoint (`mode3`), which has no public listener and authenticates its pinned relay attachment. Its exact-session receipt attests the endpoint mode, approved attachment, relay service and profile digest. The inspected Suite candidate returns explicit unknown arrival privacy from version-2 accept without an optional query before payload handoff. HRC's fresh exact-action check supplies the current session evidence; acceptance and retained privacy never authorise an application effect. Absent or invalidated evidence stays unknown. This establishes arrival through the approved attachment, not origin anonymity, physical operator independence, current profile validity or the full path of a federated participant. A public endpoint requiring equivalent assurance still needs a separate supported relay-authenticated delivery contract; it cannot substitute an IP check or caller-supplied relay ID.
+A deployment requiring destination-verifiable relay arrival can use an attached endpoint (`mode3`), which has no public listener and authenticates its pinned relay attachment. Its exact-session receipt attests the endpoint mode, approved attachment, relay service and profile digest. The matching Suite release returns explicit unknown arrival privacy from version-2 accept without an optional query before payload handoff. HRC's fresh exact-action check supplies the current session evidence; acceptance and retained privacy never authorise an application effect. Absent or invalidated evidence stays unknown. This establishes arrival through the approved attachment, not origin anonymity, physical operator independence, current profile validity or the full path of a federated participant. A public endpoint requiring equivalent assurance still needs a separate supported relay-authenticated delivery contract; it cannot substitute an IP check or caller-supplied relay ID.
 
 The ordinary HRC display describes **this connection**: selected minimum, verified transport, observed relay mode, supported profile provenance and evidence status. Any operator-separation declaration must be identified as a declaration with its actual evidence; the current interface sets `physicalIndependenceVerified` and `profileCurrentnessAsserted` to false. Unknown is a visible value. Do not infer whole-room or whole-federation privacy from one leg. A policy requiring unavailable evidence refuses the operation or room admission. Missing evidence never weakens a selected minimum.
 
@@ -172,15 +174,76 @@ HyperNet's existing signed objects remain opaque and retain their own verified r
 
 | Change | Authoritative owner | Dependency and evidence |
 | --- | --- | --- |
-| Fresh endpoint-to-companion checks | Core application-stream runtime and existing route authority reader; mirrored binding verification and Suite companion/SDK | Implemented in the checked candidates; earlier 0.10.0 Linux evidence covers exact session/action/nonce, default deadline, expiry/cancellation and certified denial after revocation on those historical artifacts; current candidate capacity remains unqualified |
+| Fresh endpoint-to-companion checks | Core application-stream runtime and existing route authority reader; mirrored binding verification and Suite companion/SDK | Implemented in the required releases; earlier 0.10.0 Linux evidence retains exact session/action/nonce, default-deadline, expiry/cancellation and revocation scope; section 8 records current pilot capacity |
 | Directional connection privacy | Route preparation/connector and endpoint arrival binding; Suite handoff | Implemented outgoing nested-TLS and incoming attachment provenance; unavailable or unproven path/profile facts remain unknown; no independence/currentness assertion |
 | HRC Rust adapter | A narrow local companion boundary | Private Unix path/peer checks, framing, capabilities, validated incoming/outgoing types, cancellation and refusal translation; no copied HyperNet authority evaluator |
 | HRC effect ordering | Conversation/Delegation operation owners and persistence boundary | Fresh action check plus current home state; interrupted durability, timeout and unknown-outcome recovery |
 | Federation evidence | HRC agreement, identity and federation owners | Implemented attestor/key roles, immutable Action, bounded challenge table, original expiry, destination rights and home deduplication; native origin, delegation, encrypted recovery and withdrawal workflows pass on two independently administered networks on one host |
 | Presentation | Shared HRC connection/privacy state | Correct live versus historical status, no unverified badge, consistent CLI/TUI/GUI/API outcomes |
 
-The companion extension and HRC runtime are implemented. Source-bound native checks cover the local conversation and interfaces, encrypted direct and private-group conversations, bilateral federation, and stopped same-schema upgrade with an uncertain committed send. Federation qualification uses two independently administered networks on one host; it does not establish independent host-failure recovery. These results retain their original artifact identities. Current pilot-load qualification and final publication remain pending. Federation extends the same operation and permission path under the selected [runtime contract](FederationRuntime.md).
+The companion extension and HRC runtime are implemented. Source-bound native checks cover the local conversation and interfaces, encrypted direct and private-group conversations, bilateral federation, and stopped same-schema upgrade with an uncertain committed send. Federation qualification uses two independently administered networks on one host; it does not establish independent host-failure recovery. These results retain their original artifact identities. The current pilot-load qualification is recorded in section 8. Federation extends the same operation and permission path under the selected [runtime contract](FederationRuntime.md).
 
 Meaningful regressions include: withdrawal before and after a fresh check; stale original context; changed action/session/nonce; expiry while queued; process restart; missing quorum or unhealthy clock; storage completion after the check deadline; known closure before authorisation; mode2 versus mode3 incoming evidence; wrong relay/TLS identity; selected-minimum downgrade; stale profile declarations; foreign-origin/key substitution; inherited expiry across forwarding; challenge replay; lost acknowledgement; and withdrawal during partition. Measure fresh-check cost and unaffected-client latency against the accepted stream allocation before claiming supported capacity.
 
-The upstream boundary supplies fresh checks and typed context; HRC owns application permissions, atomic storage ordering, cross-host freshness and foreign actor authentication. The [state specification](StateAndRecovery.md), [wire protocol](WireProtocol.md), [clock boundary](ClockAndOrdering.md), [MLS runtime](CryptoRuntime.md) and [text profile](TextAndSearch.md) define the selected implementation contracts. Current numerical load qualification and final release delivery remain open. Changes to owner recovery authority or declared privacy/availability guarantees require an owner decision; ordinary implementation details can be resolved within these contracts.
+The upstream boundary supplies fresh checks and typed context; HRC owns application permissions, atomic storage ordering, cross-host freshness and foreign actor authentication. The [state specification](StateAndRecovery.md), [wire protocol](WireProtocol.md), [clock boundary](ClockAndOrdering.md), [MLS runtime](CryptoRuntime.md) and [text profile](TextAndSearch.md) define the selected implementation contracts. The measured numerical qualification is limited to section 8. Changes to owner recovery authority or declared privacy/availability guarantees require an owner decision; ordinary implementation details can be resolved within these contracts.
+
+## 8. Linux pilot qualification
+
+The native pilot passed on Ubuntu 26.04, kernel `7.0.0-42-generic`, amd64 and
+GNU libc 2.43. Eight production Controllers and four supporting endpoints used
+twelve HRC accounts on two admitted client applications. Twelve receiving
+application streams, two authority connector sessions and two other authority
+routes fit the signed sixteen-slot relay allocation. Application admission allowed
+sixteen slots and the authority endpoint eight. Unused transition/federation
+reserves were not exercised concurrently with this load.
+
+Five senders each offered one normal message per second: 150 offers over 30 seconds
+without hostile traffic and 225 over 45 seconds with the defined hostile workload.
+Every normal offer committed uniquely with a direct exchange sample. None was
+missed, refused, recovered in place of a direct sample, or duplicated. All eight
+Controllers ended current with no unresolved normal operation. Three hostile-phase
+normal commits completed during the 333 ms observation tail; pressure continued
+through that tail.
+
+| Measurement | Normal traffic | Hostile workload |
+| --- | ---: | ---: |
+| Direct samples / normal offers | 150 / 150 | 225 / 225 |
+| Established-message median | 136.451 ms | 371.415 ms |
+| Established-message p95 | 335.110 ms | 768.295 ms |
+| Established-message maximum | 895.922 ms | 1137.659 ms |
+| Required p95, strict upper limit | 500 ms | 1000 ms |
+| Client-completion p95 | 528 ms | 3350 ms |
+| Client-completion maximum | 979 ms | 3869 ms |
+
+Message latency starts with the already encoded frame write on an established,
+authenticated stream and ends at complete receipt of its exact committed
+acknowledgement. It excludes setup, local queues/persistence, encoding, response
+decoding and UI work. Client completion includes those applicable client costs.
+The hostile result passes the selected one-second p95 profile; it does not pass
+the original 500 ms hostile comparison or promise every message below one second.
+
+The hostile driver offered 453 flood operations and 91 queries, including the
+observation tail. It started 282 flood operations and 88 queries; 171 flood and
+three query offers were missed by their issuing clients. All started hostile work
+resolved. The report retains those missed offers instead of equating scheduled
+pressure with completed requests. A slow reader held sixteen requests for twelve
+seconds. Both moderation actions completed in 899/686 ms against a one-second
+limit. Recovery from the end of hostile work took 4401 ms against 30000 ms, with
+fresh remote markers and current state on all eight Controllers.
+
+Recipient ignore, malformed/oversized frames, connection replacement and bounded
+agent-chain checks passed. The separate four-connection replacement check kept
+unaffected commits working; its maximum client completion was 6925 ms and is not
+part of the established-message latency cohort. HRC service RSS peaked at
+34,676,736 bytes against 536,870,912 bytes, excluding HyperNet processes. Internal
+queue occupancy and complete link-byte amplification were not instrumented;
+maintained regressions verify the structural queue and admission bounds.
+
+This is one bounded native qualification, not a capacity claim for larger networks,
+independent host failure, simultaneous federation load or a new platform.
+Federation has separate same-host, independently administered two-network evidence.
+Packaged offline CLI/GUI/TUI checks cover Ubuntu 24.04 and GNU libc 2.39; native
+load, full Wayland and screen-reader qualification are not established there.
+The package requires GNU libc 2.39 or later. These checks do not constitute an
+independent security assessment. Preserve current permissions and the documented
+retention, encryption, privacy and recovery boundaries when deploying.

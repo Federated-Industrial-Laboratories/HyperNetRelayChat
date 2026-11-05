@@ -3,8 +3,8 @@
 This MDS consumer builds the maintained HRC manuals for `/docs/hrc/` on the
 HyperNet website.
 
-HRC 0.1.0 release qualification is pending; do not publish this manual set until
-qualification is complete.
+HRC 0.1.0 completed the bounded qualification described by the integration profile.
+Publish only the verified `v0.1.0` source selected by this release configuration.
 
 ## Source and publication scope
 
@@ -18,7 +18,8 @@ not product manuals.
 
 Navigation separates operating procedures, implementation contracts and the
 preserved design proposals. The original status and limits remain in each source.
-Before publication, retain the `preview` channel and `noindex` metadata. No public
+The qualified release configuration uses the `stable` channel and indexable
+metadata. Development previews must retain `preview` and `noindex`. No public
 HRC repository or download URL is implied. The repository and package distribution
 remain private after manuals are published. Package-specific dependency inventories
 and source archives remain package deliverables described by the
@@ -74,11 +75,11 @@ inside `/docs/hrc/`; MDS checks those paths and heading anchors. Local search is
 owned at `/docs/hrc/search/` and requires no external search service.
 
 Twelve explicit publication edits map documentation URLs from the exact Core
-0.10.2 and Suite 0.10.1 source revisions to the existing `/docs/core/` and
+0.10.2 and Suite 0.10.1 release commits to the existing `/docs/core/` and
 `/docs/suite/` routes. Each `publicationEdits[].source` names an HRC manual;
 `from` must match its pinned upstream URL exactly once, and `to` selects the
 corresponding published manual route. Reconcile the `from` values with the final
-upstream revisions in the HRC manuals before exporting. Preserve the source-to-route
+upstream commits in the HRC manuals before exporting. Preserve the source-to-route
 mapping when changing a source pin. Code references and historical draft links
 remain as authored. No technical prose or code example is rewritten during
 publication.
