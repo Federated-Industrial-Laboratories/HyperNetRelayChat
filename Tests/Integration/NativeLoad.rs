@@ -25,6 +25,89 @@ type Result<T> = std::result::Result<T, String>;
 const MESSAGE_EXCHANGE_LIMIT_NS: u64 = 500_000_000;
 const COHORT_OBSERVATION_SECONDS: u64 = 30;
 const FLOOD_PENDING_LIMIT: usize = 8;
+const CONNECTION_OBSERVATION_LIMIT: usize = 16;
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ConnectionObservation {
+    boot_ms: Option<u64>,
+    state: &'static str,
+    reason: Option<&'static str>,
+    status: Option<&'static str>,
+}
+#[derive(Default)]
+struct ConnectionTrace {
+    observations: Vec<ConnectionObservation>,
+    suppressed: u64,
+    last: Option<(&'static str, Option<&'static str>)>,
+}
+fn connection_status_code(code: &str) -> &'static str {
+    const CODES: &[&str] = &[
+        "ClientConfigurationUnavailable",
+        "ClientStorageUnavailable",
+        "ClockUnavailable",
+        "InvalidOperation",
+        "OutcomeUnknown",
+        "Offline",
+        "ReadDeadlineExpired",
+        "OperationDenied",
+        "OperationExpired",
+        "OperationRefused",
+        "OperationTemporarilyUnavailable",
+        "CompanionUnavailable",
+        "HyperNetPreparationUnavailable",
+        "HrcHandshakeUnavailable",
+        "TransportUnavailable",
+        "SessionAuthenticationFailed",
+        "InvalidSessionFrame",
+        "RetryWindowExpired",
+        "QueryCancelled",
+        "FederationForwardRefused",
+        "CommandWaitingForConnection",
+        "CommandAdmissionExpired",
+        "Completed",
+        "DraftOnly",
+        "ApprovalPending",
+    ];
+    CODES
+        .iter()
+        .copied()
+        .find(|known| *known == code)
+        .unwrap_or("Other")
+}
+impl ConnectionTrace {
+    fn observe(
+        &mut self,
+        connection: &ConnectionState,
+        status: Option<&str>,
+        boot_ms: Option<u64>,
+    ) {
+        let status = status.map(connection_status_code);
+        let (state, reason) = match connection {
+            ConnectionState::Offline => ("Offline", status),
+            ConnectionState::Connecting => ("Connecting", None),
+            ConnectionState::Resolving => ("Resolving", None),
+            ConnectionState::Online => ("Online", None),
+            ConnectionState::Backoff { reason, .. } => {
+                ("Backoff", Some(connection_status_code(reason)))
+            }
+        };
+        if self.last == Some((state, reason)) {
+            return;
+        }
+        self.last = Some((state, reason));
+        if self.observations.len() == CONNECTION_OBSERVATION_LIMIT {
+            self.suppressed = self.suppressed.saturating_add(1);
+            return;
+        }
+        self.observations.push(ConnectionObservation {
+            boot_ms,
+            state,
+            reason,
+            status,
+        });
+    }
+}
 struct PhaseWindow {
     start: Instant,
     seconds: u64,
@@ -885,6 +968,7 @@ fn interactive(
     let mut ignored_leak = false;
     let mut next = 0;
     let mut state_ms = BTreeMap::<String, u64>::new();
+    let mut connections = ConnectionTrace::default();
     let mut revisions = BTreeSet::new();
     let mut previous = start;
     let mut cohort_reported = ui.index >= 5;
@@ -892,6 +976,11 @@ fn interactive(
     while !window.finished(Instant::now()) {
         let now = Instant::now();
         let view = observe(&mut ui, room);
+        connections.observe(
+            &view.connection,
+            view.status.as_ref().map(|s| s.code.as_str()),
+            hrc::clock::boot_ms().ok(),
+        );
         let state = match (&view.connection, current(&view, room)) {
             (_, true) => "OnlineCurrent",
             (ConnectionState::Online, false) => "OnlineStale",
@@ -951,6 +1040,11 @@ fn interactive(
     }
     m.missed += expected - next;
     let view = observe(&mut ui, room);
+    connections.observe(
+        &view.connection,
+        view.status.as_ref().map(|s| s.code.as_str()),
+        hrc::clock::boot_ms().ok(),
+    );
     for offer in &ui.offers[first_offer..] {
         *m.results.entry(offer.status.clone()).or_default() += 1;
         m.unresolved |= !offer.terminal;
@@ -971,7 +1065,9 @@ fn interactive(
     emit(
         json!({"case":"NativeLoadControllerObservation","phase":phase,"endpoint":ui.index,
         "freshRemoteEvents":received.len(),"ignoredEventLeak":ignored_leak,"currentAtEnd":current(&view,room),"observedSnapshotRevisions":revisions.len(),
-        "stateDurationMs":state_ms,"status":view.status.as_ref().map(|s|&s.code),
+        "stateDurationMs":state_ms,"connectionTransitions":connections.observations,
+        "suppressedConnectionTransitions":connections.suppressed,
+        "status":view.status.as_ref().map(|s|&s.code),
         "statusDetail":view.status.as_ref().map(|s|&s.detail),"connection":format!("{:?}",view.connection),"freshnessPassed":fresh}),
     );
     (ui, m)
@@ -2116,6 +2212,59 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn connection_observations_retain_first_cause_bound_transitions_and_redact_details() {
+        let mut trace = ConnectionTrace::default();
+        trace.observe(&ConnectionState::Online, Some("Completed"), Some(10));
+        let backoff = |attempt| ConnectionState::Backoff {
+            attempt,
+            retry_in_ms: 2000,
+            reason: "ReadDeadlineExpired".into(),
+        };
+        trace.observe(&backoff(1), Some("ReadDeadlineExpired"), Some(20));
+        trace.observe(&backoff(2), Some("CommandWaitingForConnection"), Some(30));
+        assert_eq!(
+            trace.observations.len(),
+            2,
+            "a repeated backoff is not a new transition"
+        );
+        assert_eq!(trace.observations[1].boot_ms, Some(20));
+        assert_eq!(trace.observations[1].reason, Some("ReadDeadlineExpired"));
+        trace.observe(&ConnectionState::Connecting, None, Some(40));
+        trace.observe(&ConnectionState::Resolving, None, Some(50));
+        trace.observe(&ConnectionState::Online, Some("Completed"), Some(60));
+        trace.observe(
+            &ConnectionState::Backoff {
+                attempt: 1,
+                retry_in_ms: 1000,
+                reason: "private arbitrary detail".into(),
+            },
+            Some("private arbitrary detail"),
+            None,
+        );
+        let encoded = serde_json::to_string(&trace.observations).unwrap();
+        assert!(!encoded.contains("private arbitrary detail"));
+        assert_eq!(trace.observations[5].reason, Some("Other"));
+        assert_eq!(trace.observations[5].status, Some("Other"));
+        assert_eq!(trace.observations[5].boot_ms, None);
+
+        for at in 0..30 {
+            let state = if at % 2 == 0 {
+                ConnectionState::Online
+            } else {
+                ConnectionState::Connecting
+            };
+            trace.observe(&state, None, Some(100 + at));
+        }
+        assert_eq!(trace.observations.len(), CONNECTION_OBSERVATION_LIMIT);
+        assert_eq!(trace.suppressed, 20);
+        assert_eq!(trace.observations[1].reason, Some("ReadDeadlineExpired"));
+        assert!(
+            serde_json::to_vec(&trace.observations).unwrap().len()
+                < CONNECTION_OBSERVATION_LIMIT * 256
+        );
+    }
     #[test]
     fn flood_polling_respects_whole_millisecond_adapter_bounds_without_extending_wait() {
         for wait in [Duration::ZERO, Duration::from_nanos(999_999)] {

@@ -84,9 +84,11 @@ sends: two per second, burst four, at most 512 records per process. Fixed
 execution, signing/encoding and response write. `authorityAdmissionNs` and
 `authorityCheckNs` partition the combined `authorityNs` span. Admission includes
 the bounded HRC queue; checking includes companion IPC and its fresh authority
-exchange. Refused admission has no check span. Outcome labels contain no
-details. These service spans are not client exchange latency or delivery
-receipts; missing records do not imply success. See
+exchange. Refused admission has no check span. The subsequent bounded FIFO wait
+for serialized Home access belongs to `executeNs`, not `authorityAdmissionNs`.
+Current authority and the clock are checked again after that wait, before effects.
+Outcome labels contain no details. These service spans are not client exchange
+latency or delivery receipts; missing records do not imply success. See
 [conversation setup](ConversationSetup.md) for the precise boundaries and bounds.
 
 Distinguish permanent denial, HRC pause/revocation, unavailable transport, overload

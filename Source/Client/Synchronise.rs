@@ -478,7 +478,7 @@ impl Worker {
                 return Err(Error::Offline);
             }
             if crate::clock::boot_ms().map_err(|_| Error::Clock)? >= end {
-                return Err(Error::Network(super::super::network::Error::Transport));
+                return Err(Error::ReadDeadlineExpired);
             }
             let result = read(
                 self,
@@ -517,7 +517,7 @@ impl Worker {
                         return Err(Error::Offline);
                     }
                     if crate::clock::boot_ms().map_err(|_| Error::Clock)? >= end {
-                        return Err(Error::Network(super::super::network::Error::Transport));
+                        return Err(Error::ReadDeadlineExpired);
                     }
                     return Ok(page);
                 }

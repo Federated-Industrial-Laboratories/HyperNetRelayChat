@@ -31,8 +31,10 @@ interfaces and integration gaps. The
 [protocol and permission model](Documentation/ProtocolPermissions.md) defines
 operation contracts, state transitions, worked traces and qualification targets.
 The [integration profile](Documentation/IntegrationProfile.md) specifies the
-released Core 0.10.1 and Suite 0.10.0 companion boundary, directional privacy evidence and bounded
-federation authority model. The Rust adapter uses that version-2 interface. The
+required Core 0.10.2 and Suite 0.10.1 candidate pair, directional privacy evidence
+and bounded federation authority model. These upstream candidates are not yet
+published releases; HRC release qualification remains pending. The Rust adapter
+uses their version-2 companion interface. The
 [state and recovery specification](Documentation/StateAndRecovery.md) selects
 transactional storage, persistent MLS conversations, exact-content approval and
 owner-key account recovery. The
@@ -64,4 +66,5 @@ and pull requests. Release support and security properties will be stated only
 after the corresponding integration and qualification work passes.
 
 Licensed under the [Apache License, Version 2.0](LICENSE).
-The repository remains private during development.
+The repository and release distribution remain private. Publishing selected
+manuals does not make the source repository or package assets public.

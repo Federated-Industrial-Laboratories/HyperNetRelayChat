@@ -16,7 +16,9 @@ The GUI additionally needs a working Wayland or X11 session, EGL/OpenGL, XKB and
 Fontconfig. Install fonts for the languages in use; missing terminal or GUI glyphs
 do not change stored text. Sound is optional and off initially.
 
-Use independently verified HyperNet binaries with the version-2 application
+The required upstream pair is Core 0.10.2 and Suite 0.10.1, currently checked
+candidates rather than published releases. Use independently verified binaries
+matching the [contract map](HyperNetContract.md), with the version-2 application
 companion and `checkAuthority-v2`. Each service and caller needs its own current
 application admission and approved stream configuration. See
 [service setup](ConversationSetup.md) for identities, clock observations and
@@ -25,7 +27,9 @@ private directory permissions. There is no direct Internet fallback.
 ## Verify and unpack
 
 Obtain the selected binary archive, source archive, `SHA256SUMS`, its
-`SHA256SUMS.sig` OpenSSH signature, and `PublisherKey.txt` from the release channel.
+`SHA256SUMS.sig` OpenSSH signature, and `PublisherKey.txt` from the authorized private
+release channel. Repository and package distribution remain private; published
+manuals do not provide public download access.
 Verify the publisher key against this independently pinned SHA-256 fingerprint:
 
 `SHA256:XaKyGFow6q4DkZee5rQLUXN66AxQogVEtWb1sQS6m24`
@@ -63,6 +67,16 @@ identify the build inputs. `Package.json` lists file digests and source provenan
 it is an inventory inside the archive, not a replacement for external verification.
 
 ## Upgrade
+
+The checked development upgrade starts at the `0.1.0-dev.1` build from source
+`d6e68cc934adcde3023c866f003024718038eab2` and installs the `0.1.0` candidate,
+with storage continuity and Home schemas remaining at version 1.
+The stopped upgrade preserved account, endpoint and home identities, indexed
+Unicode history, an independent unsent draft and the exact pending operation after
+a committed acknowledgement was lost. Resolution returned the original event
+once, and a second resolution found no pending effect. Both service stops were
+clean. This evidence covers that same-schema transition; it does not establish
+compatibility with arbitrary development builds or authorize rollback.
 
 1. Read the target version's migration and HyperNet compatibility notes.
 2. Close clients and stop bots and HRC services normally. Confirm that no process

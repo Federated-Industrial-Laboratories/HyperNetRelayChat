@@ -126,6 +126,12 @@ invalid responses and transport loss end the attempt. Disconnect and shutdown
 interrupt retry waiting. This read path cannot submit mutations or recreate a
 pending message. Room lists stop when the final partial page is received.
 
+A read budget that ends before dispatch or after a complete verified response
+reports `ReadDeadlineExpired`. Late content cannot make a view current. The
+Controller retains the synchronized session, marks affected views stale and uses
+its existing bounded backoff. Terminal refusals retain their authority meaning;
+an incomplete exchange or actual socket timeout still requires reconnection.
+
 The command queue contains at most 32 bounded commands. Dispatch returns a local
 request number. Immutable snapshots carry that number on command status and
 operation delivery records. A frontend can distinguish the exact submitted text

@@ -53,7 +53,9 @@ network exchanges while one actor retains all challenge, current-state and
 durable-publication ownership. Finite cohorts prepare their captured gates before
 issue; unused slots can accept already-current reads only before the first
 completion, within four total admissions and the fixed initial round end. No
-readiness/lifecycle mutation occurs while that round is pending. A deferred
+readiness/lifecycle mutation occurs while that round is pending. Admission also
+requires the existing endpoint, stream and round-tail headroom; otherwise the
+original request waits for normal preparation without extending its end. A deferred
 queue head retains its original permit, and lifecycle work receives a fair turn
 after drain. The [contract map](HyperNetContract.md) gives the complete bounds.
 

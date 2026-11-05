@@ -22,6 +22,10 @@ pub enum Error {
     Network(#[from] network::Error),
     #[error("client is offline")]
     Offline,
+    /// A local read budget ended before dispatch or after a verified complete reply.
+    /// No exchange remains outstanding; this never represents a socket timeout.
+    #[error("the original read deadline expired")]
+    ReadDeadlineExpired,
     #[error("operation refused: {detail}")]
     Rejected { code: ErrorCode, detail: String },
     #[error("operation was not admitted: {detail}")]
@@ -43,6 +47,7 @@ impl Error {
             Self::Network(error) => error.code(),
             Self::Unknown => "OutcomeUnknown",
             Self::Offline => "Offline",
+            Self::ReadDeadlineExpired => "ReadDeadlineExpired",
             Self::Rejected {
                 code: ErrorCode::Denied,
                 ..
@@ -81,25 +86,27 @@ impl Error {
             _ => Self::Unknown,
         }
     }
-    /// A verified temporary service or forwarding refusal leaves the session synchronized.
+    /// A verified temporary refusal or local read expiry leaves the session synchronized.
     /// This permits bounded recovery, not stale authority or a replacement operation.
     pub fn can_reuse_session(&self) -> bool {
         matches!(
             self,
-            Self::Refused {
-                code: ErrorCode::Unavailable | ErrorCode::RateLimited | ErrorCode::Overloaded,
-                ..
-            } | Self::Network(network::Error::ForwardRefused {
-                code: ErrorCode::Unavailable | ErrorCode::RateLimited | ErrorCode::Overloaded,
-                ..
-            })
+            Self::ReadDeadlineExpired
+                | Self::Refused {
+                    code: ErrorCode::Unavailable | ErrorCode::RateLimited | ErrorCode::Overloaded,
+                    ..
+                }
+                | Self::Network(network::Error::ForwardRefused {
+                    code: ErrorCode::Unavailable | ErrorCode::RateLimited | ErrorCode::Overloaded,
+                    ..
+                })
         )
     }
     /// Reconnection may resolve exact retained effects; it never creates a replacement action.
     pub(crate) fn retry_delay_ms(&self) -> Option<u64> {
         use network::Error as Network;
         match self {
-            Self::Clock | Self::Unknown => Some(0),
+            Self::Clock | Self::Unknown | Self::ReadDeadlineExpired => Some(0),
             Self::Refused {
                 code: ErrorCode::Unavailable | ErrorCode::RateLimited | ErrorCode::Overloaded,
                 retry_after_ms,

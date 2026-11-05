@@ -112,7 +112,10 @@ stream. Suite pipelines independent requests and verifies each correlated reply.
 Core's actor owns challenges, current floors, domain state and publication; only
 immutable network exchanges run concurrently. It prepares a captured finite
 cohort before issuing reads. Before the first completion, unused slots may admit
-already-current checks without readiness or lifecycle mutations. Each round has
+already-current checks without readiness or lifecycle mutations. The existing
+endpoint/stream renewal headroom and fixed round tail must remain sufficient;
+a check without that headroom waits at the original queue head for preparation.
+This does not extend its caller deadline or the round. Each round has
 at most four total admissions, including failures or deferrals, and cannot refill
 completed slots or extend its fixed initial end. One not-ready queue head can
 retain its original permit for the next ordinary round; later checks cannot pass

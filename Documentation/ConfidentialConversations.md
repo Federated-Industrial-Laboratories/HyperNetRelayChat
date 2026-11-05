@@ -1,9 +1,9 @@
 # Confidential conversation operations
 
-This document fixes the service and client integration contract for the existing
-[persistent MLS boundary](CryptoRuntime.md). Implementation and native qualification
-are in progress. Direct conversations and private groups use the same ordered
-encrypted-room lifecycle. Community rooms remain service-readable.
+This document describes the implemented service and client integration contract
+for the [persistent MLS boundary](CryptoRuntime.md). Encrypted direct conversations
+and private groups use the same ordered encrypted-room lifecycle. Overall release
+qualification remains in progress. Community rooms remain service-readable.
 
 ## Admission and identity
 

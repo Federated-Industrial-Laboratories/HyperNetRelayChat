@@ -1054,11 +1054,22 @@ fn retry_read(
             return Err(Error::Offline);
         }
         if crate::clock::boot_ms().map_err(|_| Error::Clock)? >= end {
-            return Err(Error::Network(super::network::Error::Transport));
+            return Err(Error::ReadDeadlineExpired);
         }
         let response = attempt(end)?;
         if crate::clock::boot_ms().map_err(|_| Error::Clock)? >= end {
-            return Err(Error::Network(super::network::Error::Transport));
+            // Late content cannot become current. A verified terminal refusal
+            // still keeps its authority meaning rather than becoming retryable.
+            if matches!(
+                response.outcome,
+                Outcome::Rejected { .. } | Outcome::Refused { .. }
+            ) {
+                let error = Error::from_outcome(response.outcome);
+                if error.retry_delay_ms().is_none() {
+                    return Err(error);
+                }
+            }
+            return Err(Error::ReadDeadlineExpired);
         }
         let Outcome::Refused {
             code: ErrorCode::Unavailable | ErrorCode::Overloaded | ErrorCode::RateLimited,

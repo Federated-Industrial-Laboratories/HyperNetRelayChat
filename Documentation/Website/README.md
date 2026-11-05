@@ -9,13 +9,15 @@ is still in progress; these files do not establish a supported or published rele
 The configuration pins HRC `0.1.0-dev.1` documentation to
 `cd534304be077fedcf68dd113c554754a1ad9ae7`. It exports only the 21 maintained
 Markdown manuals directly under `Documentation/`, the root README, Apache-2.0
-license and third-party adaptation notices: 24 pages. The README is the manual
-home. Website build instructions and generated snapshots are not product manuals.
+license, third-party adaptation notices and publisher public key: 25 pages. The
+README is the manual home. Website build instructions and generated snapshots are
+not product manuals.
 
 Navigation separates operating procedures, implementation contracts and the
 preserved design proposals. The original status and limits remain in each source.
 The `preview` label and `noindex` metadata apply to every page. No public HRC
-repository or download URL is implied. Package-specific dependency inventories
+repository or download URL is implied. The repository and package distribution
+remain private after manuals are published. Package-specific dependency inventories
 and source archives remain package deliverables described by the
 [installation guide](../Installation.md).
 
@@ -68,12 +70,17 @@ source headings across updates. All relative HRC manual and license links resolv
 inside `/docs/hrc/`; MDS checks those paths and heading anchors. Local search is
 owned at `/docs/hrc/search/` and requires no external search service.
 
-Twelve explicit publication edits map pinned Core 0.10.1 and Suite 0.10.0 documentation URLs
-to the existing `/docs/core/` and `/docs/suite/` routes. They match the published
+The current preview's twelve explicit publication edits map Core 0.10.1 and
+Suite 0.10.0 documentation URLs to the existing `/docs/core/` and `/docs/suite/`
+routes. They match the published
 Core `f3b95f798def698087bd229dca9dcd0ec2c513e4` and Suite
 `3055f06a691fbc2f0214b4d9bb706a004d5c22ad` source identities. Each original URL
 must match exactly once. Code references and historical draft links remain as
-authored. No technical prose or code example is rewritten during publication.
+authored. The preview mappings predate the required Core 0.10.2 and Suite 0.10.1
+candidate pair. Before exporting the final manuals, update each
+`publicationEdits[].from` to the exact final upstream source URL in its named
+manual, preserving its `source` and `to` mapping. No technical prose or code example
+is rewritten during publication.
 Check the sibling routes against the complete site before deployment; the MDS
 checker checks only its owned HRC tree.
 
