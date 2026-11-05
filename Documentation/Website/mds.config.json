@@ -196,7 +196,7 @@
     },
     {
       "source": "Documentation/HyperNetContract.md",
-      "from": "https://github.com/Federated-Industrial-Laboratories/HyperNetSuite/blob/387a84f5c1de1b9dc666b8c1ee08b10debadd7c8/SDK/README.md",
+      "from": "https://github.com/Federated-Industrial-Laboratories/HyperNetSuite/blob/cdead8ec6ce7debb694725a87808dd2af1b769b3/SDK/README.md",
       "to": "/docs/suite/sdk/"
     },
     {
@@ -206,7 +206,7 @@
     },
     {
       "source": "Documentation/HyperNetContract.md",
-      "from": "https://github.com/Federated-Industrial-Laboratories/HyperNetSuite/blob/387a84f5c1de1b9dc666b8c1ee08b10debadd7c8/Documentation/ApplicationContext.md",
+      "from": "https://github.com/Federated-Industrial-Laboratories/HyperNetSuite/blob/cdead8ec6ce7debb694725a87808dd2af1b769b3/Documentation/ApplicationContext.md",
       "to": "/docs/suite/application-context/"
     },
     {
@@ -216,7 +216,7 @@
     },
     {
       "source": "Documentation/HyperNetContract.md",
-      "from": "https://github.com/Federated-Industrial-Laboratories/HyperNetSuite/blob/387a84f5c1de1b9dc666b8c1ee08b10debadd7c8/ReadMe.md",
+      "from": "https://github.com/Federated-Industrial-Laboratories/HyperNetSuite/blob/cdead8ec6ce7debb694725a87808dd2af1b769b3/ReadMe.md",
       "to": "/docs/suite/overview/"
     },
     {
@@ -231,7 +231,7 @@
     },
     {
       "source": "Documentation/IntegrationProfile.md",
-      "from": "https://github.com/Federated-Industrial-Laboratories/HyperNetSuite/blob/387a84f5c1de1b9dc666b8c1ee08b10debadd7c8/Documentation/ApplicationContext.md",
+      "from": "https://github.com/Federated-Industrial-Laboratories/HyperNetSuite/blob/cdead8ec6ce7debb694725a87808dd2af1b769b3/Documentation/ApplicationContext.md",
       "to": "/docs/suite/application-context/"
     },
     {

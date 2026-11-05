@@ -5,7 +5,7 @@ Revision 5, 5 November 2026. [Protocol contract](ProtocolPermissions.md) · [Hyp
 This profile describes the implemented current-authority, privacy and remote-actor
 boundaries against the checked Core 0.10.2 and Suite 0.10.1 release candidates.
 Source links pin `670b3424e8ec903a72122adada19499a870811a4` and
-`387a84f5c1de1b9dc666b8c1ee08b10debadd7c8`, respectively. These are inspected
+`cdead8ec6ce7debb694725a87808dd2af1b769b3`, respectively. These are inspected
 candidate revisions, not a publication or complete native qualification claim.
 The HRC adapter and smallest local conversation retain their separate
 representative integration evidence. The accepted pilot and history defaults
@@ -25,7 +25,7 @@ HRC's own pause, revocation, membership and agreement controls remain strictly o
 
 The version-2 companion exposes `checkAuthority` alongside `connect`, `accept`, `status` and `cancel`. Its connection list and original peer context remain distinct from a fresh authority read. Socket liveness, an HRC ping, old admission evidence and status error prose cannot authorise an action waiting in an HRC queue.
 
-**Implemented upstream contract: `checkAuthority-v2` for an exact active incoming connection.** Core's existing endpoint remains the authority requester and the companion remains the local verification boundary. HRC receives neither an endpoint signing key nor an arbitrary authority-query facility. [Core check contract](https://github.com/Federated-Industrial-Laboratories/HyperNet/blob/670b3424e8ec903a72122adada19499a870811a4/Documentation/ApplicationChecks.md) · [Suite API](https://github.com/Federated-Industrial-Laboratories/HyperNetSuite/blob/387a84f5c1de1b9dc666b8c1ee08b10debadd7c8/Documentation/ApplicationContext.md)
+**Implemented upstream contract: `checkAuthority-v2` for an exact active incoming connection.** Core's existing endpoint remains the authority requester and the companion remains the local verification boundary. HRC receives neither an endpoint signing key nor an arbitrary authority-query facility. [Core check contract](https://github.com/Federated-Industrial-Laboratories/HyperNet/blob/670b3424e8ec903a72122adada19499a870811a4/Documentation/ApplicationChecks.md) · [Suite API](https://github.com/Federated-Industrial-Laboratories/HyperNetSuite/blob/cdead8ec6ce7debb694725a87808dd2af1b769b3/Documentation/ApplicationContext.md)
 
 | Request or result | Implemented meaning and HRC obligation |
 | --- | --- |
@@ -44,7 +44,7 @@ The separate endpoint-initiated `Ingress/Checks.sock` channel preserves opaque a
 
 Capability status separates API support, authenticated endpoint-channel readiness and eligibility of an exact accepted incoming connection. Outgoing streams cannot use a receiving-end check. Version-1 payload clients retain their contract, but an HRC service requiring fresh effect checks refuses a companion without `checkAuthority-v2`. A temporarily unready channel yields unavailable effects; repeated `status` calls are not a fallback.
 
-The companion deadline crosses Core's queue and authority read unchanged. Its authority challenge has a separate immutable ceiling at the original companion start plus 5,000 ms, decreasing with queue time even for a one-second caller wait. This supports the authority uncertainty window without extending transport waiting or permitting a late result. A renewable clock observation may be refreshed during the read; the delivered receipt is clipped by current clock validity, caller/session bounds, consent/gates and certified expiry. HRC must preserve the minimum of its original call deadline and the verified receipt's `notAfterBootMs`, never restart a relative lifetime, and invalidate known closure/control changes. Restart invalidates pending work. Foreign assertions use section 5; another host's boot-clock number is not comparable. [SDK result lifetime](https://github.com/Federated-Industrial-Laboratories/HyperNetSuite/blob/387a84f5c1de1b9dc666b8c1ee08b10debadd7c8/SDK/hypernet_streams/context.py)
+The companion deadline crosses Core's queue and authority read unchanged. Its authority challenge has a separate immutable ceiling at the original companion start plus 5,000 ms, decreasing with queue time even for a one-second caller wait. This supports the authority uncertainty window without extending transport waiting or permitting a late result. A renewable clock observation may be refreshed during the read; the delivered receipt is clipped by current clock validity, caller/session bounds, consent/gates and certified expiry. HRC must preserve the minimum of its original call deadline and the verified receipt's `notAfterBootMs`, never restart a relative lifetime, and invalidate known closure/control changes. Restart invalidates pending work. Foreign assertions use section 5; another host's boot-clock number is not comparable. [SDK result lifetime](https://github.com/Federated-Industrial-Laboratories/HyperNetSuite/blob/cdead8ec6ce7debb694725a87808dd2af1b769b3/SDK/hypernet_streams/context.py)
 
 The candidates allow one pending check per stream and four total checks across
 queued and in-flight work, including cancellation draining after reconnect.
@@ -65,7 +65,7 @@ must still match the exact open stream and current authority before the actor
 installs stream permission. It produces no action receipt. Endpoint renewal,
 unestablished-stream renewal and authority-changing cleanup remain exclusive.
 
-The native Suite authority connector uses four independently admitted sessions to
+The native Suite authority connector uses two independently admitted sessions to
 the same pinned endpoint and replica, with at most sixteen queued exchanges.
 Each session keeps its original route budget. Relay and authority policies must
 allow these connections alongside application traffic; admission failure remains
@@ -73,14 +73,14 @@ explicit. These authority sessions are separate from the companion's application
 stream slots. Signed request and read identifiers retain their original binding
 across the sessions; cleanup cannot create a new admission.
 
-The pilot deployment allocates twenty-four relay connections and eight authority
-endpoint connections. Sixteen companion application slots, four connector sessions
-and two other authority routes require up to twenty-two relay connections. The
-companion's application limit stays sixteen, including its operator and transition
-reserves. The registered relay profile, deployment limits and consent must all
-cover the selected capacity. Core's local authority ingress separately admits
-four concurrent requests. Shared authority traffic can still cause queueing or
-capacity refusal; this allocation does not establish the latency or fairness gates.
+Size the registered relay profile, deployment limits and consent for all selected
+application and authority connections. Sixteen companion application slots, two
+connector sessions and two other authority routes require twenty relay slots
+before transport overlap. The companion limit remains sixteen, including its
+operator and transition reserves. Core's local authority ingress separately
+admits four concurrent requests. A smaller measured cohort does not qualify
+unused application reserves; connection allocation alone does not establish the
+pilot's latency or fairness gates.
 
 The channel consumes no application connection slot. HRC admits four concurrent
 exchanges within its existing 32-caller queue and charges work to its service and
@@ -113,9 +113,9 @@ HRC control acknowledgement is precise: an acknowledged pause/revoke means every
 
 ## 4. Directional privacy evidence
 
-Application streams already invoke Suite's relay connector. It connects to the relay, admits the transit voucher and establishes inner endpoint TLS before application handoff. `Organisation` and `Independent` are assurance profiles, not a direct-Internet switch. Independent assurance checks distinct declared operator keys and domains; it does not prove actual noncollusion. [Companion connector](https://github.com/Federated-Industrial-Laboratories/HyperNetSuite/blob/387a84f5c1de1b9dc666b8c1ee08b10debadd7c8/Source/Applications/ApplicationStreamsAgent.rs) · [Route connector](https://github.com/Federated-Industrial-Laboratories/HyperNetSuite/blob/387a84f5c1de1b9dc666b8c1ee08b10debadd7c8/Source/Routing/RouteConnector.rs) · [Privacy guarantees](https://github.com/Federated-Industrial-Laboratories/HyperNet/blob/670b3424e8ec903a72122adada19499a870811a4/Documentation/PrivateRoutes.md)
+Application streams already invoke Suite's relay connector. It connects to the relay, admits the transit voucher and establishes inner endpoint TLS before application handoff. `Organisation` and `Independent` are assurance profiles, not a direct-Internet switch. Independent assurance checks distinct declared operator keys and domains; it does not prove actual noncollusion. [Companion connector](https://github.com/Federated-Industrial-Laboratories/HyperNetSuite/blob/cdead8ec6ce7debb694725a87808dd2af1b769b3/Source/Applications/ApplicationStreamsAgent.rs) · [Route connector](https://github.com/Federated-Industrial-Laboratories/HyperNetSuite/blob/cdead8ec6ce7debb694725a87808dd2af1b769b3/Source/Routing/RouteConnector.rs) · [Privacy guarantees](https://github.com/Federated-Industrial-Laboratories/HyperNet/blob/670b3424e8ec903a72122adada19499a870811a4/Documentation/PrivateRoutes.md)
 
-**Implemented upstream contract: version-2 directional privacy with explicit evidence provenance.** Saved profile labels remain insufficient. Outgoing metadata records the actual nested TLS path and configured route settings. A matching certified destination lookup contributes `certifiedEndpointProfile`; `certifiedRelayProfile` remains null without corresponding evidence. A retained voucher or a saved profile does not establish new currentness. [Preparation path](https://github.com/Federated-Industrial-Laboratories/HyperNetSuite/blob/387a84f5c1de1b9dc666b8c1ee08b10debadd7c8/Source/Applications/ApplicationStreamsClient.rs)
+**Implemented upstream contract: version-2 directional privacy with explicit evidence provenance.** Saved profile labels remain insufficient. Outgoing metadata records the actual nested TLS path and configured route settings. A matching certified destination lookup contributes `certifiedEndpointProfile`; `certifiedRelayProfile` remains null without corresponding evidence. A retained voucher or a saved profile does not establish new currentness. [Preparation path](https://github.com/Federated-Industrial-Laboratories/HyperNetSuite/blob/cdead8ec6ce7debb694725a87808dd2af1b769b3/Source/Applications/ApplicationStreamsClient.rs)
 
 | Property | Outgoing connection | Incoming connection |
 | --- | --- | --- |

@@ -5,7 +5,7 @@ deployment. Its receiving application service and each caller require explicit
 HyperNet admission, current grants, and a configured `hrc/1` stream binding or
 target. HRC does not create application consent or renew it automatically.
 
-When Core uses Suite's native authority connector, reserve capacity for its four
+When Core uses Suite's native authority connector, reserve capacity for its two
 independently admitted authority sessions in the selected relay and authority
 policies. Include other traffic sharing those policies. This does not increase
 the companion's sixteen application-stream slots. See the
