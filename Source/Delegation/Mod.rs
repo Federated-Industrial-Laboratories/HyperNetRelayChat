@@ -437,12 +437,7 @@ fn create(db: &Transaction<'_>, verified: &VerifiedAction, now: TimeBounds) -> D
     {
         return invalid("GrantScope");
     }
-    if scope.rooms.iter().any(|r| r.home != action.home)
-        || scope
-            .recipients
-            .iter()
-            .any(|a| a.origin != action.home.network)
-    {
+    if scope.rooms.iter().any(|r| r.home != action.home) {
         return invalid("GrantHome");
     }
     if scope
@@ -468,17 +463,32 @@ fn create(db: &Transaction<'_>, verified: &VerifiedAction, now: TimeBounds) -> D
     let AccountClass::Agent { operator } = agent.classification else {
         return deny("AgentClassification");
     };
-    if agent.acting != scope.agent || operator != action.actor.acting().account {
+    if agent.acting != scope.agent {
         return deny("AgentOwner");
     }
+    for recipient in &scope.recipients {
+        if recipient.origin != action.home.network
+            && !crate::federation::recipient_admitted(db, *recipient, action.home, now)?
+        {
+            return deny("RecipientAdmission");
+        }
+    }
+    let owner = action.actor.acting().account;
+    let total: u64 = db.query_row("SELECT count(*) FROM hrc_grants WHERE state<2", [], |r| {
+        r.get(0)
+    })?;
+    if total >= 1024 {
+        return Err(Fault::Reject(ErrorCode::Overloaded, "ServiceGrantLimit"));
+    }
     for room in &scope.rooms {
+        crate::federation::actor_admitted(db, &scope.agent, *room, now)?;
         let mut scoped = action.clone();
         scoped.target = Target::Room(*room);
         crate::conversations::access(db, &scoped, now)?;
     }
     let count: u64 = db.query_row(
         "SELECT count(*) FROM hrc_grants WHERE owner=?1 AND state<2",
-        [operator.to_string()],
+        [owner.to_string()],
         |r| r.get(0),
     )?;
     if count >= 64 {
@@ -490,7 +500,7 @@ fn create(db: &Transaction<'_>, verified: &VerifiedAction, now: TimeBounds) -> D
             generation: 1,
         },
         home: action.home,
-        owner: operator,
+        owner,
         owner_security_generation: action.actor.acting().security_generation,
         operator,
         scope,
@@ -499,13 +509,14 @@ fn create(db: &Transaction<'_>, verified: &VerifiedAction, now: TimeBounds) -> D
     let encoded = encode(&grant)?;
     let result = value(&grant.reference)?;
     db.execute(
-        "INSERT INTO hrc_grants VALUES(?1,?2,?3,?4,1,0,?5)",
+        "INSERT INTO hrc_grants(id,owner,agent,endpoint,generation,state,grant_data,operator) VALUES(?1,?2,?3,?4,1,0,?5,?6)",
         params![
             grant.reference.id.as_hex(),
-            operator.to_string(),
+            owner.to_string(),
             grant.scope.agent.account.to_string(),
             grant.scope.agent.endpoint.as_hex(),
-            encoded
+            encoded,
+            operator.to_string()
         ],
     )?;
     let position = home::next_position(db)?;
@@ -633,6 +644,9 @@ fn decide(db: &Transaction<'_>, action: &Action, now: TimeBounds) -> Domain<Outc
 }
 
 fn list(db: &Connection, action: &Action) -> Domain<Outcome> {
+    list_bounded(db, action, ORDINARY_FRAME_BYTES - 8192)
+}
+pub(crate) fn list_bounded(db: &Connection, action: &Action, bytes: usize) -> Domain<Outcome> {
     home::inspection::own(action)?;
     let p = home::inspection::request(action)?;
     let mut stmt=db.prepare("SELECT id FROM hrc_grants WHERE (owner=?1 OR (agent=?1 AND endpoint=?4)) AND id>?2 ORDER BY id LIMIT ?3")?;
@@ -656,5 +670,5 @@ fn list(db: &Connection, action: &Action) -> Domain<Outcome> {
         )?;
         rows.push((id, grant));
     }
-    home::inspection::page(rows, p.limit)
+    home::inspection::page_bounded(rows, p.limit, bytes)
 }

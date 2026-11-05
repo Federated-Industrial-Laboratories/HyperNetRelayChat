@@ -68,7 +68,13 @@ pub enum Command {
         remove: Vec<Id>,
     },
     /// Catch up and verify the ordered encrypted history for this endpoint.
-    Sync(RoomAccess),
+    Sync {
+        #[command(flatten)]
+        access: RoomAccess,
+        /// Acknowledge a history gap while retaining encrypted content and MLS state.
+        #[arg(long)]
+        resynchronise: bool,
+    },
 }
 pub fn run(command: Command) -> Result<Json, &'static str> {
     match command {
@@ -124,9 +130,17 @@ pub fn run(command: Command) -> Result<Json, &'static str> {
                 .map_err(|e| e.code())?;
             membership(&mut client, room, response)
         }
-        Command::Sync(access) => {
+        Command::Sync {
+            access,
+            resynchronise,
+        } => {
             let mut client = open(&access.profile)?;
             let grant = access.grant()?;
+            if resynchronise {
+                client
+                    .resynchronise_history(access.room)
+                    .map_err(|e| e.code())?;
+            }
             json_value(
                 client
                     .crypto_sync(access.room, grant.as_ref())

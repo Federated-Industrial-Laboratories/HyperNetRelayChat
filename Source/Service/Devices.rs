@@ -36,11 +36,12 @@ pub(super) fn serve(
         .map_err(|_| Error::Frame)?
         .deserialized()
         .map_err(|_| Error::Frame)?;
-    let check = shared.check_authority(
+    let check = handshake::authority(
+        shared,
         stream,
         digest(&incoming.payload),
-        Some(end),
-        &Cancellation::default(),
+        end,
+        challenge.value().expires_ms,
         "DeviceAuthority",
     )?;
     let now = shared.config.clock.sample().map_err(|_| Error::Clock)?;
@@ -49,7 +50,7 @@ pub(super) fn serve(
         .lock()
         .map_err(|_| Error::State)?
         .activate_device(&request, &challenge, &proofs, transport, now, &|| {
-            current(&check, Some(end))
+            check.current(shared)
         })
         .map_err(|_| Error::State)?;
     // A lost response after durable commit remains an unknown outcome until the exact request is resolved.

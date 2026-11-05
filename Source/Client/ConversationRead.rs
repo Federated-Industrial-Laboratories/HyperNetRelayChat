@@ -28,6 +28,14 @@ struct LocalCursor {
     after: u64,
 }
 impl Client {
+    /// Acknowledge a local history gap without granting access or replaying effects.
+    /// The next read obtains current authority. Encrypted archives and MLS state survive.
+    pub fn resynchronise_history(&mut self, room: RoomId) -> Result<()> {
+        if room.home != self.profile.active_server().home {
+            return Err(Error::Input);
+        }
+        cache::resynchronise_history(&mut self.store, room).map_err(|_| Error::Storage)
+    }
     pub fn history_messages(
         &mut self,
         room: RoomId,

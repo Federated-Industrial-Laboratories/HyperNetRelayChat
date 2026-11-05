@@ -32,7 +32,15 @@ pub(super) fn member(db: &Connection, room: RoomId, actor: &Actor) -> Domain<Mem
         let Some((authorization, position)) = authorization else {
             return deny("EncryptedGrantProofRequired");
         };
+        let owner_checkpoint = db
+            .query_row(
+                "SELECT evidence FROM federation_grant_proofs WHERE grant_id=?1",
+                [grant.id.as_hex()],
+                |r| decode::<OwnerCheckpointEvidence>(&r.get::<_, Vec<u8>>(0)?),
+            )
+            .optional()?;
         Some(super::DelegationEvidence {
+            owner_checkpoint,
             position,
             grant: delegation::load(db, grant.id)?,
             authorization: Blob(authorization),
@@ -58,6 +66,11 @@ pub(super) fn reader(
     actor: &Actor,
     now: TimeBounds,
 ) -> Domain<bool> {
+    match crate::federation::actor_admitted(db, actor.acting(), room, now) {
+        Ok(()) => {}
+        Err(Fault::Reject(..)) => return Ok(false),
+        Err(e) => return Err(e),
+    }
     let Some(endpoint) = identity::endpoint(db, actor.acting().account, actor.acting().endpoint)?
     else {
         return Ok(false);
@@ -146,4 +159,18 @@ pub(super) fn required_removals(
         }
     }
     Ok(result)
+}
+
+pub(super) fn fresh(
+    db: &Connection,
+    room: RoomId,
+    members: &[Member],
+    now: TimeBounds,
+) -> Domain<bool> {
+    for member in members {
+        if !crate::federation::recipient_fresh(db, room, &member.actor, now)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }

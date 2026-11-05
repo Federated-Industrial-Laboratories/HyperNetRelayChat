@@ -125,23 +125,32 @@ impl Controller {
         if !cache::validate_preferences(&preferences) {
             return Err(Error::Storage);
         }
-        let rooms = cache::rooms(&mut client.store).map_err(|_| Error::Storage)?;
-        let filters = cache::filters(&mut client.store).map_err(|_| Error::Storage)?;
+        let rooms = cache::rooms(&mut client.store)
+            .map_err(|_| Error::Storage)?
+            .into_iter()
+            .filter(|room| room.room.home == client.profile.active_server().home)
+            .collect();
+        let filters = cache::filters(&mut client.store, client.profile.active_server().home)
+            .map_err(|_| Error::Storage)?;
         let snapshot = Snapshot {
             revision: 0,
+            updating: false,
             account: client.profile.registration.account,
-            home: client.profile.server.home,
+            home: client.profile.active_server().home,
+            services: client.profile.service_choices(),
             classification: client.profile.registration.classification.clone(),
             nickname: String::new(),
             motd: String::new(),
             connection: ConnectionState::Offline,
             privacy: None,
+            federation_privacy: None,
             rooms,
             selected: None,
             search: None,
             deliveries: Vec::new(),
             inspection: Inspection {
                 filters,
+                filters_stale: true,
                 stale: true,
                 ..Inspection::default()
             },
@@ -179,68 +188,14 @@ impl Controller {
                     operation: None,
                     delivery_room: None,
                     poll_room: 0,
+                    refresh_cycle: None,
+                    refresh_yield: false,
                 };
                 if let Err(e) = w.deliveries() {
                     w.error(e);
                 }
                 w.publish();
-                let mut held: Option<Queued> = None;
-                while !w.shared.stop.load(Ordering::Acquire) {
-                    if w.shared.disconnect.swap(false, Ordering::AcqRel) {
-                        w.offline();
-                    }
-                    w.drain_local(&local_receiver, 4);
-                    if w.shared.stop.load(Ordering::Acquire) {
-                        break;
-                    }
-                    if w.shared.disconnect.swap(false, Ordering::AcqRel) {
-                        w.offline();
-                    }
-                    if let Some(queued) = &held {
-                        let online = w.snapshot.connection == ConnectionState::Online
-                            && w.client.session().is_ok();
-                        match queued.admission(w.desired, online, Instant::now()) {
-                            Admission::Wait => {
-                                w.tick();
-                                // Stop/disconnect retain their reserved atomic control path.
-                                thread::sleep(Duration::from_millis(25));
-                                continue;
-                            }
-                            Admission::Expired => {
-                                let queued = held.take().expect("held command");
-                                w.admission_expired(queued.id);
-                                continue;
-                            }
-                            Admission::Run => {}
-                        }
-                        // A reconnect can finish after admission expiry; the check above is
-                        // repeated before this one consumption, never after an effect begins.
-                        let queued = held.take().expect("held command");
-                        w.run_command(queued);
-                        continue;
-                    }
-                    match receiver.recv_timeout(Duration::from_millis(100)) {
-                        Ok(queued) => {
-                            w.dequeued();
-                            let online = w.snapshot.connection == ConnectionState::Online
-                                && w.client.session().is_ok();
-                            if queued.admission(w.desired, online, Instant::now()) == Admission::Wait {
-                                w.snapshot.status = Some(Status {
-                                    request_id: Some(queued.id),
-                                    code: "CommandWaitingForConnection".into(),
-                                    detail: "Waiting for the current connection before starting this command.".into(),
-                                });
-                                w.publish();
-                            }
-                            held = Some(queued);
-                        }
-                        Err(mpsc::RecvTimeoutError::Disconnected) => break,
-                        Err(mpsc::RecvTimeoutError::Timeout) => w.tick(),
-                    }
-                }
-                w.offline();
-                // Shutdown closes admission under the queue mutex before this final finite drain.
-                w.drain_local(&local_receiver, 32);
+                w.run(receiver, local_receiver);
             })
             .map_err(|_| Error::Configuration)?;
         Ok(Self {
@@ -407,8 +362,80 @@ struct Worker {
     operation: Option<Operation>,
     delivery_room: Option<RoomId>,
     poll_room: usize,
+    refresh_cycle: Option<views::RefreshCycle>,
+    refresh_yield: bool,
 }
 impl Worker {
+    fn run(&mut self, receiver: mpsc::Receiver<Queued>, local_receiver: mpsc::Receiver<Queued>) {
+        let mut held: Option<Queued> = None;
+        while !self.shared.stop.load(Ordering::Acquire) {
+            if self.shared.disconnect.swap(false, Ordering::AcqRel) {
+                self.offline();
+            }
+            self.drain_local(&local_receiver, 4);
+            if self.shared.stop.load(Ordering::Acquire) {
+                break;
+            }
+            if self.shared.disconnect.swap(false, Ordering::AcqRel) {
+                self.offline();
+            }
+            // Preserve the bounded local lane before servicing due metadata, even
+            // with a busy command queue. Recheck controls and original admission
+            // deadlines after the potentially slow reads.
+            if self.metadata_due() && !self.refresh_yield {
+                self.tick();
+                self.refresh_yield = true;
+                continue;
+            }
+            if let Some(queued) = &held {
+                let online = self.snapshot.connection == ConnectionState::Online
+                    && self.client.session().is_ok();
+                match queued.admission(self.desired, online, Instant::now()) {
+                    Admission::Wait => {
+                        self.tick();
+                        // Stop/disconnect retain their reserved atomic control path.
+                        thread::sleep(Duration::from_millis(25));
+                        continue;
+                    }
+                    Admission::Expired => {
+                        let queued = held.take().expect("held command");
+                        self.admission_expired(queued.id);
+                        continue;
+                    }
+                    Admission::Run => {}
+                }
+                // A reconnect can finish after admission expiry; the check above is
+                // repeated before this one consumption, never after an effect begins.
+                let queued = held.take().expect("held command");
+                self.run_command(queued);
+                self.refresh_yield = false;
+                continue;
+            }
+            match receiver.recv_timeout(Duration::from_millis(100)) {
+                Ok(queued) => {
+                    self.dequeued();
+                    let online = self.snapshot.connection == ConnectionState::Online
+                        && self.client.session().is_ok();
+                    if queued.admission(self.desired, online, Instant::now()) == Admission::Wait {
+                        self.snapshot.status = Some(Status {
+                            request_id: Some(queued.id),
+                            code: "CommandWaitingForConnection".into(),
+                            detail:
+                                "Waiting for the current connection before starting this command."
+                                    .into(),
+                        });
+                        self.publish();
+                    }
+                    held = Some(queued);
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(mpsc::RecvTimeoutError::Timeout) => self.tick(),
+            }
+        }
+        self.offline();
+        // Shutdown closes admission under the queue mutex before this final finite drain.
+        self.drain_local(&local_receiver, 32);
+    }
     fn dequeued(&self) {
         let mut queue = self.shared.queue.lock().unwrap_or_else(|e| e.into_inner());
         queue.pending -= 1;
@@ -436,18 +463,27 @@ impl Worker {
         self.delivery_room = None;
     }
     fn tick(&mut self) {
-        if self.desired && self.client.session().is_err() && Instant::now() >= self.retry {
+        if self.desired
+            && (self.client.session().is_err()
+                || matches!(self.snapshot.connection, ConnectionState::Backoff { .. }))
+            && Instant::now() >= self.retry
+        {
             if let Err(error) = self.connect() {
                 self.error(error);
             }
             self.publish();
-        } else if self.client.session().is_ok() && self.poll.elapsed() >= Duration::from_secs(5) {
-            self.poll = Instant::now();
-            if let Err(error) = self.refresh() {
+        } else if self.metadata_due() {
+            if let Err(error) = self.refresh_turn() {
                 self.error(error);
             }
             self.publish();
         }
+    }
+    fn metadata_due(&self) -> bool {
+        matches!(
+            self.snapshot.connection,
+            ConnectionState::Online | ConnectionState::Resolving
+        ) && self.poll.elapsed() >= Duration::from_secs(5)
     }
     fn admission_expired(&mut self, id: u64) {
         self.retire_draft_send(id);
@@ -541,9 +577,30 @@ impl Worker {
             self.request = request;
         }
     }
+    /// Progress never invalidates a successful view or makes a retained view current.
+    /// Nested reads share the outer progress lifetime; every failed scope is visible.
+    fn update_view<T>(&mut self, work: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
+        let nested = self.snapshot.updating;
+        if !nested {
+            self.snapshot.updating = true;
+            self.publish();
+        }
+        let result = work(self);
+        if result.is_err() {
+            self.stale();
+        }
+        if !nested {
+            self.snapshot.updating = false;
+        }
+        if !nested || result.is_err() {
+            self.publish();
+        }
+        result
+    }
     fn publish(&mut self) {
         if self.snapshot.connection == ConnectionState::Online
             && !self.snapshot.inspection.stale
+            && !self.snapshot.inspection.filters_stale
             && self.snapshot.privacy.is_some()
             && self
                 .snapshot
@@ -570,9 +627,12 @@ impl Worker {
             room.stale = true;
         }
         self.snapshot.inspection.stale = true;
+        self.snapshot.inspection.filters_stale = true;
         self.snapshot.privacy = None;
+        self.snapshot.federation_privacy = None;
     }
     fn offline(&mut self) {
+        self.refresh_cycle = None;
         self.desired = false;
         self.client.disconnect();
         self.stale();
@@ -584,6 +644,7 @@ impl Worker {
         self.publish();
     }
     fn error(&mut self, e: Error) {
+        self.refresh_cycle = None;
         self.snapshot.status = Some(Status {
             request_id: self.request,
             code: e.code().into(),
@@ -591,10 +652,12 @@ impl Worker {
         });
         let retry = e.retry_delay_ms();
         if retry.is_some() || matches!(e, Error::Network(_) | Error::Refused { .. }) {
-            self.client.disconnect();
+            if !e.can_reuse_session() {
+                self.client.disconnect();
+                *self.shared.stream.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            }
             self.stale();
             self.caught_up.clear();
-            *self.shared.stream.lock().unwrap_or_else(|e| e.into_inner()) = None;
             if retry.is_none() {
                 self.desired = false;
                 self.snapshot.connection = ConnectionState::Offline;
@@ -619,10 +682,18 @@ impl Worker {
         }
     }
     fn connect(&mut self) -> Result<()> {
+        self.refresh_cycle = None;
+        let reuse = matches!(self.snapshot.connection, ConnectionState::Backoff { .. })
+            && self.client.session().is_ok();
         self.desired = true;
-        self.snapshot.connection = ConnectionState::Connecting;
-        self.publish();
-        self.client.connect()?;
+        if reuse && Instant::now() < self.retry {
+            return Ok(());
+        }
+        if !reuse {
+            self.snapshot.connection = ConnectionState::Connecting;
+            self.publish();
+            self.client.connect()?;
+        }
         *self.shared.stream.lock().unwrap_or_else(|e| e.into_inner()) =
             Some(self.client.session()?.stream_handle());
         self.snapshot.connection = ConnectionState::Resolving;
@@ -662,6 +733,7 @@ impl Worker {
                     .deliveries
                     .retain(|d| d.operation_id != operation_id);
                 self.snapshot.deliveries.push(Delivery {
+                    exchange_ns: None,
                     abandoned: p.abandoned,
                     held: p.held,
                     request_id,
@@ -687,6 +759,7 @@ impl Worker {
             }
         }
         self.snapshot.privacy = Some(self.client.session()?.privacy());
+        self.snapshot.federation_privacy = self.client.session()?.remote.clone();
         self.caught_up.clear();
         self.refresh()?;
         self.snapshot.connection = ConnectionState::Online;
@@ -706,6 +779,7 @@ impl Worker {
                 .deliveries
                 .retain(|d| d.operation_id != operation_id);
             self.snapshot.deliveries.push(Delivery {
+                exchange_ns: None,
                 abandoned: p.abandoned,
                 held: p.held,
                 request_id,
@@ -731,6 +805,7 @@ impl Worker {
             .deliveries
             .retain(|d| d.operation_id != action.operation_id);
         self.snapshot.deliveries.push(Delivery {
+            exchange_ns: None,
             abandoned: false,
             held: false,
             request_id: self.request,
@@ -772,10 +847,20 @@ impl Worker {
         Ok(())
     }
     fn response(&mut self, r: Response) -> Result<Value> {
+        self.response_observed(r, None)
+    }
+    fn response_observed(&mut self, r: Response, exchange_ns: Option<u64>) -> Result<Value> {
+        let exchange_ns = exchange_ns.filter(|_| {
+            matches!(
+                self.operation,
+                Some(Operation::MessageSend | Operation::MessageReply | Operation::MessageAction)
+            ) && matches!(r.outcome, Outcome::Committed { event: Some(_), .. })
+        });
         self.snapshot
             .deliveries
             .retain(|d| d.operation_id != r.operation_id);
         self.snapshot.deliveries.push(Delivery {
+            exchange_ns,
             abandoned: false,
             held: false,
             request_id: self.request,
@@ -806,6 +891,18 @@ impl Worker {
         target: Target,
         body: &B,
     ) -> Result<T> {
+        let end = crate::clock::boot_ms()
+            .map_err(|_| Error::Clock)?
+            .saturating_add(10_000);
+        self.read_until(op, target, body, end)
+    }
+    fn read_until<T: serde::de::DeserializeOwned, B: serde::Serialize>(
+        &mut self,
+        op: Operation,
+        target: Target,
+        body: &B,
+        end: u64,
+    ) -> Result<T> {
         if !home::is_read_operation(op) {
             return Err(Error::Input);
         }
@@ -818,26 +915,65 @@ impl Worker {
         let key =
             VerifyingKey::from_bytes(self.client.profile.registration.endpoint_key.as_bytes())
                 .map_err(|_| Error::Input)?;
-        let end = crate::clock::boot_ms()
-            .map_err(|_| Error::Clock)?
-            .saturating_add(10_000);
+        let shared = Arc::clone(&self.shared);
         let r = retry_read(
             end,
-            || {
-                self.shared.stop.load(Ordering::Acquire)
-                    || self.shared.disconnect.load(Ordering::Acquire)
-            },
+            || shared.stop.load(Ordering::Acquire) || shared.disconnect.load(Ordering::Acquire),
             |end| {
-                self.client
+                let response = self
+                    .client
                     .session()?
                     .submit_read_until(&signed, &key, end)
                     .map(|response| response.value().clone())
-                    .map_err(Error::from)
+                    .map_err(Error::from)?;
+                self.observe_read(action.operation, &action.target, &response);
+                Ok(response)
             },
         )?;
         match r.outcome {
             Outcome::Result { body } => body.deserialized().map_err(|_| Error::Input),
             outcome => Err(Error::from_outcome(outcome)),
+        }
+    }
+    fn observe_read(&mut self, operation: Operation, target: &Target, response: &Response) {
+        if matches!(
+            response.outcome,
+            Outcome::Refused {
+                code: ErrorCode::Unavailable | ErrorCode::Overloaded | ErrorCode::RateLimited,
+                ..
+            }
+        ) {
+            // Only these reads finish in a room pull that revalidates its whole view.
+            // A typed application refusal does not change unrelated transport observations.
+            match (operation, target) {
+                (Operation::ClientMetadata, Target::Account(account))
+                    if *account == self.snapshot.account =>
+                {
+                    self.snapshot.notifications.clear();
+                    self.snapshot.search = None;
+                    self.stale();
+                }
+                (Operation::CommunitySync, Target::Room(room)) => {
+                    self.snapshot.inspection.filters_stale = true;
+                    self.snapshot.notifications.clear();
+                    self.snapshot.search = None;
+                    self.clear_room_presentation(*room, None);
+                }
+                (
+                    Operation::RoomInspect
+                    | Operation::EventsResume
+                    | Operation::ModerationRestrictions,
+                    Target::Room(room),
+                ) => {
+                    if let Some(view) = &mut self.snapshot.selected
+                        && view.summary.room == *room
+                    {
+                        view.stale = true;
+                    }
+                }
+                _ => self.stale(),
+            }
+            self.publish();
         }
     }
     fn effect<B: serde::Serialize>(
@@ -914,7 +1050,9 @@ fn retry_read(
 mod commands;
 #[path = "Synchronise.rs"]
 mod synchronise;
+#[path = "Views.rs"]
+mod views;
 
 #[cfg(test)]
 #[path = "../../Tests/Client/Completion.rs"]
-mod completion_tests;
+pub(in crate::client) mod completion_tests;

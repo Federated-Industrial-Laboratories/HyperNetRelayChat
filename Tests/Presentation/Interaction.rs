@@ -27,6 +27,8 @@ impl Fixture {
         }
         let endpoint = files::create_key(&root.join("Endpoint.key")).unwrap();
         let profile = Profile {
+            federation: None,
+            agreements: Vec::new(),
             server: Descriptor {
                 version: 1,
                 home,
@@ -138,6 +140,7 @@ fn committed(model: &mut Model, request: u64, room: RoomId) {
     Arc::make_mut(&mut model.snapshot)
         .deliveries
         .push(Delivery {
+            exchange_ns: None,
             abandoned: false,
             held: false,
             request_id: Some(request),

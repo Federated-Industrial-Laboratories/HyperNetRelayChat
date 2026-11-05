@@ -168,10 +168,10 @@ fn cose_profile_matches_independent_python_signature_vector() {
     assert_eq!(hex::encode(cose.tbs_data(b"HRC/1")), vector["toBeSigned"]);
 }
 
-fn changed_action(action: &Action, key: &SigningKey, change: impl FnOnce(&mut Value)) -> Vec<u8> {
+fn changed_signed(bytes: &[u8], key: &SigningKey, change: impl FnOnce(&mut Value)) -> Vec<u8> {
     use coset::{CborSerializable, CoseSign1, CoseSign1Builder};
     use ed25519_dalek::Signer;
-    let signed = CoseSign1::from_slice(&sign_action(action, key).unwrap()).unwrap();
+    let signed = CoseSign1::from_slice(bytes).unwrap();
     let mut payload =
         canonical_decode(signed.payload.as_ref().unwrap(), ORDINARY_FRAME_BYTES).unwrap();
     change(&mut payload);
@@ -187,7 +187,7 @@ fn changed_action(action: &Action, key: &SigningKey, change: impl FnOnce(&mut Va
 fn valid_signatures_do_not_authorize_unknown_or_missing_wire_fields() {
     let key = SigningKey::from_bytes(&[42; 32]);
     for missing in [false, true] {
-        let changed = changed_action(&action(), &key, |payload| {
+        let changed = changed_signed(&sign_action(&action(), &key).unwrap(), &key, |payload| {
             let Value::Array(parts) = payload else {
                 panic!()
             };
@@ -205,6 +205,63 @@ fn valid_signatures_do_not_authorize_unknown_or_missing_wire_fields() {
             Error::Encoding
         );
     }
+}
+
+#[test]
+fn signed_identity_pages_reject_overflow_and_out_of_range_cursors() {
+    let key = SigningKey::from_bytes(&[42; 32]);
+    let page = OriginIdentityPage {
+        profile: FEDERATION_PROFILE,
+        origin: home(),
+        agreement: AgreementRef {
+            id: id(20),
+            revision: 1,
+            digest: id(21),
+        },
+        account: account(),
+        checkpoint: id(22),
+        after: 1023,
+        records: vec![Blob(vec![1])],
+        next: 1024,
+        complete: true,
+    };
+    let signed = sign_origin_identity_page(&page, &key).unwrap();
+    assert_eq!(
+        verify_origin_identity_page(&signed, &key.verifying_key())
+            .unwrap()
+            .value()
+            .next,
+        1024
+    );
+    for (after, next) in [(u64::MAX, 0), (1024, 1025), (1025, 1026), (1023, u64::MAX)] {
+        // Re-sign the malformed payload so this exercises semantic validation after a valid signature.
+        let malformed = changed_signed(&signed, &key, |payload| {
+            let Value::Array(parts) = payload else {
+                panic!("signed payload array")
+            };
+            let Value::Map(fields) = &mut parts[2] else {
+                panic!("identity page map")
+            };
+            for (name, value) in fields {
+                match name {
+                    Value::Text(name) if name == "after" => *value = Value::Integer(after.into()),
+                    Value::Text(name) if name == "next" => *value = Value::Integer(next.into()),
+                    _ => {}
+                }
+            }
+        });
+        assert_eq!(
+            verify_origin_identity_page(&malformed, &key.verifying_key()).unwrap_err(),
+            Error::Invalid
+        );
+    }
+    let final_page = OriginIdentityPage {
+        after: 1024,
+        records: Vec::new(),
+        ..page
+    };
+    let signed = sign_origin_identity_page(&final_page, &key).unwrap();
+    assert!(verify_origin_identity_page(&signed, &key.verifying_key()).is_ok());
 }
 #[test]
 fn protected_headers_roles_and_unprotected_fields_cannot_substitute() {
@@ -401,6 +458,11 @@ fn forwarding_preserves_a_combined_depth_bound() {
     let signed = sign_action(&action, &key).unwrap();
     assert!(verify_action(&signed, &key.verifying_key()).is_ok());
     let envelope = FederationEnvelope {
+        profile: FEDERATION_PROFILE,
+        admission: AdmissionRef {
+            id: id(25),
+            revision: 1,
+        },
         agreement: AgreementRef {
             id: id(20),
             revision: 1,

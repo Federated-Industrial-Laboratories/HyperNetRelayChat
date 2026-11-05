@@ -55,15 +55,26 @@ fn after(
     let verified = verify_cursor(&cursor.0, &signer.verifying_key())
         .map_err(|_| Fault::Reject(ErrorCode::InvalidInput, "CursorSignature"))?;
     let c = verified.value();
-    if c.home != action.home
-        || c.room != access.room
-        || c.account != action.actor.represented()
-        || c.membership_revision != access.membership_revision
+    if c.home != action.home || c.room != access.room || c.account != action.actor.represented() {
+        return Err(Fault::Reject(ErrorCode::InvalidInput, "CursorBinding"));
+    }
+    // A stale access context must not hide missing history or a rolled-back order.
+    if c.sequence > access.sequence {
+        return Err(Fault::Reject(
+            ErrorCode::ResynchronisationRequired,
+            "CursorPosition",
+        ));
+    }
+    if c.sequence.saturating_add(1) < access.earliest {
+        return Err(Fault::Reject(
+            ErrorCode::ResynchronisationRequired,
+            "CursorHistoryGap",
+        ));
+    }
+    if c.membership_revision != access.membership_revision
         || c.filter_revision != access.filter_revision
         || c.access_digest != digest
         || now.upper_ms >= c.expires_ms
-        || c.sequence > access.sequence
-        || c.sequence.saturating_add(1) < access.earliest
     {
         return Err(Fault::Reject(
             ErrorCode::ResynchronisationRequired,
@@ -80,10 +91,16 @@ struct PageContext<'a> {
     access: &'a Access,
     digest: Id,
     start: u64,
+    bytes: usize,
+    include_members: bool,
 }
 impl PageContext<'_> {
     fn finish(self, mut events: Vec<Event>, mut last: u64, mut more: bool) -> Domain<Outcome> {
-        let members = conversations::members(self.db, self.access.room, self.now)?;
+        let members = if self.include_members {
+            conversations::members(self.db, self.access.room, self.now)?
+        } else {
+            Vec::new()
+        };
         loop {
             let cursor = HistoryCursor {
                 home: self.action.home,
@@ -119,7 +136,7 @@ impl PageContext<'_> {
             } else {
                 sign_response(&response, self.signer)
             };
-            if representation.is_ok() {
+            if representation.is_ok() && canonical_encode(&value(&outcome)?, self.bytes).is_ok() {
                 return Ok(outcome);
             }
             if events.pop().is_none() {
@@ -143,6 +160,28 @@ pub(super) fn page(
     permit: Permit,
     signer: &SigningKey,
     cancel: &Cancellation,
+) -> Domain<Outcome> {
+    page_bounded(
+        db,
+        action,
+        now,
+        permit,
+        signer,
+        cancel,
+        CRYPTO_FRAME_BYTES,
+        true,
+    )
+}
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn page_bounded(
+    db: &Transaction<'_>,
+    action: &Action,
+    now: TimeBounds,
+    permit: Permit,
+    signer: &SigningKey,
+    cancel: &Cancellation,
+    representation_bytes: usize,
+    include_members: bool,
 ) -> Domain<Outcome> {
     let body: Page = unpack(&action.body)?;
     let limit = page_limit(body.limit)?;
@@ -211,6 +250,8 @@ pub(super) fn page(
         access: &access,
         digest: context,
         start,
+        bytes: representation_bytes,
+        include_members,
     }
     .finish(result, last, more)
 }
@@ -262,7 +303,8 @@ pub(super) fn search(
     let start = after(&body.cursor, &access, action, now, signer, context)?;
     let expression = crate::text::match_expression(&terms);
     let from = if expression.is_some() {
-        "hrc_search s JOIN hrc_events e ON e.position=s.rowid"
+        // Keep FTS as the outer loop: a room-first plan rebuilds MATCH for every event.
+        "hrc_search s CROSS JOIN hrc_events e ON e.position=s.rowid"
     } else {
         "hrc_events e"
     };
@@ -331,6 +373,8 @@ pub(super) fn search(
         access: &access,
         digest: context,
         start,
+        bytes: CRYPTO_FRAME_BYTES,
+        include_members: true,
     }
     .finish(result, last, more)
 }

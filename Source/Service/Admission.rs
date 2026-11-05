@@ -1,15 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Fair, finite admission before the serial companion authority exchange.
+//! Fair, finite admission before bounded companion authority exchanges.
 use crate::clock;
 use std::{
-    collections::VecDeque,
+    collections::{BTreeSet, VecDeque},
     sync::{Condvar, Mutex},
     time::Duration,
 };
 
 const MAXIMUM_PENDING: usize = 32;
+const MAXIMUM_ACTIVE: usize = 4;
 const WAIT_MS: u64 = 1000;
-const CHECK_MS: u64 = 1000;
+const CHECK_MS: u64 = 5000;
 
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum Error {
@@ -21,7 +22,7 @@ pub(super) enum Error {
 #[derive(Default)]
 struct State {
     next: u64,
-    active: Option<u64>,
+    active: BTreeSet<u64>,
     waiting: VecDeque<u64>,
 }
 #[derive(Default)]
@@ -48,7 +49,7 @@ impl Admission {
         }
         let ticket = {
             let mut state = self.state.lock().map_err(|_| Error::Unavailable)?;
-            if state.waiting.len() + usize::from(state.active.is_some()) >= MAXIMUM_PENDING {
+            if state.waiting.len() + state.active.len() >= MAXIMUM_PENDING {
                 return Err(Error::Busy);
             }
             let ticket = state.next;
@@ -75,10 +76,12 @@ impl Admission {
                 });
             }
             let mut state = self.state.lock().map_err(|_| Error::Unavailable)?;
-            if state.active.is_none() && state.waiting.front() == Some(&ticket) {
+            if state.active.len() < MAXIMUM_ACTIVE && state.waiting.front() == Some(&ticket) {
                 state.waiting.pop_front();
-                state.active = Some(ticket);
+                state.active.insert(ticket);
                 drop(state);
+                // Other free slots can admit the next FIFO waiter immediately.
+                self.changed.notify_all();
                 if stopped() {
                     return Err(Error::Stopped);
                 }
@@ -94,15 +97,14 @@ impl Admission {
 }
 impl Permit<'_> {
     /// The authority clock starts after admission; an enclosing deadline never moves.
-    pub fn check_timeout(&self) -> Result<Duration, Error> {
+    pub fn check_deadline(&self) -> Result<u64, Error> {
         let now = clock::boot_ms().map_err(|_| Error::Unavailable)?;
-        let ms = self
-            .outer_end
-            .map_or(CHECK_MS, |end| end.saturating_sub(now).min(CHECK_MS));
-        if ms < 100 {
+        let check_end = now.checked_add(CHECK_MS).ok_or(Error::Unavailable)?;
+        let end = self.outer_end.map_or(check_end, |end| end.min(check_end));
+        if end.saturating_sub(now) < 100 {
             return Err(Error::Expired);
         }
-        Ok(Duration::from_millis(ms))
+        Ok(end)
     }
 }
 impl Drop for Permit<'_> {
@@ -113,9 +115,7 @@ impl Drop for Permit<'_> {
             .state
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
-        if state.active == Some(self.ticket) {
-            state.active = None;
-        } else {
+        if !state.active.remove(&self.ticket) {
             state.waiting.retain(|ticket| *ticket != self.ticket);
         }
         drop(state);

@@ -195,6 +195,32 @@ fn malformed_frames_and_duplicate_fields_never_reach_context() {
 }
 
 #[test]
+fn preparation_closure_stays_temporary_without_reclassifying_other_refusals() {
+    for (code, expected) in [
+        ("Closed", "Closed"),
+        ("Timeout", "Timeout"),
+        ("Capacity", "Capacity"),
+        ("Refused", "Refused"),
+        ("Denied", "Refused"),
+        ("FutureCode", "Refused"),
+    ] {
+        let fixture = Fixture::new(move |request| {
+            assert_eq!(request["action"], "connect");
+            json!({"version":2,"ok":false,"error":{
+                "code":code,"message":"PRIVATE_CONNECTION_DIAGNOSTIC"}})
+            .into()
+        });
+        let error = fixture
+            .agent()
+            .connect(&id(3), "hrc-probe/1", Duration::from_secs(1))
+            .err()
+            .expect("typed connection preparation failure");
+        assert_eq!(error.code(), expected);
+        assert!(!error.to_string().contains("PRIVATE_CONNECTION_DIAGNOSTIC"));
+    }
+}
+
+#[test]
 fn context_and_privacy_cannot_cross_direction_or_claim_extra_assurance() {
     assert!(Peer::parse(peer(Direction::Outgoing), Direction::Incoming).is_err());
     let mut v = privacy(Direction::Outgoing);
@@ -298,12 +324,87 @@ fn certified_denial_remains_distinct_from_local_unavailability() {
     let denied = check(&a, &s);
     assert!(denied.certified());
     assert!(!denied.permitted());
+    assert!(denied.attestation().is_none());
     assert_eq!(denied.authority().unwrap().code(), 7);
     mode.store(1, Ordering::Release);
     let absent = check(&a, &s);
     assert!(!absent.certified());
     assert!(!absent.usable());
+    assert!(absent.attestation().is_none());
     assert_eq!(absent.disposition(), Disposition::Unavailable);
+}
+
+#[test]
+fn absolute_authority_end_keeps_spent_time_and_shorter_receipt_lifetimes() {
+    let (recorded, requests) = mpsc::channel();
+    let fixture = Fixture::new(move |request| {
+        if request["action"] != "checkAuthority" {
+            return normal(request);
+        }
+        recorded.send(request.clone()).unwrap();
+        let mut value = receipt(request);
+        if request["actionDigest"] == id(2) {
+            value["result"]["notAfterBootMs"] =
+                (value["result"]["callerStartedBootMs"].as_u64().unwrap() + 150).into();
+        }
+        value.into()
+    });
+    let adapter = fixture.agent();
+    let stream = incoming(&adapter);
+    let end = ipc::boot_ms().unwrap() + 400;
+    thread::sleep(Duration::from_millis(50));
+    let first = adapter
+        .check_authority_until(&stream, [1; 32], end)
+        .unwrap();
+    assert!(first.permitted());
+    let request = requests.recv_timeout(Duration::from_secs(1)).unwrap();
+    assert!((100..=350).contains(&request["timeoutMs"].as_u64().unwrap()));
+    let first_value = serde_json::to_value(&first).unwrap();
+    assert_eq!(first_value["usableUntilBootMs"], end);
+    assert_eq!(first_value["actionDigest"], id(1));
+
+    let end = ipc::boot_ms().unwrap() + 5000;
+    let shorter = adapter
+        .check_authority_until(&stream, [2; 32], end)
+        .unwrap();
+    assert!(shorter.permitted());
+    assert!(!first.permitted());
+    let next = requests.recv_timeout(Duration::from_secs(1)).unwrap();
+    assert_ne!(request["nonce"], next["nonce"]);
+    let value = serde_json::to_value(&shorter).unwrap();
+    assert_eq!(value["usableUntilBootMs"], value["receiptNotAfterBootMs"]);
+    assert!(value["usableUntilBootMs"].as_u64().unwrap() < end);
+    assert_eq!(value["actionDigest"], id(2));
+}
+
+#[test]
+fn absolute_authority_end_refuses_expired_work_and_caps_the_supported_wait() {
+    let (recorded, requests) = mpsc::channel();
+    let fixture = Fixture::new(move |request| {
+        if request["action"] == "checkAuthority" {
+            recorded.send(request.clone()).unwrap();
+        }
+        normal(request)
+    });
+    let adapter = fixture.agent();
+    let stream = incoming(&adapter);
+    for end in [0, ipc::boot_ms().unwrap() + 99] {
+        assert!(matches!(
+            adapter.check_authority_until(&stream, [1; 32], end),
+            Err(Error::Timeout)
+        ));
+    }
+    assert!(requests.try_recv().is_err());
+    let before = ipc::boot_ms().unwrap();
+    let permitted = adapter
+        .check_authority_until(&stream, [1; 32], before + 8000)
+        .unwrap();
+    assert!(permitted.permitted());
+    let request = requests.recv_timeout(Duration::from_secs(1)).unwrap();
+    assert_eq!(request["timeoutMs"], 5000);
+    let value = serde_json::to_value(&permitted).unwrap();
+    assert!(value["usableUntilBootMs"].as_u64().unwrap() <= ipc::boot_ms().unwrap() + 5000);
+    assert!(value["usableUntilBootMs"].as_u64().unwrap() < before + 8000);
 }
 
 #[test]
@@ -407,10 +508,45 @@ fn observation_expires_and_cannot_authorize_a_different_stream() {
     thread::sleep(Duration::from_millis(110));
     assert_eq!(observed.disposition(), Disposition::Expired);
     assert!(!observed.permitted());
+    assert!(observed.attestation().is_none());
     assert!(matches!(
         s.send_observed(&observed, b"expired"),
         Err(Error::NotActive)
     ));
+}
+
+#[test]
+fn origin_attestation_retains_checked_receipt_identity_and_original_lifetime() {
+    let fixture = Fixture::new(normal);
+    let adapter = fixture.agent();
+    let stream = incoming(&adapter);
+    let checked = check(&adapter, &stream);
+    let evidence = checked.attestation().unwrap();
+    assert!(evidence.permitted());
+    assert_eq!(evidence.action_digest(), id(1));
+    assert_eq!(evidence.identity().session, id(6));
+    assert_eq!(evidence.identity().generation, 1);
+    assert_eq!(evidence.identity().companion_instance, id(12));
+    assert_eq!(evidence.identity().endpoint_instance, id(13));
+    assert_eq!(evidence.identity().control_generation, 1);
+    assert_eq!(evidence.authority().configuration(), id(15));
+    assert_eq!(evidence.authority().state(), id(16));
+    assert_eq!(evidence.authority().statement_digest(), id(17));
+    assert_eq!(evidence.privacy().relay_service(), Some(id(10).as_str()));
+    assert_eq!(
+        evidence.privacy().attachment_profile_digest(),
+        Some(id(11).as_str())
+    );
+    assert_eq!(stream.peer().endpoint(), id(5));
+    let serialized = serde_json::to_value(&checked).unwrap();
+    assert_eq!(
+        evidence.not_after_boot_ms(),
+        serialized["usableUntilBootMs"].as_u64().unwrap()
+    );
+    assert_eq!(evidence.nonce(), serialized["nonce"].as_str().unwrap());
+    stream.close();
+    assert!(!evidence.permitted());
+    assert!(checked.attestation().is_none());
 }
 
 #[test]

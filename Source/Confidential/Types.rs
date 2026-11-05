@@ -129,6 +129,8 @@ pub struct TransitionEvent {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DelegationEvidence {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_checkpoint: Option<OwnerCheckpointEvidence>,
     pub position: u64,
     pub grant: crate::delegation::Grant,
     pub authorization: Blob,

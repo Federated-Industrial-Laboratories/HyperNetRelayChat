@@ -3,11 +3,17 @@
 use super::*;
 impl Worker {
     pub(super) fn refresh(&mut self) -> Result<()> {
-        self.snapshot.inspection.stale = true;
-        if let Some(room) = &mut self.snapshot.selected {
-            room.stale = true;
-        }
+        self.refresh_cycle = None;
+        let result = self.update_view(Self::refresh_current);
+        // Failed nonretryable reads also get a finite interval before another full attempt.
+        self.poll = std::time::Instant::now();
+        result
+    }
+    fn refresh_current(&mut self) -> Result<()> {
         cache::maintain(&mut self.client.store).map_err(|_| Error::Storage)?;
+        if self.client.bounded_views() {
+            return self.grouped_refresh();
+        }
         let mut rooms = Vec::new();
         let mut after = None;
         for _ in 0..32 {
@@ -33,7 +39,8 @@ impl Worker {
                 break;
             }
         }
-        cache::save_rooms(&mut self.client.store, &rooms).map_err(|_| Error::Storage)?;
+        cache::save_rooms(&mut self.client.store, self.snapshot.home, &rooms)
+            .map_err(|_| Error::Storage)?;
         self.snapshot.rooms = rooms;
         let account: identity::AccountView = self.read(
             Operation::AccountInspect,
@@ -58,6 +65,7 @@ impl Worker {
                 self.pull(room)?;
             } else {
                 self.snapshot.selected = None;
+                self.snapshot.inspection.restrictions.clear();
                 self.snapshot.search = None;
             }
         }
@@ -75,9 +83,44 @@ impl Worker {
             self.pull(room)?;
         }
         self.snapshot.privacy = Some(self.client.session()?.refresh_privacy()?);
-        // A slow or explicit refresh must not immediately schedule another full poll.
-        self.poll = std::time::Instant::now();
         Ok(())
+    }
+    pub(super) fn refresh_after_send(&mut self, room: RoomId) -> Result<()> {
+        self.update_view(|worker| {
+            if worker.grouped_room(room) {
+                worker.grouped_pull(room)?;
+                if let Some(event) = worker
+                    .snapshot
+                    .selected
+                    .as_ref()
+                    .filter(|v| v.summary.room == room)
+                    .and_then(|v| v.focus)
+                {
+                    worker.open_event(room, event)?;
+                }
+                worker.snapshot.privacy = Some(worker.client.session()?.refresh_privacy()?);
+                return Ok(());
+            }
+            // Recipient filtering remains current before admitting history or notifications.
+            let filters = worker.pages(
+                Operation::ModerationFilters,
+                Target::Account(worker.snapshot.account),
+            )?;
+            worker.install_filters(filters)?;
+            if let Some(event) = worker
+                .snapshot
+                .selected
+                .as_ref()
+                .filter(|view| view.summary.room == room)
+                .and_then(|view| view.focus)
+            {
+                worker.open_event(room, event)?;
+            }
+            worker.pull(room)?;
+            worker.snapshot.privacy = Some(worker.client.session()?.refresh_privacy()?);
+            // Only a full refresh advances the metadata deadline.
+            Ok(())
+        })
     }
     pub(super) fn pages<T: serde::de::DeserializeOwned>(
         &mut self,
@@ -110,7 +153,9 @@ impl Worker {
         Err(Error::Input)
     }
     pub(super) fn inspect(&mut self) -> Result<()> {
-        self.snapshot.inspection.stale = true;
+        self.update_view(Self::inspect_current)
+    }
+    fn inspect_current(&mut self) -> Result<()> {
         let target = Target::Account(self.snapshot.account);
         let filters = self.pages(Operation::ModerationFilters, target.clone())?;
         self.install_filters(filters)?;
@@ -121,6 +166,7 @@ impl Worker {
     }
     pub(super) fn install_filters(&mut self, filters: Vec<moderation::FilterState>) -> Result<()> {
         self.snapshot.inspection.filters = filters;
+        self.snapshot.inspection.filters_stale = false;
         let filters = &self.snapshot.inspection.filters;
         if let Some(view) = &mut self.snapshot.selected {
             view.events
@@ -154,10 +200,17 @@ impl Worker {
         // Current filters take effect before any fallible cache write or later
         // inspection read; an old snapshot must not remain visible during either.
         self.publish();
-        cache::save_filters(&mut self.client.store, &self.snapshot.inspection.filters)
-            .map_err(|_| Error::Storage)
+        cache::save_filters(
+            &mut self.client.store,
+            self.snapshot.home,
+            &self.snapshot.inspection.filters,
+        )
+        .map_err(|_| Error::Storage)
     }
     pub(super) fn select(&mut self, room: RoomId) -> Result<()> {
+        self.update_view(|worker| worker.select_current(room))
+    }
+    fn select_current(&mut self, room: RoomId) -> Result<()> {
         let summary = self
             .snapshot
             .rooms
@@ -165,6 +218,14 @@ impl Worker {
             .find(|r| r.room == room)
             .cloned()
             .ok_or(Error::Input)?;
+        if self
+            .snapshot
+            .selected
+            .as_ref()
+            .is_none_or(|view| view.summary.room != room)
+        {
+            self.snapshot.inspection.restrictions.clear();
+        }
         let mut cached = cache::room(&mut self.client.store, room).map_err(|_| Error::Storage)?;
         cached.events.retain(|event| {
             !cache::filtered(&self.snapshot.inspection.filters, &event.actor, false)
@@ -203,6 +264,9 @@ impl Worker {
             .ok_or(Error::Input)
     }
     pub(super) fn pull(&mut self, room: RoomId) -> Result<()> {
+        self.update_view(|worker| worker.pull_current(room))
+    }
+    fn pull_current(&mut self, room: RoomId) -> Result<()> {
         if self
             .snapshot
             .selected
@@ -211,14 +275,12 @@ impl Worker {
         {
             return Ok(());
         }
-        if let Some(view) = &mut self.snapshot.selected
-            && view.summary.room == room
-        {
-            view.stale = true;
-        }
         let cached = cache::room(&mut self.client.store, room).map_err(|_| Error::Storage)?;
         if cached.gap.is_some() {
             return Ok(());
+        }
+        if self.grouped_room(room) {
+            return self.grouped_pull(room);
         }
         let current: conversations::Inspection =
             match self.read(Operation::RoomInspect, Target::Room(room), &home::Empty {}) {
@@ -251,60 +313,20 @@ impl Worker {
                 current,
                 cached.events.last().map(|e| e.sequence).unwrap_or(0),
             );
-            if result.is_err()
-                && cache::room(&mut self.client.store, room)
-                    .map_err(|_| Error::Storage)?
-                    .gap
-                    .is_some()
-            {
-                self.caught_up.remove(&room);
-                if let Some(view) = &mut self.snapshot.selected
-                    && view.summary.room == room
-                {
-                    view.events.clear();
-                    view.content.clear();
-                    view.members.clear();
-                    view.gap = Some("CurrentRoomAccessUnavailable".into());
-                }
+            if result.is_err() {
+                self.reconcile_history_gap(room)?;
             }
             return result;
         }
-        let page = self.read::<messaging::PageResult, _>(
-            Operation::EventsResume,
-            Target::Room(room),
-            &messaging::Page {
-                cursor: cached.cursor,
-                limit: 32,
-            },
-        );
-        let page = match page {
-            Ok(page) => page,
-            Err(Error::Rejected {
-                code: ErrorCode::ResynchronisationRequired,
-                detail,
-            })
-            | Err(Error::Refused {
-                code: ErrorCode::ResynchronisationRequired,
-                detail,
-                ..
-            }) => {
-                cache::invalidate(&mut self.client.store, room).map_err(|_| Error::Storage)?;
-                self.caught_up.remove(&room);
-                if let Some(view) = &mut self.snapshot.selected
-                    && view.summary.room == room
-                {
-                    view.events.clear();
-                    view.members = current.members;
-                    view.stale = true;
-                    view.gap = Some(detail);
-                    view.has_more = false;
-                }
-                return Ok(());
-            }
-            Err(e) => return Err(e),
-        };
-        let key = VerifyingKey::from_bytes(self.client.profile.server.signing_key.as_bytes())
-            .map_err(|_| Error::Configuration)?;
+        let end = crate::clock::boot_ms()
+            .map_err(|_| Error::Clock)?
+            .saturating_add(10_000);
+        let page = self.community_page(room, cached.cursor, end, |worker, page, end| {
+            worker.read_until(Operation::EventsResume, Target::Room(room), &page, end)
+        })?;
+        let key =
+            VerifyingKey::from_bytes(self.client.profile.active_server().signing_key.as_bytes())
+                .map_err(|_| Error::Configuration)?;
         let now = self
             .client
             .profile
@@ -327,7 +349,6 @@ impl Worker {
         if !page.has_more {
             self.caught_up.insert(room);
         }
-        let cached = cache::room(&mut self.client.store, room).map_err(|_| Error::Storage)?;
         if self
             .snapshot
             .selected
@@ -337,8 +358,19 @@ impl Worker {
             self.snapshot.inspection.restrictions =
                 self.pages(Operation::ModerationRestrictions, Target::Room(room))?;
         }
+        self.present_room_page(room, current, page)
+    }
+    /// Install a community view only after its current room, history and restriction reads.
+    pub(super) fn present_room_page(
+        &mut self,
+        room: RoomId,
+        current: conversations::Inspection,
+        page: messaging::PageResult,
+    ) -> Result<()> {
+        let cached = cache::room(&mut self.client.store, room).map_err(|_| Error::Storage)?;
         if let Some(view) = &mut self.snapshot.selected
             && view.summary.room == room
+            && view.gap.is_none()
         {
             if view.focus.is_none() {
                 view.events = cached
@@ -350,7 +382,7 @@ impl Worker {
                     .collect();
             }
             view.members = page.members;
-            view.stale = false;
+            view.stale = self.snapshot.inspection.filters_stale;
             view.has_more = page.has_more;
             view.read_sequence = current.read_sequence;
             if let Some(summary) = self.snapshot.rooms.iter().find(|s| s.room == room) {
@@ -359,7 +391,109 @@ impl Worker {
         }
         Ok(())
     }
+    /// One current cursorless page may replace an obsolete access context. Both
+    /// attempts share the original read deadline and normal service authorization.
+    pub(super) fn community_page(
+        &mut self,
+        room: RoomId,
+        mut cursor: Option<Blob>,
+        end: u64,
+        mut read: impl FnMut(&mut Self, messaging::Page, u64) -> Result<messaging::PageResult>,
+    ) -> Result<messaging::PageResult> {
+        let had_cursor = cursor.is_some();
+        for attempt in 0..2 {
+            if self.shared.stop.load(Ordering::Acquire)
+                || self.shared.disconnect.load(Ordering::Acquire)
+            {
+                return Err(Error::Offline);
+            }
+            if crate::clock::boot_ms().map_err(|_| Error::Clock)? >= end {
+                return Err(Error::Network(super::super::network::Error::Transport));
+            }
+            let result = read(
+                self,
+                messaging::Page {
+                    cursor: cursor.take(),
+                    limit: 32,
+                },
+                end,
+            );
+            match result {
+                Err(error)
+                    if attempt == 0 && had_cursor && cache::cursor_context_changed(&error) =>
+                {
+                    self.clear_room_presentation(room, None);
+                    cache::restart_community(&mut self.client.store, room, None)
+                        .map_err(|_| Error::Storage)?;
+                }
+                Err(error) => {
+                    if cache::access_unavailable(&error) {
+                        let detail = match &error {
+                            Error::Rejected { detail, .. } | Error::Refused { detail, .. } => {
+                                detail.as_str()
+                            }
+                            _ => unreachable!(),
+                        };
+                        self.clear_room_presentation(room, Some(detail.into()));
+                        cache::restart_community(&mut self.client.store, room, Some(detail))
+                            .map_err(|_| Error::Storage)?;
+                    }
+                    return Err(error);
+                }
+                Ok(page) => {
+                    if self.shared.stop.load(Ordering::Acquire)
+                        || self.shared.disconnect.load(Ordering::Acquire)
+                    {
+                        return Err(Error::Offline);
+                    }
+                    if crate::clock::boot_ms().map_err(|_| Error::Clock)? >= end {
+                        return Err(Error::Network(super::super::network::Error::Transport));
+                    }
+                    return Ok(page);
+                }
+            }
+        }
+        unreachable!("community cursor restart is bounded")
+    }
+    pub(super) fn clear_room_presentation(&mut self, room: RoomId, gap: Option<String>) {
+        self.caught_up.remove(&room);
+        if let Some(view) = &mut self.snapshot.selected
+            && view.summary.room == room
+        {
+            view.events.clear();
+            view.content.clear();
+            view.members.clear();
+            view.focus = None;
+            view.stale = true;
+            view.gap = gap;
+            view.has_more = false;
+        }
+        if self
+            .snapshot
+            .search
+            .as_ref()
+            .is_some_and(|view| view.room == room)
+        {
+            self.snapshot.search = None;
+        }
+        self.snapshot
+            .notifications
+            .retain(|notification| notification.room != room);
+        self.publish();
+    }
+    pub(super) fn reconcile_history_gap(&mut self, room: RoomId) -> Result<()> {
+        if let Some(gap) = cache::room(&mut self.client.store, room)
+            .map_err(|_| Error::Storage)?
+            .gap
+        {
+            self.clear_room_presentation(room, Some(gap));
+        }
+        Ok(())
+    }
     pub(super) fn notify(&mut self, room: RoomId, events: &[Event]) -> Result<()> {
+        if self.snapshot.inspection.filters_stale {
+            return Ok(());
+        }
         let prefs =
             cache::room_preferences(&mut self.client.store, room).map_err(|_| Error::Storage)?;
         if self.snapshot.preferences.quiet || prefs.notifications == NotificationMode::Off {
@@ -425,8 +559,10 @@ impl Worker {
 
 impl Worker {
     pub(super) fn open_event(&mut self, room: RoomId, event: Id) -> Result<()> {
-        let result = self.client.message_context(room, event, None);
-        self.context_result(room, event, result)
+        self.update_view(|worker| {
+            let result = worker.client.message_context(room, event, None);
+            worker.context_result(room, event, result)
+        })
     }
     pub(super) fn context_result(
         &mut self,
@@ -523,6 +659,11 @@ impl Worker {
             selected.crypto = Some(initial.clone());
         }
         if super::super::encrypted::require_trust(&initial).is_err() {
+            if let Some(selected) = &mut self.snapshot.selected
+                && selected.summary.room == room
+            {
+                selected.stale = true;
+            }
             return Ok(());
         }
         let view = self.client.crypto_sync(room, None)?;
@@ -546,7 +687,7 @@ impl Worker {
             .cursor
             .as_ref()
             .map(|c| {
-                VerifyingKey::from_bytes(self.client.profile.server.signing_key.as_bytes())
+                VerifyingKey::from_bytes(self.client.profile.active_server().signing_key.as_bytes())
                     .map_err(|_| Error::Input)
                     .and_then(|k| {
                         verify_cursor(&c.0, &k)

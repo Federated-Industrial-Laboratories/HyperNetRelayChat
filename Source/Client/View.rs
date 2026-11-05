@@ -78,6 +78,8 @@ pub struct Status {
 }
 #[derive(Clone, Debug)]
 pub struct Delivery {
+    /// Prepared frame write to complete direct committed acknowledgement; never recovered.
+    pub exchange_ns: Option<u64>,
     pub abandoned: bool,
     pub held: bool,
     pub request_id: Option<u64>,
@@ -116,7 +118,9 @@ pub struct RoomView {
 }
 #[derive(Clone, Debug, Default)]
 pub struct Inspection {
+    pub filters_stale: bool,
     pub filters: Vec<moderation::FilterState>,
+    /// Belongs to the selected room and follows that RoomView's freshness.
     pub restrictions: Vec<moderation::RestrictionState>,
     pub grants: Vec<delegation::Grant>,
     pub agents: Vec<identity::AgentEndpoint>,
@@ -136,15 +140,25 @@ pub struct SearchView {
     pub cancelled: bool,
 }
 #[derive(Clone, Debug)]
+pub struct ServiceChoice {
+    pub home: ServiceId,
+    pub agreement: Option<AgreementRef>,
+    pub selected: bool,
+}
+#[derive(Clone, Debug)]
 pub struct Snapshot {
     pub revision: u64,
+    /// View reads are in progress. This is not an authority or delivery guarantee.
+    pub updating: bool,
     pub account: AccountId,
     pub home: ServiceId,
+    pub services: Vec<ServiceChoice>,
     pub classification: AccountClass,
     pub nickname: String,
     pub motd: String,
     pub connection: ConnectionState,
     pub privacy: Option<crate::hypernet::Privacy>,
+    pub federation_privacy: Option<crate::protocol::RemoteSessionReady>,
     pub rooms: Vec<conversations::Summary>,
     pub selected: Option<RoomView>,
     pub search: Option<SearchView>,
@@ -171,6 +185,7 @@ pub enum RestrictionKind {
 pub enum Command {
     Connect,
     Disconnect,
+    SelectService(Option<AgreementRef>),
     Refresh,
     SelectRoom(RoomId),
     OpenEvent {

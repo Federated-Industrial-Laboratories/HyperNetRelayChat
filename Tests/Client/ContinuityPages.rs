@@ -18,6 +18,7 @@ fn page(after: u64, count: usize, next: Option<String>) -> identity::PublicIdent
         endpoints: Vec::new(),
     };
     identity::PublicIdentity {
+        origin_checkpoint: None,
         identity: state.clone(),
         continuity: crate::home::InspectionPage {
             items: (1..=count)

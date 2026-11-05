@@ -57,10 +57,7 @@ does not dispatch another Connect. The same transient status from SelectRoom
 must recover the original selection to a current room view without a gap, Online
 connection, current inspection and privacy within that command's original bound.
 The helper does not dispatch another selection. Successful offline selection
-still exposes stale cached state. Other command errors fail the check. Network
-commands wait for current online state before their single dispatch, within the
-same original command deadline. Earlier readiness of another Controller does not
-imply this Controller is still online. A send
+still exposes stale cached state. Other command errors fail the check. A send
 with a visibly pending delivery may recover only if the same request, operation
 ID and Action digest become committed through the Controller's own resolution.
 Permanent refusals, abandonment and replacement identities fail. Evidence counts
@@ -211,3 +208,80 @@ shapes. Delegated send preflight rejects denied/expired access with the exact
 matching event was published. Availability, malformed input and unrelated failures
 cannot satisfy those refusal cases. The prior M4 qualification tree and its
 recorded results remain separate from this updated candidate.
+
+## Two-network federation extension
+
+`NativeFederation.py` receives two independently administered installed HyperNet
+contexts. The maintained installed fixture creates separate bootstrap identities,
+administrators, voter sets, authority endpoints and native Suite companions. It
+uses eight authority containers and the existing bounded route and application
+services. Both networks can run on the same qualification host; this does not
+establish independent host failure domains. Durable authority and HRC stores stay
+on disk. Only signed, boot-bound clock observations may use the qualified ephemeral
+clock directory.
+
+Build `cargo build --example native-federation-client` from the same candidate as
+the normal binary and set `HRC_NATIVE_FEDERATION_CLIENT` to its exact executable.
+The installed runner selects this workflow with `--hrc-federation`. It does not
+run the single-network conversation or Page federation workflow first. The helper
+uses the shipped CLI to create both HRC services, independently enroll Alice,
+Bob and Bob's agent, create separate gateway/attestor keys, exchange descriptors,
+sign matching agreements against explicit pins, import bounded owner-continuity
+pages, approve exact endpoints and install the destination companion route.
+A setup-only agreement has no rooms; its next revision explicitly shares the
+community room, private group and direct conversation. Client selection retains
+the origin account, endpoint keys and origin HyperNet companion.
+
+The Rust helper uses real Client APIs and sessions for remote human and
+independent-agent messages, foreign delegated scope, encrypted private-group and
+direct conversation membership, explicit contact pinning, Unicode mentions,
+restart of the local encrypted index and current recipient-ignore filtering.
+It verifies exact ciphertext replay and original event identity. A signed action
+with a substituted origin is sent over the actual endpoint stream; its refusal
+must be signed and correlated by the origin, and history must show no effect.
+A short-lived delegation must expire without publishing its prepared operation.
+
+Two private control markers request stopping and restarting the origin service.
+After its original five-second identity lease expires, a local sender must receive
+a non-consuming availability refusal for an already prepared ciphertext. The
+room retains its MLS roster. Restarting the origin must renew the lease through
+the real gateway; retrying the exact ciphertext must yield one event. The helper
+then performs owner-key recovery at the origin and waits for the running service
+to publish the changed checkpoint automatically. No manual proof import occurs
+in this scenario. The home must establish the old endpoint's removal barrier and
+refuse its queued old-generation operation. Bounded private controls then stop
+the services for explicit operator admission of the new endpoint. The CLI exports
+the origin's exact current checkpoint identifier and admits it at the home; this
+must fail if the running origin had not already imported that checkpoint. There
+is no manual identity-import fallback. The new profile selects the same bilateral
+agreement, authenticates with its new endpoint key and retains the same account.
+Both encrypted rooms remove the old MLS leaf and explicitly admit a separately
+generated replacement key through package, commit, Welcome and Ready. The home
+participant retains the original contact anchor. Earlier ciphertext remains in
+permitted history without becoming decryptable by the recovered endpoint, while
+new messages must decrypt in both the private group and direct conversation.
+The separately held recovery key is loaded only through the production device
+API and never printed. Control requests carry the original step's boot deadline;
+CLI admission shares that deadline, and no restart extends the overall budget.
+
+After clients release their stores, the shipped withdrawal command durably stops
+the origin and requests the home's signed acknowledgement. The driver checks the
+actual home barrier through stopped-service inspection. After the origin restarts,
+the previously eligible independent agent must receive the signed, correlated
+`AgreementWithdrawn` refusal; its retained draft survives and home history contains
+no corresponding event. Gateway status samples
+record observed connection identities and reuse; these samples are explicitly
+not a complete connection census. Existing 16-concurrent and 128-total fixture
+connection limits remain unchanged.
+
+The Rust helper has a 45-second per-step watchdog and a bounded overall budget,
+with two-second operation pacing. Exact retries retain the original ID, digest,
+signed bytes and deadline and respect supplied retry guidance. High-level crypto
+failures are not blindly repeated. Current inspection, history, online search and
+encrypted synchronisation recover typed transient failures within the original
+step deadline, using the production client for session and exact readiness outbox
+recovery. Contact trust writes follow a successful inspection once; retained
+search remains offline. Recipient readiness polling shares that same deadline.
+The Python owner has its own fixture deadline and exact process cleanup.
+Successful compilation is not a native qualification result; the first two-network
+run remains required before release.

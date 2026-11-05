@@ -11,7 +11,7 @@ use std::{
     collections::BTreeMap,
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -34,6 +34,14 @@ pub enum Error {
     Clock,
     #[error("the retry window expired")]
     Expired,
+    #[error("the federated query was cancelled; its stream is closed")]
+    QueryCancelled,
+    #[error("the origin could not forward this attempt: {detail}")]
+    ForwardRefused {
+        code: ErrorCode,
+        detail: String,
+        retry_after_ms: Option<u64>,
+    },
 }
 impl Error {
     pub fn code(&self) -> &'static str {
@@ -46,15 +54,25 @@ impl Error {
             Self::Frame => "InvalidSessionFrame",
             Self::Clock => "ClockUnavailable",
             Self::Expired => "RetryWindowExpired",
+            Self::QueryCancelled => "QueryCancelled",
+            Self::ForwardRefused { .. } => "FederationForwardRefused",
         }
     }
     /// A fresh connection may be attempted; this does not authorize replaying an operation.
     pub fn retryable_session(&self) -> bool {
-        self.retryable_setup() || matches!(self, Self::Transport | Self::Clock)
+        self.retryable_setup()
+            || matches!(self, Self::Transport | Self::Clock | Self::QueryCancelled)
     }
     fn retryable_setup(&self) -> bool {
         use crate::hypernet::Error as HyperNet;
         matches!(self, Self::Handshake)
+            || matches!(
+                self,
+                Self::ForwardRefused {
+                    code: ErrorCode::Unavailable | ErrorCode::RateLimited | ErrorCode::Overloaded,
+                    ..
+                }
+            )
             || matches!(
                 self,
                 Self::Companion(error) | Self::Connect(error)
@@ -65,14 +83,37 @@ impl Error {
     }
 }
 pub type Result<T> = std::result::Result<T, Error>;
+// Automatic reconnects must not produce an unbounded diagnostic transcript.
+static PREPARATION_DIAGNOSTICS: AtomicUsize = AtomicUsize::new(128);
+fn preparation_failure(error: &crate::hypernet::Error, started: u64, deadline: u64) {
+    if PREPARATION_DIAGNOSTICS
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| {
+            remaining.checked_sub(1)
+        })
+        .is_err()
+    {
+        return;
+    }
+    crate::diagnostics::emit(
+        &serde_json::json!({"event":"ConnectionPreparationFailed", "code":error.code(),
+            "startedBootMs":started, "finishedBootMs":clock::boot_ms().ok(),
+            "setupDeadlineBootMs":deadline})
+        .to_string(),
+    );
+}
 pub struct Session {
     companion: Companion,
     stream: Arc<Stream>,
     server_key: VerifyingKey,
     pub ready: SessionReady,
+    origin_key: VerifyingKey,
+    origin: ServiceId,
+    clock: clock::Config,
+    pub remote: Option<RemoteSessionReady>,
 }
 impl Session {
     pub fn open(profile: &Profile, key: &SigningKey) -> Result<Self> {
+        crate::diagnostics::start();
         let end = clock::boot_ms().map_err(|_| Error::Clock)? + 30_000;
         establish(end, |end| Self::open_once(profile, key, end))
     }
@@ -89,12 +130,7 @@ impl Session {
                 remaining(overall_end)?.min(Duration::from_secs(10)),
             )
             .map_err(|error| {
-                eprintln!(
-                    "{}",
-                    serde_json::json!({"event":"ConnectionPreparationFailed", "code":error.code(),
-                        "startedBootMs":started, "finishedBootMs":clock::boot_ms().ok(),
-                        "setupDeadlineBootMs":overall_end})
-                );
+                preparation_failure(&error, started, overall_end);
                 Error::Connect(error)
             })?;
         let Peer::Outgoing(_) = stream.peer() else {
@@ -122,6 +158,7 @@ impl Session {
             versions: vec![VERSION],
             required_capabilities: Vec::new(),
             optional_capabilities: vec![
+                CLIENT_VIEWS_CAPABILITY.into(),
                 "community-rooms".into(),
                 "delegation".into(),
                 "history".into(),
@@ -191,11 +228,146 @@ impl Session {
         if profile.clock.sample().map_err(|_| Error::Clock)?.upper_ms >= ready.window.expires_ms {
             return Err(Error::Expired);
         }
-        Ok(Self {
+        let mut session = Self {
             companion,
             stream: Arc::new(stream),
             server_key,
+            origin_key: server_key,
+            origin: home,
+            clock: profile.clock.clone(),
             ready,
+            remote: None,
+        };
+        if let Some(selection) = profile.selected_federation() {
+            session.open_remote(profile, selection, key, overall_end)?;
+        }
+        Ok(session)
+    }
+    fn open_remote(
+        &mut self,
+        profile: &Profile,
+        selection: &super::federation::Selection,
+        key: &SigningKey,
+        end: u64,
+    ) -> Result<()> {
+        let agreement = selection.validate().map_err(|_| Error::Authentication)?;
+        let now = profile.clock.sample().map_err(|_| Error::Clock)?;
+        if !now.permits(agreement.not_before_ms, agreement.expires_ms)
+            || !self
+                .ready
+                .capabilities
+                .iter()
+                .any(|c| c == FEDERATION_CAPABILITY)
+        {
+            return Err(Error::Authentication);
+        }
+        let request = RemoteSessionRequest {
+            profile: FEDERATION_PROFILE,
+            home: agreement.home,
+            origin: agreement.origin,
+            agreement: selection.agreement,
+            request: Id::random().map_err(|_| Error::Authentication)?,
+            account: self.ready.acting.account,
+            endpoint: self.ready.acting.endpoint,
+            endpoint_binding_digest: self.ready.binding_digest,
+            client_nonce: Id::random().map_err(|_| Error::Authentication)?,
+            created_ms: now.lower_ms,
+            expires_ms: now.lower_ms + remaining(end)?.as_millis() as u64,
+        };
+        let signed = sign_remote_session_request(&request, key).map_err(|_| Error::Frame)?;
+        let digest = verify_remote_session_request(&signed, &key.verifying_key())
+            .map_err(|_| Error::Frame)?
+            .digest();
+        send(&self.stream, FrameKind::FederationControl, signed, end)?;
+        let incoming = io::receive(&self.stream, remaining(end)?).map_err(handshake_failure)?;
+        if incoming.kind != FrameKind::FederationControl {
+            return Err(Error::Frame);
+        }
+        if let Some(error) = self.forwarding_refusal(
+            &incoming,
+            &request.home,
+            request.agreement,
+            request.request,
+            Operation::FederationSession,
+            digest,
+        ) {
+            return Err(error);
+        }
+        let home_key = VerifyingKey::from_bytes(selection.home.signing_key.as_bytes())
+            .map_err(|_| Error::Authentication)?;
+        let ready = verify_remote_session_ready(&incoming.payload, &home_key)
+            .map_err(|_| Error::Authentication)?;
+        let value = ready.value();
+        if value.home != request.home
+            || value.origin != request.origin
+            || value.agreement != request.agreement
+            || value.request != request.request
+            || value.request_digest != digest
+            || value.acting != self.ready.acting
+            || value.classification != self.ready.classification
+            || profile.clock.sample().map_err(|_| Error::Clock)?.upper_ms >= value.window.expires_ms
+        {
+            return Err(Error::Authentication);
+        }
+        self.ready.home = value.home;
+        self.ready.window = value.window.clone();
+        self.server_key = home_key;
+        self.remote = Some(value.clone());
+        Ok(())
+    }
+    fn forwarding_refusal(
+        &self,
+        incoming: &Frame,
+        home: &ServiceId,
+        agreement: AgreementRef,
+        request: Id,
+        operation: Operation,
+        digest: Id,
+    ) -> Option<Error> {
+        if incoming.kind != FrameKind::FederationControl {
+            return None;
+        }
+        let signed = verify_federation_control(&incoming.payload, &self.origin_key).ok()?;
+        let FederationControl::Result {
+            home: target,
+            origin,
+            agreement: reference,
+            request: id,
+            operation: op,
+            request_digest,
+            created_ms,
+            expires_ms,
+            outcome:
+                Outcome::Refused {
+                    code,
+                    detail,
+                    retry_after_ms,
+                },
+            ..
+        } = signed.value()
+        else {
+            return None;
+        };
+        if target != home
+            || *reference != agreement
+            || *id != request
+            || *op != operation
+            || *request_digest != digest
+        {
+            return Some(Error::Authentication);
+        }
+        if *origin != self.origin
+            || !self
+                .clock
+                .sample()
+                .is_ok_and(|now| now.permits(*created_ms, *expires_ms))
+        {
+            return Some(Error::Authentication);
+        }
+        Some(Error::ForwardRefused {
+            code: *code,
+            detail: detail.clone(),
+            retry_after_ms: *retry_after_ms,
         })
     }
     pub fn privacy(&self) -> Privacy {
@@ -227,12 +399,13 @@ impl Session {
             body,
             expected: BTreeMap::new(),
             approval: None,
-            agreement: None,
+            agreement: self.remote.as_ref().map(|r| r.agreement),
         })
     }
     /// Submit exactly the persisted bytes. An I/O error does not imply rejection.
     pub fn submit(&self, bytes: &[u8], key: &VerifyingKey) -> Result<Verified<Response>> {
         self.submit_bounded(bytes, key, None)
+            .map(|(response, _)| response)
     }
     /// Retry a read within its original caller budget; mutations cannot enter this path.
     pub(crate) fn submit_read_until(
@@ -242,13 +415,21 @@ impl Session {
         end: u64,
     ) -> Result<Verified<Response>> {
         self.submit_bounded(bytes, key, Some(end))
+            .map(|(response, _)| response)
+    }
+    pub(crate) fn submit_observed(
+        &self,
+        bytes: &[u8],
+        key: &VerifyingKey,
+    ) -> Result<(Verified<Response>, Option<u64>)> {
+        self.submit_bounded(bytes, key, None)
     }
     fn submit_bounded(
         &self,
         bytes: &[u8],
         key: &VerifyingKey,
         end: Option<u64>,
-    ) -> Result<Verified<Response>> {
+    ) -> Result<(Verified<Response>, Option<u64>)> {
         let action = verify_action(bytes, key).map_err(|_| Error::Authentication)?;
         if action.action().home != self.ready.home
             || action.action().actor.acting() != &self.ready.acting
@@ -262,18 +443,34 @@ impl Session {
             FrameKind::Action
         };
         let frame = Frame::new(kind, bytes.to_vec()).map_err(|_| Error::Frame)?;
-        let incoming = if let Some(end) = end {
-            let send_end = end.min(
-                clock::boot_ms()
-                    .map_err(|_| Error::Clock)?
-                    .saturating_add(5000),
-            );
-            io::send_before(&self.stream, &frame, send_end).map_err(transport_failure)?;
-            io::receive_before(&self.stream, end).map_err(transport_failure)?
-        } else {
-            io::send(&self.stream, &frame, Duration::from_secs(5)).map_err(transport_failure)?;
-            io::receive(&self.stream, Duration::from_secs(10)).map_err(transport_failure)?
+        let encoded = frame.encode().map_err(|_| Error::Frame)?;
+        let send_end = clock::boot_ms()
+            .map_err(|_| Error::Clock)?
+            .saturating_add(5000);
+        let send_end = end.map_or(send_end, |end| end.min(send_end));
+        // Encoding and action verification precede the exchange interval.
+        let written = std::time::Instant::now();
+        io::send_encoded_before(&self.stream, &encoded, send_end).map_err(transport_failure)?;
+        let receive_end = match end {
+            Some(end) => end,
+            None => clock::boot_ms()
+                .map_err(|_| Error::Clock)?
+                .saturating_add(10_000),
         };
+        let (incoming, received) =
+            io::receive_before_observed(&self.stream, receive_end).map_err(transport_failure)?;
+        if let Some(remote) = &self.remote
+            && let Some(error) = self.forwarding_refusal(
+                &incoming,
+                &action.action().home,
+                remote.agreement,
+                action.action().operation_id.operation,
+                Operation::FederationExchange,
+                action.digest(),
+            )
+        {
+            return Err(error);
+        }
         let verified = if action.action().operation.is_crypto_transition() {
             if incoming.kind != FrameKind::CryptoResponse {
                 return Err(Error::Frame);
@@ -293,7 +490,18 @@ impl Session {
         {
             return Err(Error::Authentication);
         }
-        Ok(verified)
+        let exchange_ns = direct_exchange(action.action(), response, written, received);
+        Ok((verified, exchange_ns))
+    }
+    pub(crate) fn local_views_for(&self, home: ServiceId, key: Id) -> bool {
+        self.remote.is_none()
+            && self.ready.home == home
+            && self.server_key.to_bytes() == *key.as_bytes()
+            && self
+                .ready
+                .capabilities
+                .iter()
+                .any(|c| c == CLIENT_VIEWS_CAPABILITY)
     }
     pub fn stream_handle(&self) -> Arc<Stream> {
         Arc::clone(&self.stream)
@@ -323,6 +531,9 @@ impl Session {
             || reference.action_digest != query.digest()
         {
             return Err(Error::Authentication);
+        }
+        if self.remote.is_some() {
+            return self.remote_query(&query, bytes, cancel);
         }
         let end = clock::boot_ms().map_err(|_| Error::Clock)? + 10000;
         io::send(
@@ -385,6 +596,57 @@ impl Session {
     pub fn close(&self) {
         self.stream.close();
     }
+    // A gateway serializes one request per stream. Closing the query's stream
+    // propagates cancellation without granting a second action any authority.
+    fn remote_query(
+        &self,
+        query: &VerifiedAction,
+        bytes: &[u8],
+        cancel: &AtomicBool,
+    ) -> Result<Verified<Response>> {
+        let end = clock::boot_ms().map_err(|_| Error::Clock)? + 10000;
+        if cancel.load(Ordering::Acquire) {
+            return Err(Error::QueryCancelled);
+        }
+        send(&self.stream, FrameKind::Action, bytes.to_vec(), end)?;
+        loop {
+            if cancel.load(Ordering::Acquire) {
+                self.close();
+                return Err(Error::QueryCancelled);
+            }
+            if !self
+                .stream
+                .wait_readable(remaining(end)?.min(Duration::from_millis(25)))
+                .map_err(|_| Error::Transport)?
+            {
+                continue;
+            }
+            let frame = io::receive(&self.stream, remaining(end)?).map_err(transport_failure)?;
+            let remote = self.remote.as_ref().ok_or(Error::Authentication)?;
+            if let Some(error) = self.forwarding_refusal(
+                &frame,
+                &query.action().home,
+                remote.agreement,
+                query.action().operation_id.operation,
+                Operation::FederationExchange,
+                query.digest(),
+            ) {
+                return Err(error);
+            }
+            if frame.kind != FrameKind::Response {
+                return Err(Error::Frame);
+            }
+            let result = verify_response(&frame.payload, &self.server_key)
+                .map_err(|_| Error::Authentication)?;
+            if result.value().home != query.action().home
+                || result.value().operation_id != query.action().operation_id
+                || result.value().action_digest != query.digest()
+            {
+                return Err(Error::Authentication);
+            }
+            return Ok(result);
+        }
+    }
 }
 /// Transient preparation or a discarded handoff precedes any HRC operation.
 /// Obtain a fresh stream and challenge without renewing the original deadline.
@@ -397,11 +659,16 @@ fn establish<T>(end: u64, mut attempt: impl FnMut(u64) -> Result<T>) -> Result<T
             Err(error) if error.retryable_setup() && number < 2 => {
                 let mut jitter = [0u8; 1];
                 getrandom::fill(&mut jitter).map_err(|_| Error::Authentication)?;
-                let delay = Duration::from_millis(200 + number * 200 + u64::from(jitter[0]));
+                let backoff = 200 + number * 200 + u64::from(jitter[0]);
+                let advised = match &error {
+                    Error::ForwardRefused { retry_after_ms, .. } => retry_after_ms.unwrap_or(1000),
+                    _ => 0,
+                };
+                let delay = Duration::from_millis(backoff.max(advised));
                 let Ok(left) = remaining(end) else {
                     return Err(error);
                 };
-                if left < delay + Duration::from_millis(100) {
+                if delay > left.saturating_sub(Duration::from_millis(100)) {
                     return Err(error);
                 }
                 std::thread::sleep(delay);
@@ -444,4 +711,28 @@ fn transport_failure(error: io::Error) -> Error {
 
 #[cfg(test)]
 #[path = "../../Tests/Client/Connection.rs"]
-mod tests;
+pub(in crate::client) mod tests;
+
+// Timing becomes eligible only after the caller verifies response signature and exact binding.
+fn direct_exchange(
+    action: &Action,
+    response: &Response,
+    written: std::time::Instant,
+    received: std::time::Instant,
+) -> Option<u64> {
+    if !matches!(
+        action.operation,
+        Operation::MessageSend | Operation::MessageReply | Operation::MessageAction
+    ) || action.home != response.home
+        || action.operation_id != response.operation_id
+        || action_digest(action).ok()? != response.action_digest
+        || !matches!(response.outcome, Outcome::Committed { event: Some(_), .. })
+    {
+        return None;
+    }
+    received
+        .checked_duration_since(written)?
+        .as_nanos()
+        .try_into()
+        .ok()
+}

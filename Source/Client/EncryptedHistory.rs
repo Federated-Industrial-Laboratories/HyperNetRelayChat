@@ -137,11 +137,17 @@ impl Client {
                 .map_err(failure)?;
             view.local = Some(state);
         }
-        let key = VerifyingKey::from_bytes(self.profile.server.signing_key.as_bytes())
+        let key = VerifyingKey::from_bytes(self.profile.active_server().signing_key.as_bytes())
             .map_err(|_| Error::Configuration)?;
         let mut restarted = false;
         for attempt in 0..8 {
             let cached = cache::room(&mut self.store, room).map_err(|_| Error::Storage)?;
+            if let Some(detail) = cached.gap {
+                return Err(Error::Rejected {
+                    code: ErrorCode::ResynchronisationRequired,
+                    detail,
+                });
+            }
             let had_cursor = cached.cursor.is_some();
             let page = self.read_as::<messaging::PageResult, _>(
                 Operation::CryptoHistory,

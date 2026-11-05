@@ -5,7 +5,7 @@ use crate::{
     hypernet::Stream,
     protocol::{Frame, FrameHeader},
 };
-use std::time::Duration;
+use std::time::{Duration, Instant};
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("transport unavailable; an operation outcome may be unknown")]
@@ -29,6 +29,13 @@ pub fn send(stream: &Stream, frame: &Frame, timeout: Duration) -> Result<(), Err
 }
 pub(crate) fn send_before(stream: &Stream, frame: &Frame, deadline: u64) -> Result<(), Error> {
     let bytes = frame.encode().map_err(|_| Error::Frame)?;
+    send_encoded_before(stream, &bytes, deadline)
+}
+pub(crate) fn send_encoded_before(
+    stream: &Stream,
+    bytes: &[u8],
+    deadline: u64,
+) -> Result<(), Error> {
     for chunk in bytes.chunks(65536) {
         stream
             .send_all_before(chunk, deadline)
@@ -49,6 +56,12 @@ pub fn receive(stream: &Stream, timeout: Duration) -> Result<Frame, Error> {
     receive_before(stream, deadline)
 }
 pub(crate) fn receive_before(stream: &Stream, deadline: u64) -> Result<Frame, Error> {
+    receive_before_observed(stream, deadline).map(|(frame, _)| frame)
+}
+pub(crate) fn receive_before_observed(
+    stream: &Stream,
+    deadline: u64,
+) -> Result<(Frame, Instant), Error> {
     let mut header = [0; 5];
     stream
         .recv_exact_before(&mut header, deadline)
@@ -60,5 +73,7 @@ pub(crate) fn receive_before(stream: &Stream, deadline: u64) -> Result<Frame, Er
             .recv_exact_before(chunk, deadline)
             .map_err(|_| Error::Transport)?;
     }
-    Frame::new(parsed.kind, payload).map_err(|_| Error::Frame)
+    let received = Instant::now();
+    let frame = Frame::new(parsed.kind, payload).map_err(|_| Error::Frame)?;
+    Ok((frame, received))
 }

@@ -1,8 +1,14 @@
 use super::*;
 #[path = "../Confidential/Workflow.rs"]
 mod confidential;
+#[path = "../Federation/Workflow.rs"]
+mod federation;
 #[path = "../Identity/Lifecycle.rs"]
 mod lifecycle;
+#[path = "Search.rs"]
+mod search;
+#[path = "Views.rs"]
+mod views;
 use crate::{conversations, delegation, identity, messaging, moderation};
 use std::{
     cell::Cell,
@@ -262,6 +268,184 @@ fn history(home: &mut Home, p: &Party, room: RoomId) -> messaging::PageResult {
         Outcome::Result { body } => body.deserialized().unwrap(),
         other => panic!("history result {other:?}"),
     }
+}
+
+#[test]
+fn community_cursor_context_changes_after_another_join_or_topic_and_can_be_reacquired() {
+    let fixture = Fixture::new();
+    let mut home = fixture.create();
+    let owner = enrol(&mut home, 110, AccountClass::Human);
+    let newcomer = enrol(&mut home, 111, AccountClass::Human);
+    let room = room(&mut home, &owner, "current context");
+    let mut page = history(&mut home, &owner, room);
+    for change in [
+        action(
+            &newcomer,
+            Operation::RoomJoin,
+            Target::Room(room),
+            &Empty {},
+        ),
+        action(
+            &owner,
+            Operation::RoomSetTopic,
+            Target::Room(room),
+            &conversations::Topic {
+                topic: "changed".into(),
+            },
+        ),
+    ] {
+        let party = if change.operation == Operation::RoomJoin {
+            &newcomer
+        } else {
+            &owner
+        };
+        assert!(matches!(
+            run(&mut home, party, &change),
+            Outcome::Committed { .. }
+        ));
+        let resume = action(
+            &owner,
+            Operation::EventsResume,
+            Target::Room(room),
+            &messaging::Page {
+                cursor: Some(page.cursor),
+                limit: 32,
+            },
+        );
+        assert!(
+            matches!(run(&mut home, &owner, &resume), Outcome::Rejected {
+            code: ErrorCode::ResynchronisationRequired, detail
+        } if detail == "CursorContext")
+        );
+        page = history(&mut home, &owner, room);
+        assert!(
+            page.events
+                .iter()
+                .any(|event| event.operation_id == change.operation_id)
+        );
+        let resume = action(
+            &owner,
+            Operation::EventsResume,
+            Target::Room(room),
+            &messaging::Page {
+                cursor: Some(page.cursor.clone()),
+                limit: 32,
+            },
+        );
+        assert!(matches!(
+            run(&mut home, &owner, &resume),
+            Outcome::Result { .. }
+        ));
+    }
+    // A cursorless request still has to satisfy current membership.
+    let leave = action(
+        &newcomer,
+        Operation::RoomLeave,
+        Target::Room(room),
+        &Empty {},
+    );
+    assert!(matches!(
+        run(&mut home, &newcomer, &leave),
+        Outcome::Committed { .. }
+    ));
+    let read = action(
+        &newcomer,
+        Operation::EventsResume,
+        Target::Room(room),
+        &messaging::Page {
+            cursor: None,
+            limit: 32,
+        },
+    );
+    assert!(matches!(
+        run(&mut home, &newcomer, &read),
+        Outcome::Rejected {
+            code: ErrorCode::Denied,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn cursor_retention_and_position_gaps_take_precedence_over_expired_context() {
+    let fixture = Fixture::new();
+    let mut home = fixture.create();
+    let owner = enrol(&mut home, 110, AccountClass::Human);
+    let room = room(&mut home, &owner, "retained order");
+    let old = history(&mut home, &owner, room);
+    assert!(matches!(
+        run(&mut home, &owner, &send(&owner, room, "lost message")),
+        Outcome::Committed { .. }
+    ));
+    assert!(matches!(
+        run(&mut home, &owner, &send(&owner, room, "retained message")),
+        Outcome::Committed { .. }
+    ));
+    let tip = history(&mut home, &owner, room);
+    let key = home.signing_key().verifying_key();
+    let mut cursor = verify_cursor(&old.cursor.0, &key).unwrap().value().clone();
+    cursor.expires_ms = 1;
+    cursor.access_digest = id(250);
+    let now = TimeBounds::test_now();
+    home.store
+        .write(|db| {
+            db.execute(
+                "UPDATE hrc_events SET created=?1 WHERE room=?2 AND sequence<=?3",
+                params![
+                    now.lower_ms - RETENTION - 1000,
+                    room.to_string(),
+                    cursor.sequence + 1
+                ],
+            )?;
+            Ok(Commit::new((), b"expired history prefix".to_vec()))
+        })
+        .unwrap();
+    home.maintain(now).unwrap();
+    let outcomes = [
+        (
+            cursor.clone(),
+            ErrorCode::ResynchronisationRequired,
+            "CursorHistoryGap",
+        ),
+        (
+            {
+                let mut c = cursor.clone();
+                c.sequence = verify_cursor(&tip.cursor.0, &key).unwrap().value().sequence + 1;
+                c
+            },
+            ErrorCode::ResynchronisationRequired,
+            "CursorPosition",
+        ),
+        (
+            {
+                let mut c = cursor.clone();
+                c.account.local = id(251);
+                c
+            },
+            ErrorCode::InvalidInput,
+            "CursorBinding",
+        ),
+    ];
+    for (cursor, expected, reason) in outcomes {
+        let resume = action(
+            &owner,
+            Operation::EventsResume,
+            Target::Room(room),
+            &messaging::Page {
+                cursor: Some(Blob(sign_cursor(&cursor, home.signing_key()).unwrap())),
+                limit: 32,
+            },
+        );
+        assert!(
+            matches!(run(&mut home,&owner,&resume), Outcome::Rejected {code,detail} if code==expected && detail==reason)
+        );
+    }
+    assert!(
+        history(&mut home, &owner, room)
+            .events
+            .iter()
+            .all(|event| event.sequence > cursor.sequence + 1)
+    );
 }
 fn grant(
     home: &mut Home,

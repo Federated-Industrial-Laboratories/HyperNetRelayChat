@@ -9,7 +9,7 @@ use std::path::Path;
 pub struct Error;
 pub fn save_draft(directory: &Path, room: RoomId, text: &str) -> std::result::Result<(), Error> {
     let profile = Profile::load(directory).map_err(|_| Error)?;
-    if room.home != profile.server.home {
+    if room.home != profile.active_server().home {
         return Err(Error);
     }
     let mut store = profile.store(directory).map_err(|_| Error)?;

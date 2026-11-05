@@ -34,6 +34,7 @@ allocating the payload. No compression, padding or trailing CBOR data is allowed
 | DeviceProof | 15 | 65,536 bytes |
 | DeviceReceipt | 16 | 65,536 bytes |
 | CryptoResponse | 17 | 262,144 bytes |
+| FederationControl | 18 | 65,536 bytes |
 
 A crypto class is valid only for KeyPackage publication, proposal, commit, epoch
 readiness, crypto inspection, Welcome or crypto recovery operations, or an envelope
@@ -143,6 +144,13 @@ The role is bound in both the protected media type and signed payload.
 | DeviceProof | 16 | `device-proof` | Proposed endpoint key and, when required, current owner recovery key |
 | DeviceReceipt | 17 | `device-receipt` | Exact receiving home service |
 | ReplacementKey | 18 | `replacement-key` | Proposed replacement recovery key |
+| GatewayMessage | 19 | `gateway-message` | Accepted gateway for hello/proof; receiving service for challenge/ready |
+| RemoteSessionRequest | 20 | `remote-session-request` | Exact origin endpoint |
+| RemoteSessionReady | 21 | `remote-session-ready` | Receiving home service |
+| OriginIdentityCheckpoint | 22 | `origin-identity-checkpoint` | Pinned origin service |
+| FederationControl | 23 | `federation-control` | Accepted gateway/admin for requests; receiving service for results and proof authorization |
+| OriginIdentityPage | 24 | `origin-identity-page` | Pinned origin service |
+| IdentityFreshness | 25 | `identity-freshness` | Pinned origin service; short observation of exact identity heads, never a HyperNet permit |
 
 The object's digest is SHA-256 of its exact canonical payload array, excluding
 the COSE wrapper. This lets both administrations sign identical agreement bytes.
@@ -240,9 +248,11 @@ operation-specific target compatibility remain feature-owner checks.
 | 50-52 | Approval.Prepare, Approve, Reject |
 | 60-66 | Moderation.Ignore, Mute, Silence, Kick, Ban, Filters, Restrictions |
 | 70-79 | Crypto.EnrolEndpoint, PublishKeyPackage, Propose, Commit, EpochReady, Inspect, Welcome, Recover, Report, History |
-| 80-84 | Federation.Propose, Accept, Withdraw, Exchange, Challenge |
+| 80-89 | Federation.Propose, Accept, Withdraw, Exchange, Challenge, AdmitEndpoint, WithdrawEndpoint, IdentityPage, Inspect, Session |
 | 90-96 | Account.Recover, RotateRecovery, EnrolEndpoint, DisableEndpoint, Devices, Continuity, LifecycleOutcome |
+| 97 | Account.PublicIdentity |
 | 100 | Direct.Create |
+| 110-111 | Client.Metadata, Community.Sync |
 
 Operation names describe contracts from the permission specification. Defining a
 code does not enable its handler. Services refuse known but unavailable operations
@@ -262,7 +272,7 @@ authorization. Each request checks current endpoint, account and room rights.
 | 3 | Own account, `{}` | `{nickname, revision, filterRevision}` |
 | 4 | Own account, input page | `InspectionPage<{actor: EndpointActor, nickname}>`; current eligible endpoints of agents operated by that account |
 | 5 | Service, `{}` | `{motd: text}`; at most 1,024 bytes, empty by default |
-| 15 | Room, `{}` | `{members, readSequence, roomRevision, filterRevision, moderator}`; at most 32 members |
+| 15 | Room, `{}` | `{members, readSequence, roomRevision, filterRevision, moderator, confidentiality}`; at most 32 members |
 | 37 | Room, `{event: Id}` | `{events, members, roomRevision}`; the accessible original event and up to two sequence positions on each side, at most five events |
 | 45 | Own account, input page | `InspectionPage<Grant>`; grants owned by the caller or assigned to its exact current agent endpoint |
 | 65 | Own account, input page | `InspectionPage<{subject: AccountId, ignored: bool, muted: bool}>` |
@@ -273,6 +283,72 @@ delegated actor. History context uses the same current membership, retention,
 delegation and recipient-filter rules as ordinary history. Context does not issue
 or rewind a resume cursor. See [conversation operations](ConversationOperations.md)
 for operation-specific access and the correlated Search.Cancel contract.
+
+### Bounded client views
+
+The optional `bounded-client-views-v1` capability selects two fixed read contracts.
+Client.Metadata targets the acting account and always returns its account view
+and service information. Its optional pages contain rooms, recipient filters,
+delegations and eligible agent endpoints. Community.Sync targets one local
+community room and always returns its current inspection and access-context
+digest. Its optional pages contain recipient filters, history and restrictions.
+These operations reject delegated and remote actors; Community.Sync also rejects
+encrypted rooms. Other clients and room types retain their existing operations.
+There is no caller-selected batch of arbitrary Actions.
+
+| Object | Fields |
+| --- | --- |
+| MetadataRequest | `rooms: RoomListRequest or null`, `filters: InspectPage or null`, `grants: InspectPage or null`, `agents: InspectPage or null`, `filterRevision: unsigned or null` |
+| RoomListRequest | `after: RoomId or null`, `limit: unsigned`; the existing room-list bounds apply |
+| MetadataPage | `account: AccountView`, `service: ServiceInformation`, `rooms: RoomListPage or null`, `filters: InspectionPage<FilterState> or null`, `grants: InspectionPage<Grant> or null`, `agents: InspectionPage<AgentEndpoint> or null` |
+| RoomListPage | `items: [RoomSummary]`, `next: RoomId or null` |
+| HistoryPageRequest | `cursor: Blob or null`, `limit: unsigned`; the existing history-page bounds apply |
+| PageResult | `events: [Event]`, `cursor: Blob`, `hasMore: bool`, `roomRevision: unsigned`, `members: [Member]` |
+| CommunityRequest | `filters: InspectPage or null`, `history: HistoryPageRequest or null`, `restrictions: InspectPage or null`, `context: Id or null` |
+| CommunityPage | `inspection: RoomInspection`, `context: Id`, `filters: InspectionPage<FilterState> or null`, `history: PageResult or null`, `restrictions: InspectionPage<RestrictionState> or null` |
+| RoomInspection | `members`, `readSequence`, `roomRevision`, `filterRevision`, `moderator`, `confidentiality`; the confidentiality field is mandatory |
+
+`InspectPage` is the inspection-page input defined above. History uses its
+existing request and signed-cursor schema. CommunityPage carries members once,
+in its strict inspection; `history.members` must be empty. The client restores
+that member list into its internal history-page representation after validation.
+Null page selectors request no work for those components, and their results are
+null. `filterRevision` and `context` compare current state on continuations.
+
+The home runs the requested components through their existing policy owners in
+one guarded transaction under one fresh, action-bound authority observation.
+Final cancellation, clock and permit checks still precede result publication.
+Budget admission atomically charges the sum of all included operation costs,
+including the mandatory account/service or room inspection on each continuation.
+Grouping does not reduce those charges or grant broader access.
+
+Each combined response must fit the ordinary 65,536-byte frame and the aggregate
+decoder depth, collection and node limits. Component allowances can shorten
+pages, which return explicit continuations. A required nonpaged item that cannot
+fit produces a bounded refusal; identity and policy data are never truncated.
+An initial shared metadata page limits room data to 8 KiB, filters to 4 KiB,
+grants to 32 KiB and agents to 4 KiB. A request for one component can use up to
+57,344 bytes for that component; the complete signed response must still fit.
+Single-component continuation turns preserve the existing collection capacities
+without requiring every maximum-sized record to fit the smaller shared slice.
+Each continuation obtains fresh authority. Recipient-filter pages bind the
+current account filter revision; room continuations also compare the supplied
+access-context digest. Neither a continuation nor that digest grants authority.
+The existing signed history cursor and genuine history-gap semantics remain.
+
+Clients finish filter and restriction assembly before presenting the associated
+history or admitting notifications. A changed context discards the incomplete
+assembly. Bounded page rounds and original read deadlines still apply.
+
+This capability also promises that a fixed room identity has immutable
+confidentiality. A client may retain an explicitly authenticated community
+classification as private in-memory evidence bound to the exact home, room and
+pinned service key while the capability remains negotiated. Missing mode data
+cannot establish that evidence. It can remove repeated classification reads
+while preparing an exact community message; it cannot establish membership,
+delegation, transport authority or permission to send. The service checks those
+conditions freshly for the submitted effect. Raw submissions, unknown rooms,
+encrypted messages and persisted retries retain their validation paths.
 
 The [endpoint lifecycle](EndpointLifecycle.md) defines device frames and recovery
 authorization. `DeviceHello` carries the exact signed `DeviceRequest`.
@@ -338,9 +414,15 @@ controller authority, grant mode, scope, expiry and one-use approval consumption
 An encrypted approval additionally requires the owner endpoint's verified
 plaintext/ciphertext handling specified by the state contract.
 
-`FederationAgreement` contains `id`, `revision`, `home`, `origin`, `homeGateway`,
+Federation runtime objects require `profile: 1` and capability
+`federation-runtime-1`. They complete the previously unused federation schemas;
+local Action and endpoint-binding bytes retain their existing encodings.
+
+`FederationAgreement` contains `profile`, `id`, `revision`, `home`, `origin`, `homeGateway`,
 `originGateway`, `homeServiceKey`, `originServiceKey`, `originAttestorKey`, `rooms`,
-`notBeforeMs` and `expiresMs`. Gateways are exact HyperNet application principals
+`notBeforeMs` and `expiresMs`. Each gateway is a closed object containing
+`network`, `destination`, `principal`, `serviceEndpoint`, `signingKey` and
+`protocol`. These are exact HyperNet application bindings
 admitted on the named receiving side: homeGateway receives origin-to-home
 exchange; originGateway receives home-to-origin exchange. Both services sign
 identical canonical agreement payload bytes after explicit local administration
@@ -355,15 +437,20 @@ belong to this home. Remote admission is explicit and per enrolled endpoint.
 Onward sharing and transitive third-network origin assertions are unsupported.
 Those fixed rules are not optional fields that an agreement can weaken.
 
-`FederationChallenge` contains `home`, `origin`, `agreement`, `gateway`,
-`actionDigest`, `operationId`, `nonce`, `serviceBoot`, `issuedMs` and `expiresMs`.
+`FederationChallenge` contains `profile`, `home`, `origin`, `agreement`, `gateway`,
+`admission`, `subject`, `nonce`, `serviceBoot`, `issuedMs` and `expiresMs`.
+`admission` contains `id` and `revision`. The closed subject is either
+`{kind: action, actionDigest, operationId}` or
+`{kind: session, requestDigest, request}`. Bootstrap evidence cannot authorize
+an Action, and an Action challenge cannot open a retry window.
 The represented interval is positive and at most five seconds. The home also
 retains the original boot-time deadline and gateway binding in its bounded,
 one-use challenge table. Restart discards pending challenges. No remote clock
 can extend that original home bound.
 
-`OriginAssertion` contains `origin`, `home`, `agreement`, `challengeDigest`,
-`actionDigest`, `endpointBindingDigest`, `endpoint`, `securityGeneration`,
+`OriginAssertion` contains `profile`, `origin`, `home`, `agreement`, `admission`,
+`subject`, `checkpoints`, `sourcePrivacy`, `challengeDigest`,
+`endpointBindingDigest`, `endpoint`, `securityGeneration`,
 `enrolmentGeneration`, `transportNetwork`, `transportPrincipal`,
 `transportSession`, `transportGeneration`, `transportGrant`,
 `transportGrantGeneration`, `sourceServiceBoot`, `controlGeneration`,
@@ -371,6 +458,12 @@ can extend that original home bound.
 `sourceEvaluatedMs`, `sourceNotAfterMs` and `sourceUncertaintyMs`.
 Its authority map contains `configuration`, `epoch`, `height`, `state`,
 `statementDigest`, `evaluatedAtMs` and `expiresAtMs`.
+`checkpoints` is a sorted unique list of at most three
+`{account, checkpointDigest}` references for the acting, operator and represented
+accounts belonging to the origin. Their independently verified continuity
+records establish classification and endpoint authority; the transport receipt
+alone does not establish them. `sourcePrivacy` uses the closed effective-privacy
+schema in [the federation runtime contract](FederationRuntime.md#6-fresh-source-evidence-and-privacy).
 
 Only a permitted, currently usable source check can produce this assertion.
 Source lifetime is positive, at most five seconds, and conservatively translated
@@ -381,7 +474,7 @@ source, challenge, credential and agreement expiry. Copying or forwarding never
 starts a new source lifetime.
 
 A Federation frame is unsigned canonical `[1, envelope]`; the envelope has
-`agreement`, `action`, `endpointBinding`, `challenge` and `originAssertion`.
+`profile`, `agreement`, `admission`, `action`, `endpointBinding`, `challenge` and `originAssertion`.
 The last four fields are byte strings containing their complete signed objects.
 The entire envelope, including all evidence, must fit its selected frame class.
 CryptoFederation permits a larger original crypto Action but does not enlarge
@@ -396,6 +489,13 @@ across these objects. Its current room and delegation policies can further refus
 an otherwise valid remote operation. Challenge consumption and a new outcome are
 atomic. An existing identical outcome does not create a second effect. Withdrawal
 uses the acknowledged home barrier described in the transport profile.
+
+Gateway handshake, bootstrap, signed identity checkpoints/pages and closed
+control schemas are specified in [FederationRuntime.md](FederationRuntime.md).
+They retain the ordinary canonical decoding bounds. An authenticated foreign
+execution uses an explicit verified remote context, never a fabricated local
+session. Its exact operation outcome and original home challenge consumption
+share the same guarded transaction as domain effects.
 
 ## Boundary evidence
 

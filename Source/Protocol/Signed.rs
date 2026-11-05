@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Standard COSE_Sign1 with pinned role headers and strict Ed25519 verification.
 use super::{
-    CRYPTO_FRAME_BYTES, Error, ORDINARY_FRAME_BYTES, Result, VERSION, cbor, lifecycle::*, types::*,
+    CRYPTO_FRAME_BYTES, Error, ORDINARY_FRAME_BYTES, PROTOCOL, Result, VERSION, cbor,
+    federation::*, lifecycle::*, types::*,
 };
 use ciborium::Value;
 use coset::{CborSerializable, CoseSign1, CoseSign1Builder, Header, HeaderBuilder, iana};
@@ -30,6 +31,13 @@ enum Role {
     DeviceProof = 16,
     DeviceReceipt = 17,
     ReplacementKey = 18,
+    GatewayMessage = 19,
+    RemoteSessionRequest = 20,
+    RemoteSessionReady = 21,
+    OriginIdentityCheckpoint = 22,
+    FederationControl = 23,
+    OriginIdentityPage = 24,
+    IdentityFreshness = 25,
 }
 impl Role {
     fn content_type(self) -> &'static str {
@@ -52,6 +60,13 @@ impl Role {
             Self::DeviceProof => "application/hrc-device-proof+cbor;v=1",
             Self::DeviceReceipt => "application/hrc-device-receipt+cbor;v=1",
             Self::ReplacementKey => "application/hrc-replacement-key+cbor;v=1",
+            Self::GatewayMessage => "application/hrc-gateway-message+cbor;v=1",
+            Self::RemoteSessionRequest => "application/hrc-remote-session-request+cbor;v=1",
+            Self::RemoteSessionReady => "application/hrc-remote-session-ready+cbor;v=1",
+            Self::OriginIdentityCheckpoint => "application/hrc-origin-identity-checkpoint+cbor;v=1",
+            Self::FederationControl => "application/hrc-federation-control+cbor;v=1",
+            Self::OriginIdentityPage => "application/hrc-origin-identity-page+cbor;v=1",
+            Self::IdentityFreshness => "application/hrc-identity-freshness+cbor;v=1",
         }
     }
 }
@@ -95,6 +110,40 @@ pub fn digest(bytes: &[u8]) -> Id {
 }
 pub fn key_id(key: &VerifyingKey) -> Id {
     digest(key.as_bytes())
+}
+/// Unauthenticated bounded routing data only. The caller must still verify role 19
+/// using the already accepted gateway key and exact actual transport context.
+pub fn gateway_hello_hint(bytes: &[u8]) -> Result<(AgreementRef, Id)> {
+    let Value::Array(outer) = cbor::canonical_decode(bytes, 8192)? else {
+        return Err(Error::Encoding);
+    };
+    if outer.len() != 4 {
+        return Err(Error::Encoding);
+    }
+    let Value::Bytes(payload) = &outer[2] else {
+        return Err(Error::Encoding);
+    };
+    let Value::Array(parts) = cbor::canonical_decode(payload, 8192)? else {
+        return Err(Error::Encoding);
+    };
+    let [Value::Integer(version), Value::Integer(role), value] = parts.as_slice() else {
+        return Err(Error::Encoding);
+    };
+    if u64::try_from(*version).map_err(|_| Error::Version)? != VERSION
+        || u64::try_from(*role).map_err(|_| Error::Binding)? != 19
+    {
+        return Err(Error::Binding);
+    }
+    let hello: GatewayMessage = value.deserialized().map_err(|_| Error::Encoding)?;
+    super::federation::check_gateway(&hello)?;
+    if let GatewayMessage::Hello {
+        agreement, gateway, ..
+    } = hello
+    {
+        Ok((agreement, gateway))
+    } else {
+        Err(Error::Binding)
+    }
 }
 fn header(role: Role, key: &VerifyingKey) -> Header {
     HeaderBuilder::new()
@@ -471,7 +520,9 @@ object_api!(
     FederationChallenge,
     FederationChallenge,
     |v: &FederationChallenge| {
-        if v.home.network == v.origin.network
+        if v.profile != FEDERATION_PROFILE
+            || v.admission.revision == 0
+            || v.home.network == v.origin.network
             || v.agreement.revision == 0
             || v.expires_ms <= v.issued_ms
             || v.expires_ms - v.issued_ms > 5000
@@ -488,7 +539,15 @@ object_api!(
     OriginAssertion,
     OriginAssertion,
     |v: &OriginAssertion| {
-        if v.home.network == v.origin.network
+        if v.profile != FEDERATION_PROFILE
+            || v.admission.revision == 0
+            || v.checkpoints.is_empty()
+            || v.checkpoints.len() > 3
+            || v.checkpoints
+                .windows(2)
+                .any(|p| p[0].account >= p[1].account)
+            || v.source_privacy.validate().is_err()
+            || v.home.network == v.origin.network
             || v.transport_network != v.origin.network
             || v.agreement.revision == 0
             || v.security_generation == 0
@@ -506,10 +565,10 @@ object_api!(
     }
 );
 fn check_agreement(v: &FederationAgreement) -> Result<()> {
-    if v.home.network == v.origin.network
+    if v.profile != FEDERATION_PROFILE
+        || v.home.network == v.origin.network
         || v.revision == 0
         || v.expires_ms <= v.not_before_ms
-        || v.rooms.is_empty()
         || v.rooms.len() > 32
     {
         return Err(Error::Invalid);
@@ -517,6 +576,12 @@ fn check_agreement(v: &FederationAgreement) -> Result<()> {
     check_key(v.home_service_key)?;
     check_key(v.origin_service_key)?;
     check_key(v.origin_attestor_key)?;
+    for (g, receiver) in [(&v.home_gateway, v.home), (&v.origin_gateway, v.origin)] {
+        check_key(g.signing_key)?;
+        if g.network != receiver.network || g.destination != receiver || g.protocol != PROTOCOL {
+            return Err(Error::Binding);
+        }
+    }
     for (i, room) in v.rooms.iter().enumerate() {
         if room.room.home != v.home
             || room.retention_ms == 0
@@ -556,7 +621,10 @@ fn validate_forwarded(bytes: &[u8], maximum: usize) -> Result<()> {
     cbor::validate(payload, maximum, super::MAX_DEPTH - 5)
 }
 pub fn encode_federation(value: &FederationEnvelope) -> Result<Vec<u8>> {
-    if value.agreement.revision == 0 {
+    if value.profile != FEDERATION_PROFILE
+        || value.admission.revision == 0
+        || value.agreement.revision == 0
+    {
         return Err(Error::Invalid);
     }
     validate_forwarded(&value.action.0, CRYPTO_FRAME_BYTES - 1)?;
@@ -747,3 +815,53 @@ pub fn verify_new_recovery_key(bytes: &[u8]) -> Result<Verified<ReplacementKeyPr
     };
     Ok(verified)
 }
+
+object_api!(
+    sign_gateway_message,
+    verify_gateway_message,
+    GatewayMessage,
+    GatewayMessage,
+    super::federation::check_gateway
+);
+object_api!(
+    sign_remote_session_request,
+    verify_remote_session_request,
+    RemoteSessionRequest,
+    RemoteSessionRequest,
+    super::federation::check_session_request
+);
+object_api!(
+    sign_remote_session_ready,
+    verify_remote_session_ready,
+    RemoteSessionReady,
+    RemoteSessionReady,
+    super::federation::check_session_ready
+);
+object_api!(
+    sign_origin_identity_checkpoint,
+    verify_origin_identity_checkpoint,
+    OriginIdentityCheckpoint,
+    OriginIdentityCheckpoint,
+    super::federation::check_checkpoint
+);
+object_api!(
+    sign_federation_control,
+    verify_federation_control,
+    FederationControl,
+    FederationControl,
+    super::federation::check_control
+);
+object_api!(
+    sign_origin_identity_page,
+    verify_origin_identity_page,
+    OriginIdentityPage,
+    OriginIdentityPage,
+    super::federation::check_page
+);
+object_api!(
+    sign_identity_freshness,
+    verify_identity_freshness,
+    IdentityFreshness,
+    IdentityFreshness,
+    super::federation::check_freshness
+);

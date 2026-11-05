@@ -12,6 +12,10 @@ mod agents;
 
 pub const HELP: &[(&str, &str)] = &[
     (
+        "/network local|AGREEMENT",
+        "Select an explicitly configured conversation service; /who lists choices",
+    ),
+    (
         "/join ROOM",
         "Join a room by its unambiguous name or identifier",
     ),
@@ -249,6 +253,18 @@ pub fn parse(
         "/motd" => Interaction::Motd,
         "/quit" => Interaction::Quit,
         "/who" => Interaction::Status,
+        "/network" if rest == "local" => request(Command::SelectService(None)),
+        "/network" if !rest.is_empty() => {
+            let id: Id = rest
+                .parse()
+                .map_err(|_| "Use the complete configured agreement identifier")?;
+            let choice = snapshot
+                .services
+                .iter()
+                .find(|c| c.agreement.is_some_and(|a| a.id == id))
+                .ok_or("Unknown configured agreement")?;
+            request(Command::SelectService(choice.agreement))
+        }
         "/next" => request(Command::NextSearchPage),
         "/cancel-search" => request(Command::CancelSearch),
         "/close-search" => request(Command::CloseSearch),

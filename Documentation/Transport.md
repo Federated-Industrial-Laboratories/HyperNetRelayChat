@@ -54,6 +54,14 @@ and directional privacy. A status observation is not fresh permission. The
 adapter requires version 2 and never falls back to version 1 or a public address.
 Error output uses stable categories; remote error prose is not printed.
 
+The adapter preserves an explicit companion `Closed` preparation error. Clients
+may retry that temporary connection failure within their existing attempt and
+waiting bounds. `Capacity` and `Timeout` keep their separate categories;
+`Refused` and unknown codes do not become temporary failures. A closed connection
+does not establish whether a remote operation committed, so uncertain effects
+still require exact outcome recovery. Authentication and permission refusals
+remain refusals; no direct route or renewed authority is inferred.
+
 ## One diagnostic exchange
 
 Start the receiver with the exact admitted caller principal:
@@ -113,6 +121,12 @@ cannot extend its lifetime. A new check, known closure, cancellation, missing
 status connection or observed control replacement invalidates earlier results.
 A caller must check `permitted()` immediately before the effect; a serialized
 receipt is diagnostic data and cannot be deserialized into permission.
+
+Service authority calls carry an absolute enclosing boot-time end into the
+adapter. Its 100 to 5,000 millisecond check cannot restart that end when local
+dispatch begins. The earlier of that end and the companion receipt's expiry
+bounds the usable observation; the companion's original receipt times remain
+unchanged.
 
 The companion verifies endpoint signatures and certified authority observations.
 HRC does not implement a second HyperNet authority evaluator. A permitted result

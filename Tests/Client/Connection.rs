@@ -1,6 +1,41 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Session setup retains typed failures, original deadlines and a finite retry count.
 use super::*;
+#[path = "ExchangeTiming.rs"]
+mod exchange_timing;
+
+// A fixture session supplies bindings only; its closed peer cannot acknowledge an effect.
+pub(in crate::client) fn closed_view_session(root: &std::path::Path, profile: &Profile) -> Session {
+    let (companion, stream) =
+        crate::client::controller::completion_tests::session_reuse::retained_handle(root);
+    let action = crate::client::tests::action();
+    let server_key = VerifyingKey::from_bytes(profile.server.signing_key.as_bytes()).unwrap();
+    Session {
+        companion,
+        stream,
+        server_key,
+        origin_key: server_key,
+        origin: action.home,
+        clock: profile.clock.clone(),
+        remote: None,
+        ready: SessionReady {
+            home: action.home,
+            session: Id::from_bytes([70; 32]),
+            challenge_digest: Id::from_bytes([71; 32]),
+            window: RetryWindow {
+                id: action.operation_id.window,
+                expires_ms: clock::TimeBounds::test_now().upper_ms + 60000,
+            },
+            maximum_frame_bytes: ORDINARY_FRAME_BYTES as u64,
+            maximum_crypto_frame_bytes: CRYPTO_FRAME_BYTES as u64,
+            capabilities: vec![CLIENT_VIEWS_CAPABILITY.into()],
+            account_revision: 1,
+            binding_digest: action.actor.acting().binding_digest,
+            acting: action.actor.acting().clone(),
+            classification: AccountClass::Human,
+        },
+    }
+}
 
 #[test]
 fn discarded_handoff_reconnects_with_one_unchanged_overall_deadline() {
@@ -157,4 +192,105 @@ fn malformed_frame_header_keeps_its_permanent_classification() {
         transport_failure(io::Error::Deadline),
         Error::Transport
     ));
+}
+
+#[test]
+fn temporary_federation_setup_honours_guidance_within_the_original_deadline() {
+    for code in [
+        ErrorCode::Unavailable,
+        ErrorCode::RateLimited,
+        ErrorCode::Overloaded,
+    ] {
+        let deadline = clock::boot_ms().unwrap() + 30_000;
+        let started = std::time::Instant::now();
+        let mut calls = 0;
+        let result = establish(deadline, |end| {
+            assert_eq!(end, deadline);
+            calls += 1;
+            if calls == 1 {
+                Err(Error::ForwardRefused {
+                    code,
+                    detail: "GatewayBusy".into(),
+                    retry_after_ms: Some(600),
+                })
+            } else {
+                Ok(7)
+            }
+        });
+        assert_eq!(result.unwrap(), 7);
+        assert_eq!(calls, 2);
+        assert!(started.elapsed() >= Duration::from_millis(600));
+        let error = super::super::Error::Network(Error::ForwardRefused {
+            code,
+            detail: "GatewayBusy".into(),
+            retry_after_ms: Some(5000),
+        });
+        assert_eq!(error.retry_delay_ms(), Some(5000));
+    }
+}
+
+#[test]
+fn federation_setup_never_renews_its_attempt_or_deadline_budget() {
+    let mut calls = 0;
+    let deadline = clock::boot_ms().unwrap() + 30_000;
+    let result = establish::<()>(deadline, |end| {
+        assert_eq!(end, deadline);
+        calls += 1;
+        Err(Error::ForwardRefused {
+            code: ErrorCode::Overloaded,
+            detail: "GatewayBusy".into(),
+            retry_after_ms: Some(0),
+        })
+    });
+    assert!(matches!(
+        result,
+        Err(Error::ForwardRefused {
+            code: ErrorCode::Overloaded,
+            ..
+        })
+    ));
+    assert_eq!(calls, 3);
+    for advised in [Some(30_000), Some(u64::MAX), None] {
+        let deadline = clock::boot_ms().unwrap() + 200;
+        let mut calls = 0;
+        let result = establish::<()>(deadline, |end| {
+            assert_eq!(end, deadline);
+            calls += 1;
+            Err(Error::ForwardRefused {
+                code: ErrorCode::Unavailable,
+                detail: "GatewayUnavailable".into(),
+                retry_after_ms: advised,
+            })
+        });
+        assert!(matches!(result, Err(Error::ForwardRefused { .. })));
+        assert_eq!(
+            calls, 1,
+            "retry guidance renewed the original setup deadline"
+        );
+    }
+}
+
+#[test]
+fn permanent_federation_setup_refusals_do_not_reconnect() {
+    for code in [
+        ErrorCode::Denied,
+        ErrorCode::Expired,
+        ErrorCode::Conflict,
+        ErrorCode::InvalidInput,
+    ] {
+        let error = Error::ForwardRefused {
+            code,
+            detail: "RemoteAdmissionRefused".into(),
+            retry_after_ms: Some(0),
+        };
+        assert!(!error.retryable_session());
+        let mut error = Some(error);
+        let result = establish::<()>(clock::boot_ms().unwrap() + 30_000, |_| {
+            Err(error.take().expect("permanent federation refusal retried"))
+        });
+        assert_eq!(
+            super::super::Error::Network(result.unwrap_err()).retry_delay_ms(),
+            None
+        );
+    }
 }

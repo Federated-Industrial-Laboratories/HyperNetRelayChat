@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Membership, room metadata and the current history-access boundary.
 #[path = "Inspection.rs"]
-mod inspection;
+pub(crate) mod inspection;
 use crate::{
     clock::TimeBounds,
     home::{self, types::*},
@@ -109,6 +109,7 @@ pub(crate) fn restriction(
 }
 pub(crate) fn access(db: &Connection, action: &Action, now: TimeBounds) -> Domain<Access> {
     let room = target(action)?;
+    crate::federation::actor_admitted(db, action.actor.acting(), room, now)?;
     let data: Option<(u64, u64, u64, u8)> = db
         .query_row(
             "SELECT sequence,revision,earliest,mode FROM hrc_rooms WHERE id=?1",
@@ -162,7 +163,9 @@ pub(crate) fn operate(db: &Transaction<'_>, action: &Action, now: TimeBounds) ->
         Operation::RoomCreate => create(db, action, now),
         Operation::DirectCreate => direct(db, action, now),
         Operation::RoomInvite => invite(db, action, now),
-        Operation::RoomList => list(db, action, now),
+        Operation::RoomList => list(db, action, now, |room| {
+            crate::federation::actor_admitted(db, action.actor.acting(), room, now)
+        }),
         Operation::RoomInspect => inspection::read(db, action, now),
         Operation::RoomJoin => join(db, action, now),
         Operation::RoomLeave => {
@@ -401,7 +404,24 @@ fn join(db: &Transaction<'_>, action: &Action, now: TimeBounds) -> Domain<Outcom
     )?;
     crate::messaging::record(db, action, room, Value::Null, "", now)
 }
-fn list(db: &Transaction<'_>, action: &Action, now: TimeBounds) -> Domain<Outcome> {
+pub(crate) fn list(
+    db: &Transaction<'_>,
+    action: &Action,
+    now: TimeBounds,
+    room_access: impl FnMut(RoomId) -> Domain<()>,
+) -> Domain<Outcome> {
+    let (items, _) = list_bounded(db, action, now, room_access, ORDINARY_FRAME_BYTES - 4096)?;
+    Ok(Outcome::Result {
+        body: value(&items)?,
+    })
+}
+pub(crate) fn list_bounded(
+    db: &Transaction<'_>,
+    action: &Action,
+    now: TimeBounds,
+    mut room_access: impl FnMut(RoomId) -> Domain<()>,
+    bytes: usize,
+) -> Domain<(Vec<Summary>, Option<RoomId>)> {
     if action.target != Target::Service {
         return invalid("ServiceTarget");
     }
@@ -438,9 +458,15 @@ fn list(db: &Transaction<'_>, action: &Action, now: TimeBounds) -> Domain<Outcom
         },
     )?;
     let mut result = Vec::new();
+    let mut more = false;
     for row in rows {
         let (room, name, topic, revision, sequence, joined, read, history_from, mode, invited) =
             row?;
+        match room_access(room) {
+            Ok(()) => {}
+            Err(Fault::Reject(..)) => continue,
+            Err(e) => return Err(e),
+        }
         if restriction(db, room, &action.actor, 2, now)? {
             continue;
         }
@@ -460,15 +486,19 @@ fn list(db: &Transaction<'_>, action: &Action, now: TimeBounds) -> Domain<Outcom
             confidentiality: mode_value(mode)?,
             invited,
         });
-        if canonical_encode(&value(&result)?, ORDINARY_FRAME_BYTES - 4096).is_err() {
+        if canonical_encode(&value(&result)?, bytes).is_err() {
             result.pop();
+            if result.is_empty() {
+                return Err(Fault::Reject(ErrorCode::Overloaded, "RoomListItemSize"));
+            }
+            more = true;
             break;
         }
         if result.len() >= body.limit as usize {
+            more = true;
             break;
         }
     }
-    Ok(Outcome::Result {
-        body: value(&result)?,
-    })
+    let next = more.then(|| result.last().map(|r| r.room)).flatten();
+    Ok((result, next))
 }

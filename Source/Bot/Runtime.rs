@@ -24,11 +24,11 @@ pub(super) fn run(config: Config, stop: Arc<AtomicBool>, on_ready: impl FnOnce()
     if config
         .rooms
         .iter()
-        .any(|r| r.home != client.profile.server.home)
+        .any(|r| r.home != client.profile.active_server().home)
     {
         return Err(Error::Configuration);
     }
-    state::initialise(&mut client.store, &config)?;
+    initialise(&mut client, &config)?;
     settle_local(&mut client)?;
     let mut room_index = 0;
     let mut failures = 0u8;
@@ -125,6 +125,15 @@ pub(super) fn run(config: Config, stop: Arc<AtomicBool>, on_ready: impl FnOnce()
         }
     }
     client.disconnect();
+    Ok(())
+}
+pub(super) fn initialise(client: &mut Client, config: &Config) -> Result<()> {
+    state::initialise(&mut client.store, config)?;
+    if config.resynchronise {
+        for room in &config.rooms {
+            client.resynchronise_history(*room)?;
+        }
+    }
     Ok(())
 }
 /// Readiness belongs to one initial connection's authenticated pulls, never to retained cache flags.
@@ -308,7 +317,7 @@ fn pull(
         },
         grant,
     )?;
-    let key = VerifyingKey::from_bytes(client.profile.server.signing_key.as_bytes())
+    let key = VerifyingKey::from_bytes(client.profile.active_server().signing_key.as_bytes())
         .map_err(|_| Error::State)?;
     let cursor = verify_cursor(&page.cursor.0, &key).map_err(|_| Error::State)?;
     let now = client
@@ -317,7 +326,7 @@ fn pull(
         .sample()
         .map_err(|_| client::Error::Clock)?;
     if cursor.value().room != room
-        || cursor.value().home != client.profile.server.home
+        || cursor.value().home != client.profile.active_server().home
         || cursor.value().account != actor.represented()
         || now.upper_ms >= cursor.value().expires_ms
         || page.events.len() > 32

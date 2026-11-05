@@ -26,13 +26,16 @@ fn snapshot() -> Snapshot {
     };
     Snapshot {
         revision: 0,
+        updating: false,
         account,
         home,
+        services: Vec::new(),
         classification: AccountClass::Human,
         nickname: "Alice".into(),
         motd: String::new(),
         connection: hrc::client::ConnectionState::Offline,
         privacy: None,
+        federation_privacy: None,
         rooms: vec![summary.clone()],
         selected: Some(hrc::client::RoomView {
             crypto: None,
@@ -63,6 +66,45 @@ fn snapshot() -> Snapshot {
         status: None,
         completions: vec![],
     }
+}
+#[test]
+fn shared_connection_display_distinguishes_progress_from_access_failure() {
+    let mut view = snapshot();
+    view.connection = hrc::client::ConnectionState::Online;
+    view.updating = true;
+    let label = crate::display::connection(&view);
+    assert!(label.contains("Connected through HyperNet"));
+    assert!(label.contains("refreshing views"));
+    assert!(view.selected.as_ref().unwrap().stale);
+    view.updating = false;
+    assert!(!crate::display::connection(&view).contains("refreshing views"));
+}
+#[test]
+fn restriction_display_uses_room_freshness_and_requires_a_selection() {
+    let mut view = snapshot();
+    view.inspection.stale = false;
+    view.inspection
+        .restrictions
+        .push(hrc::moderation::RestrictionState {
+            subject: view.account,
+            kind: 1,
+            expires_ms: 1000,
+            moderator: view.account,
+        });
+    assert!(
+        crate::display::restrictions(&view)
+            .iter()
+            .any(|line| line.contains("not confirmed"))
+    );
+    view.selected.as_mut().unwrap().stale = false;
+    view.inspection.stale = true;
+    assert!(
+        !crate::display::restrictions(&view)
+            .iter()
+            .any(|line| line.contains("not confirmed"))
+    );
+    view.selected = None;
+    assert!(crate::display::restrictions(&view).is_empty());
 }
 #[test]
 fn command_case_does_not_change_filter_effect_and_ambiguous_names_fail() {

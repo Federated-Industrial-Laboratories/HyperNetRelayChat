@@ -170,20 +170,23 @@ impl App {
         }
     }
     fn search_controls(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            let width = (ui.available_width() - 66.0).max(40.0);
-            let input = ui.add(
-                egui::TextEdit::singleline(&mut self.query)
-                    .id(egui::Id::unique("search"))
-                    .hint_text("Search this room")
-                    .desired_width(width)
-                    .char_limit(256),
-            );
-            let enter = input.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-            if ui.button("Search").clicked() || enter {
-                self.start_search();
-            }
-        });
+        let (input, search) = egui::Sides::new().shrink_left().show(
+            ui,
+            |ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.query)
+                        .id(egui::Id::unique("search"))
+                        .hint_text("Search this room")
+                        .desired_width(ui.available_width())
+                        .char_limit(256),
+                )
+            },
+            |ui| ui.button("Search"),
+        );
+        let enter = input.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        if search.clicked() || enter {
+            self.start_search();
+        }
         ui.collapsing("Search filters", |ui| {
             for (label, value) in [
                 ("Acting sender name or ID", &mut self.find_sender),

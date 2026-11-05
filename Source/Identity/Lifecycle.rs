@@ -505,6 +505,14 @@ pub(crate) fn activate(
             not_before_ms: now.lower_ms,
             expires_ms: u64::MAX,
         };
+        db.execute(
+            "INSERT INTO federation_bindings VALUES(?1,?2,?3)",
+            params![
+                r.account.to_string(),
+                r.endpoint.as_hex(),
+                encode(&binding)?
+            ],
+        )?;
         // Binding digest is the canonical role payload, independent of the service signature bytes.
         let digest =
             binding_digest(&binding).map_err(|_| Fault::Sql(rusqlite::Error::InvalidQuery))?;

@@ -68,7 +68,10 @@ standard error. Diagnostics contain no messages, account identifiers or keys.
 Failed authority observations include fixed disposition categories and monotonic
 deadline timings. Authentication failures identify their fixed validation stage.
 Output is limited to a burst of eight lines, one line per second thereafter and
-128 lines per process. Client errors distinguish local configuration and storage,
+128 output attempts per process. The bounded diagnostic writer holds at most 32
+queued records of at most 1,024 bytes each, plus its current record and channel
+metadata. Producers discard saturated, closed or oversized output; service
+shutdown never waits for the output sink. Client errors distinguish local configuration and storage,
 HyperNet preparation, session authentication, clock and handshake failures.
 `AcceptWaitEnded/Timeout` can mean an ordinary idle wait; it does not establish a
 failed client operation. Periodic retention runs in one background task every
@@ -80,19 +83,42 @@ five-second bound; acceptance never extends an authority observation's validity.
 
 The service admits authority checks through one bounded FIFO shared by session
 setup, actions and exact search cancellation. At most 32 callers can hold or wait
-for its single exchange slot; each admission wait is at most one second. A queued
-control cannot be overtaken by later ordinary reads. Queue saturation or an
-admission timeout reports `AuthorityAdmissionBusy` (an `Overloaded` pre-admission
+for four concurrent exchange slots; each admission wait is at most one second.
+Slots admit callers in FIFO order, including queued controls. Independent checks
+can finish out of order; every reply retains its exact stream, action and nonce
+binding. The companion retains its single pending check per stream. Queue
+saturation or an admission timeout reports `AuthorityAdmissionBusy` (an `Overloaded` pre-admission
 action refusal), separately from a failed transport authority check. Shutdown,
 stream invalidation or query cancellation removes a waiter.
 
 After admission, each check starts a fresh nonce and a separate lifetime of at
-most one second. The original five-second handshake and ten-second search ends
-also cap admission and check time; neither is restarted. The exchange slot is
-released before Home state is locked or work executes. The resulting observation
-must still be currently permitted at every existing admission and commit check.
+most five seconds, within the companion's supported 100 to 5,000 millisecond
+range. An absolute boot-time end crosses the adapter and IPC boundary, so time
+spent before dispatch cannot restart that lifetime. The original five-second
+handshake, signed challenge expiry and ten-second search end also cap admission
+and check time; none is restarted. Less than 100 milliseconds remaining refuses
+the check. Ordinary operation frames do not transmit a client read deadline:
+without an enclosing service deadline, admission has its one-second wait and
+the subsequent authority check has its own five-second maximum.
+The exchange slot is released before Home state is locked or work executes.
+The resulting observation must still be currently permitted at every existing
+admission and commit check.
 This scheduling does not extend a receipt, reuse authority, retry an effect, or
 conceal a Core busy or unavailable result.
+
+Ordinary, device and gateway handshakes can obtain at most three fresh authority
+observations on the same stream for their unchanged proof digest. A temporary
+unavailable or expired observation, or busy authority admission, allows a backoff
+of at most 50 ms before another check. Each check retains the existing admission
+and exchange limits; all attempts also fit the original handshake deadline and
+signed challenge expiry. The challenge and transport identity do not change.
+The initial conservative clock sample can shorten the boot deadline to fit the
+signed expiry; later samples cannot extend it. A successful observation retains
+that shortened deadline and rechecks the current clock before an effect or Ready.
+Denied or inactive results, invalid evidence, clock errors and shutdown stop
+recovery immediately. A certified denial remains terminal after its receipt
+expires. Device activation and session-window effects remain outside this retry
+loop and require a current observation at their original effect boundary.
 
 If transport handoff closes before session setup finishes, the client can obtain
 up to three fresh streams and challenges within one 30-second setup budget,

@@ -37,6 +37,8 @@ impl Fixture {
         fs::rename(self.root.join("Key"), self.root.join("Database.key")).unwrap();
         let endpoint = files::create_key(&self.root.join("Endpoint.key")).unwrap();
         let profile = client::Profile {
+            federation: None,
+            agreements: Vec::new(),
             server: service::Descriptor {
                 version: 1,
                 home: a.home,
@@ -329,7 +331,7 @@ fn cached_pages_and_bound_drafts_survive_restart_without_clock_or_transport() {
     };
     let f = Fixture::new();
     let mut store = f.create();
-    cache::initialize(&mut store).unwrap();
+    cache::initialize(&mut store, action().home).unwrap();
     let a = action();
     let Target::Room(room) = a.target else {
         unreachable!()
@@ -345,7 +347,7 @@ fn cached_pages_and_bound_drafts_survive_restart_without_clock_or_transport() {
         joined: true,
         unread: 1,
     };
-    cache::save_rooms(&mut store, &[summary]).unwrap();
+    cache::save_rooms(&mut store, room.home, &[summary]).unwrap();
     let mention = messaging::Mention {
         account: a.actor.represented(),
         start: 0,
@@ -406,7 +408,7 @@ fn cached_pages_and_bound_drafts_survive_restart_without_clock_or_transport() {
     .unwrap();
     drop(store);
     let mut store = f.open();
-    cache::initialize(&mut store).unwrap();
+    cache::initialize(&mut store, action().home).unwrap();
     let saved = cache::room(&mut store, room).unwrap();
     assert_eq!(
         cache::encode(&saved.events).unwrap(),
@@ -599,13 +601,14 @@ fn controller_starts_offline_and_preserves_correlated_drafts_with_one_store_owne
     use crate::client::{self, Command, ConnectionState, Controller, cache};
     let f = Fixture::new();
     let mut store = f.create();
-    cache::initialize(&mut store).unwrap();
+    cache::initialize(&mut store, action().home).unwrap();
     let a = action();
     let Target::Room(room) = a.target else {
         unreachable!()
     };
     cache::save_rooms(
         &mut store,
+        room.home,
         &[crate::conversations::Summary {
             confidentiality: RoomConfidentiality::Community,
             invited: false,
@@ -682,7 +685,7 @@ fn recipient_ignore_and_expiry_remove_local_presentations_without_erasing_drafts
     use crate::{client::cache, moderation::FilterState};
     let f = Fixture::new();
     let mut store = f.create();
-    cache::initialize(&mut store).unwrap();
+    cache::initialize(&mut store, action().home).unwrap();
     let a = action();
     let Target::Room(room) = a.target else {
         unreachable!()
@@ -712,6 +715,7 @@ fn recipient_ignore_and_expiry_remove_local_presentations_without_erasing_drafts
     outbox::save_draft(&mut store, room, "keep draft").unwrap();
     cache::save_filters(
         &mut store,
+        action().home,
         &[FilterState {
             subject: event.actor.represented(),
             ignored: true,
@@ -720,7 +724,7 @@ fn recipient_ignore_and_expiry_remove_local_presentations_without_erasing_drafts
     )
     .unwrap();
     assert!(cache::room(&mut store, room).unwrap().events.is_empty());
-    assert!(cache::filters(&mut store).unwrap()[0].ignored);
+    assert!(cache::filters(&mut store, action().home).unwrap()[0].ignored);
     cache::maintain(&mut store).unwrap();
     assert_eq!(
         outbox::draft(&mut store, room).unwrap().as_deref(),
@@ -820,8 +824,8 @@ fn epoch_ready_settlement_survives_refusal_resolution_restart_and_atomic_failure
     for mode in 0..3 {
         let fixture = Fixture::new();
         let mut store = fixture.create();
-        cache::initialize(&mut store).unwrap();
         let mut original = action();
+        cache::initialize(&mut store, original.home).unwrap();
         original.operation = Operation::CryptoEpochReady;
         let ready = crate::confidential::Ready {
             group: id(31),
@@ -846,7 +850,7 @@ fn epoch_ready_settlement_survives_refusal_resolution_restart_and_atomic_failure
                 retry_after_ms: Some(1000),
             },
         );
-        outbox::record(&mut store, &original, &refused, now).unwrap();
+        outbox::record(&mut store, &original, &refused, TimeBounds::test_now()).unwrap();
         let marker = archive::ready_key(ready.group, ready.epoch, ready.commit_digest);
         assert!(!cache::preferences::<bool>(&mut store, &marker).unwrap());
         drop(store);
@@ -864,6 +868,30 @@ fn epoch_ready_settlement_survives_refusal_resolution_restart_and_atomic_failure
             body: Value::Null,
         };
         if mode == 0 {
+            // A response after restart needs a fresh observation, as in the real client.
+            // Keep the original retry window; an expired observation must not settle it.
+            std::thread::sleep(std::time::Duration::from_millis(1100));
+            assert!(now.refresh().is_err());
+            assert!(
+                outbox::record(
+                    &mut store,
+                    &original,
+                    &reply(&original, committed.clone()),
+                    now
+                )
+                .is_err()
+            );
+            assert!(!cache::preferences::<bool>(&mut store, &marker).unwrap());
+            let still_pending = outbox::pending(
+                &mut store,
+                &SigningKey::from_bytes(&[10; 32]).verifying_key(),
+            )
+            .unwrap();
+            assert_eq!(still_pending.len(), 1);
+            assert_eq!(
+                still_pending[0].action.signed_bytes(),
+                original.signed_bytes()
+            );
             store.write(|tx| {
                 tx.execute_batch("CREATE TRIGGER deny_ready BEFORE INSERT ON client_preferences BEGIN SELECT RAISE(ABORT,'ready write failed'); END;")?;
                 Ok(storage::Commit::new((), b"atomic readiness failure".to_vec()))
@@ -873,7 +901,7 @@ fn epoch_ready_settlement_survives_refusal_resolution_restart_and_atomic_failure
                     &mut store,
                     &original,
                     &reply(&original, committed.clone()),
-                    now
+                    TimeBounds::test_now()
                 )
                 .is_err()
             );
@@ -921,7 +949,14 @@ fn epoch_ready_settlement_survives_refusal_resolution_restart_and_atomic_failure
                     .unwrap(),
                 },
             );
-            outbox::record_resolution(&mut store, &original, &query, &result, now).unwrap();
+            outbox::record_resolution(
+                &mut store,
+                &original,
+                &query,
+                &result,
+                TimeBounds::test_now(),
+            )
+            .unwrap();
             if mode == 2 {
                 assert!(!cache::preferences::<bool>(&mut store, &marker).unwrap());
                 assert_eq!(
@@ -937,7 +972,13 @@ fn epoch_ready_settlement_survives_refusal_resolution_restart_and_atomic_failure
             }
         }
         if mode != 1 {
-            outbox::record(&mut store, &original, &reply(&original, committed), now).unwrap();
+            outbox::record(
+                &mut store,
+                &original,
+                &reply(&original, committed),
+                TimeBounds::test_now(),
+            )
+            .unwrap();
         }
         assert!(cache::preferences::<bool>(&mut store, &marker).unwrap());
         assert!(
@@ -1051,5 +1092,7 @@ fn identity_api_keeps_proof_bytes_and_exact_current_state() {
 
 #[path = "EncryptedArchive.rs"]
 mod encrypted_archive;
+#[path = "Federation.rs"]
+mod federation;
 #[path = "Trust.rs"]
 mod trust_checks;

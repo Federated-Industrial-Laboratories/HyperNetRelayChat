@@ -81,26 +81,52 @@ impl Error {
             _ => Self::Unknown,
         }
     }
+    /// A verified temporary service or forwarding refusal leaves the session synchronized.
+    /// This permits bounded recovery, not stale authority or a replacement operation.
+    pub fn can_reuse_session(&self) -> bool {
+        matches!(
+            self,
+            Self::Refused {
+                code: ErrorCode::Unavailable | ErrorCode::RateLimited | ErrorCode::Overloaded,
+                ..
+            } | Self::Network(network::Error::ForwardRefused {
+                code: ErrorCode::Unavailable | ErrorCode::RateLimited | ErrorCode::Overloaded,
+                ..
+            })
+        )
+    }
     /// Reconnection may resolve exact retained effects; it never creates a replacement action.
     pub(crate) fn retry_delay_ms(&self) -> Option<u64> {
+        use network::Error as Network;
         match self {
             Self::Clock | Self::Unknown => Some(0),
-            Self::Network(error) if error.retryable_session() => Some(0),
             Self::Refused {
                 code: ErrorCode::Unavailable | ErrorCode::RateLimited | ErrorCode::Overloaded,
                 retry_after_ms,
                 ..
-            } => Some(retry_after_ms.unwrap_or(1000).min(60000)),
+            }
+            | Self::Network(Network::ForwardRefused {
+                code: ErrorCode::Unavailable | ErrorCode::RateLimited | ErrorCode::Overloaded,
+                retry_after_ms,
+                ..
+            }) => Some(retry_after_ms.unwrap_or(1000).min(60000)),
+            Self::Network(error) if error.retryable_session() => Some(0),
             _ => None,
         }
     }
 }
 pub type Result<T> = std::result::Result<T, Error>;
+pub(super) struct ExecutedResponse {
+    pub(super) response: Response,
+    pub(super) exchange_ns: Option<u64>,
+}
 pub struct Client {
     pub profile: Profile,
     pub store: Store,
     pub(super) key: SigningKey,
     session: Option<Session>,
+    pub(super) community_modes: std::collections::BTreeMap<RoomId, Id>,
+    directory: std::path::PathBuf,
 }
 impl Client {
     pub fn open_offline(directory: &Path) -> Result<Self> {
@@ -112,8 +138,11 @@ impl Client {
             store,
             key,
             session: None,
+            community_modes: Default::default(),
+            directory: directory.to_owned(),
         };
-        super::cache::initialize(&mut client.store).map_err(|_| Error::Storage)?;
+        super::cache::initialize(&mut client.store, client.profile.server.home)
+            .map_err(|_| Error::Storage)?;
         crate::crypto::initialize(&mut client.store).map_err(|_| Error::Storage)?;
         super::archive::initialize(&mut client.store).map_err(|_| Error::Storage)?;
         super::cache::maintain(&mut client.store).map_err(|_| Error::Storage)?;
@@ -139,9 +168,19 @@ impl Client {
         Ok(())
     }
     pub fn disconnect(&mut self) {
+        self.community_modes.clear();
         if let Some(session) = self.session.take() {
             session.close();
         }
+    }
+    pub fn select_service(&mut self, agreement: Option<AgreementRef>) -> Result<()> {
+        let mut profile = self.profile.clone();
+        profile.federation = agreement;
+        profile.validate_federation().map_err(|_| Error::Input)?;
+        self.disconnect();
+        super::federation::save(&self.directory, &profile).map_err(|_| Error::Storage)?;
+        self.profile = profile;
+        Ok(())
     }
     pub fn prepare(&self, operation: Operation, target: Target, body: Value) -> Result<Action> {
         Ok(self.session()?.action(operation, target, body)?)
@@ -151,7 +190,7 @@ impl Client {
         self.execute_signed(&bytes)
     }
     pub fn sign(&self, action: &Action) -> Result<Vec<u8>> {
-        if action.home != self.profile.server.home
+        if action.home != self.profile.active_server().home
             || action.actor.acting() != &self.session()?.ready.acting
         {
             return Err(Error::Input);
@@ -159,22 +198,33 @@ impl Client {
         sign_action(action, &self.key).map_err(|_| Error::Input)
     }
     pub fn execute_signed(&mut self, bytes: &[u8]) -> Result<Response> {
+        self.execute_signed_observed(bytes).map(|r| r.response)
+    }
+    pub(super) fn execute_signed_observed(&mut self, bytes: &[u8]) -> Result<ExecutedResponse> {
         let verified = verify_action(bytes, &self.key.verifying_key()).map_err(|_| Error::Input)?;
         if crate::home::is_read_operation(verified.action().operation) {
-            return Ok(self
-                .session()?
-                .submit(bytes, &self.key.verifying_key())?
-                .value()
-                .clone());
+            return Ok(ExecutedResponse {
+                response: self
+                    .session()?
+                    .submit(bytes, &self.key.verifying_key())?
+                    .value()
+                    .clone(),
+                exchange_ns: None,
+            });
         }
         self.validate_message_mode(verified.action())?;
         let now = self.profile.clock.sample().map_err(|_| Error::Clock)?;
         let window = self.session()?.ready.window.clone();
         outbox::prepare(&mut self.store, &verified, &window, now).map_err(|_| Error::Storage)?;
-        let response = self.session()?.submit(bytes, &self.key.verifying_key())?;
+        let (response, exchange_ns) = self
+            .session()?
+            .submit_observed(bytes, &self.key.verifying_key())?;
         let now = self.profile.clock.sample().map_err(|_| Error::Clock)?;
         outbox::record(&mut self.store, &verified, &response, now).map_err(|_| Error::Storage)?;
-        Ok(response.value().clone())
+        Ok(ExecutedResponse {
+            response: response.value().clone(),
+            exchange_ns,
+        })
     }
     pub fn call<T: serde::Serialize>(
         &mut self,
@@ -187,7 +237,12 @@ impl Client {
         self.execute(&action)
     }
     pub fn pending(&mut self) -> Result<Vec<outbox::Pending>> {
-        outbox::pending(&mut self.store, &self.key.verifying_key()).map_err(|_| Error::Storage)
+        let home = self.profile.active_server().home;
+        Ok(outbox::pending(&mut self.store, &self.key.verifying_key())
+            .map_err(|_| Error::Storage)?
+            .into_iter()
+            .filter(|p| p.action.action().home == home)
+            .collect())
     }
     /// Resolve original identities before retrying any effect. No replacement operation is created.
     pub fn resolve_pending(&mut self) -> Result<Vec<Response>> {
@@ -313,3 +368,7 @@ impl Client {
         outbox::draft_mentions(&mut self.store, room).map_err(|_| Error::Storage)
     }
 }
+
+#[cfg(test)]
+#[path = "../../Tests/Client/PreparedRuntime.rs"]
+mod prepared_runtime_tests;

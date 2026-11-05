@@ -356,7 +356,9 @@ pub(super) fn inspect(
             epoch: state.epoch,
             commit_digest: state.digest,
             sequence: state.sequence,
-            send_barrier: state.barrier || !required_removals.is_empty(),
+            send_barrier: state.barrier
+                || !required_removals.is_empty()
+                || !authority::fresh(db, a.room, &members, now)?,
             frozen: state.frozen,
             members,
             packages,

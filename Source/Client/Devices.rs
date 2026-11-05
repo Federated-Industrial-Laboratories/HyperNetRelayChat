@@ -306,6 +306,8 @@ pub fn activate(directory: &Path, recovery: Option<&Path>) -> Result<DeviceRecei
                     return Err(Error::Binding);
                 }
                 let profile = Profile {
+                    federation: None,
+                    agreements: Vec::new(),
                     server: pending.server.clone(),
                     registration: AccountRegistration {
                         home: pending.server.home,

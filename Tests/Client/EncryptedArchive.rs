@@ -10,6 +10,8 @@ fn offline(f: &Fixture) -> client::Client {
     let key = service::files::create_key(&f.root.join("Endpoint.key")).unwrap();
     let a = action();
     let profile = client::Profile {
+        federation: None,
+        agreements: Vec::new(),
         server: service::Descriptor {
             version: 1,
             home: a.home,
@@ -114,6 +116,7 @@ fn encrypted_archive_search_restart_filters_and_expiry_preserve_authenticated_ev
     let mut state = view(room, e.timestamp_ms);
     cache::save_rooms(
         &mut client.store,
+        room.home,
         &[conversations::Summary {
             room,
             name: "private".into(),
@@ -258,6 +261,7 @@ fn encrypted_cursor_restart_preserves_plaintext_pending_mls_and_drafts_after_reo
     let room = e.room;
     cache::save_rooms(
         &mut client.store,
+        e.home,
         &[conversations::Summary {
             room,
             name: "private".into(),
@@ -337,7 +341,32 @@ fn encrypted_cursor_restart_preserves_plaintext_pending_mls_and_drafts_after_reo
             .unwrap()
     );
     assert_eq!(client.store.usage().unwrap().commit_counter, before);
-    cache::restart_cursor(&mut client.store, room).unwrap();
+    for detail in ["CursorHistoryGap", "CursorPosition"] {
+        let error = client::Error::Rejected {
+            code: ErrorCode::ResynchronisationRequired,
+            detail: detail.into(),
+        };
+        assert!(!cache::cursor_context_changed(&error));
+        assert!(
+            cache::inspection_failed(&mut client.store, Operation::CryptoHistory, room, &error)
+                .unwrap()
+        );
+        let cached = cache::room(&mut client.store, room).unwrap();
+        assert_eq!(cached.gap.as_deref(), Some(detail));
+        assert_eq!(cached.events.len(), 1);
+        assert!(cached.cursor.is_some());
+        assert_eq!(
+            archive::content(&mut client.store, std::slice::from_ref(&e)).unwrap()[&e.event],
+            text
+        );
+        assert_eq!(
+            cache::encode(&device.state(&mut client.store, group).unwrap()).unwrap(),
+            state
+        );
+    }
+    // Explicit acknowledgement may reset continuation but cannot recreate old
+    // decryption keys, so the retained local rows and pending MLS state survive.
+    client.resynchronise_history(room).unwrap();
     drop(client);
     let mut client = client::Client::open_offline(&f.root).unwrap();
     let cached = cache::room(&mut client.store, room).unwrap();

@@ -117,7 +117,7 @@ pub fn time(ms: u64) -> String {
     )
 }
 pub fn connection(snapshot: &Snapshot) -> String {
-    match &snapshot.connection {
+    let mut description: String = match &snapshot.connection {
         ConnectionState::Offline => "Offline".into(),
         ConnectionState::Connecting => "Connecting through HyperNet".into(),
         ConnectionState::Resolving => "Resolving pending operations".into(),
@@ -125,7 +125,33 @@ pub fn connection(snapshot: &Snapshot) -> String {
         ConnectionState::Backoff { retry_in_ms, .. } => {
             format!("Reconnect in {} s", retry_in_ms.div_ceil(1000))
         }
+    };
+    if snapshot.updating {
+        description.push_str(" · refreshing views");
     }
+    description
+}
+pub fn restrictions(snapshot: &Snapshot) -> Vec<String> {
+    let Some(room) = &snapshot.selected else {
+        return Vec::new();
+    };
+    let mut lines = vec![format!(
+        "Room restrictions: {}",
+        text::identity_display(&room.summary.name)
+    )];
+    if room.stale || room.gap.is_some() {
+        lines.push("Retained room restrictions; current room access is not confirmed".into());
+    }
+    lines.extend(snapshot.inspection.restrictions.iter().map(|restriction| {
+        format!(
+            "{} · kind={} · expires UTC {} · moderator {}",
+            restriction.subject,
+            restriction.kind,
+            timestamp(restriction.expires_ms),
+            restriction.moderator
+        )
+    }));
+    lines
 }
 pub fn delivery(delivery: &hrc::client::Delivery) -> String {
     if delivery.held {
@@ -142,6 +168,30 @@ pub fn delivery(delivery: &hrc::client::Delivery) -> String {
         Some(Outcome::Absent) => "Not committed at the last resolution".into(),
         Some(Outcome::Unknown) => "Outcome unknown; resolve the original operation".into(),
     }
+}
+pub fn federation_privacy(
+    remote: Option<&hrc::protocol::RemoteSessionReady>,
+) -> Vec<(&'static str, String)> {
+    let Some(remote) = remote else {
+        return Vec::new();
+    };
+    let route = |p: &hrc::protocol::FederationPrivacy| {
+        format!(
+            "TLS 1.3 to final service; relay {}",
+            if p.attested_relay() {
+                "approved attachment"
+            } else {
+                "not reported"
+            }
+        )
+    };
+    vec![
+        ("Federation origin", remote.origin.to_string()),
+        ("Federation home", remote.home.to_string()),
+        ("Source leg at admission", route(&remote.source_privacy)),
+        ("Destination leg at admission", route(&remote.destination_privacy)),
+        ("Federation observation", "Admission observations; both permissions are checked again for each action. Physical relay independence is not independently verified.".into()),
+    ]
 }
 pub fn privacy(privacy: Option<&Privacy>) -> Vec<(&'static str, String)> {
     let Some(p) = privacy else {
@@ -255,3 +305,18 @@ pub fn date_bound(input: &str) -> std::result::Result<Option<u64>, &'static str>
 #[cfg(test)]
 #[path = "../../Tests/Presentation/Dates.rs"]
 mod tests;
+
+pub fn filters(snapshot: &Snapshot) -> Vec<String> {
+    let mut lines = Vec::new();
+    if snapshot.inspection.stale || snapshot.inspection.filters_stale {
+        lines.push("Retained recipient filters; current policy is not confirmed".into());
+    }
+    lines.extend(
+        snapshot
+            .inspection
+            .filters
+            .iter()
+            .map(|f| format!("{} · ignored={} · muted={}", f.subject, f.ignored, f.muted)),
+    );
+    lines
+}

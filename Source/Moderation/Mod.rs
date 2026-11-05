@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Recipient filters and attributable room restrictions remain distinct.
 #[path = "Inspection.rs"]
-mod inspection;
+pub(crate) mod inspection;
 use crate::{
     clock::TimeBounds,
     conversations,

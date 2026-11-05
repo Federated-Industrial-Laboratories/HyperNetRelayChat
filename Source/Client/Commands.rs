@@ -10,20 +10,41 @@ impl Worker {
                 self.offline();
                 return Ok(());
             }
+            SelectService(agreement) => {
+                self.offline();
+                self.client.select_service(agreement)?;
+                self.snapshot.home = self.client.profile.active_server().home;
+                self.snapshot.services = self.client.profile.service_choices();
+                self.snapshot.rooms = cache::rooms(&mut self.client.store)
+                    .map_err(|_| Error::Storage)?
+                    .into_iter()
+                    .filter(|room| room.room.home == self.snapshot.home)
+                    .collect();
+                self.snapshot.selected = None;
+                self.snapshot.search = None;
+                self.snapshot.inspection = Inspection::default();
+                self.snapshot.inspection.stale = true;
+                self.snapshot.inspection.filters_stale = true;
+                self.snapshot.inspection.filters =
+                    cache::filters(&mut self.client.store, self.snapshot.home)
+                        .map_err(|_| Error::Storage)?;
+                self.snapshot.notifications.clear();
+                self.snapshot.deliveries.clear();
+                self.snapshot.nickname.clear();
+                self.snapshot.motd.clear();
+                return self.connect();
+            }
             Refresh => return self.refresh(),
             SelectRoom(room) => return self.select(room),
             OpenEvent { room, event } => return self.open_event(room, event),
             LoadMore => return self.pull(self.selected()?),
             Resynchronise => {
                 let room = self.selected()?;
-                cache::invalidate(&mut self.client.store, room).map_err(|_| Error::Storage)?;
-                cache::reset_gap(&mut self.client.store, room).map_err(|_| Error::Storage)?;
-                self.caught_up.remove(&room);
-                if let Some(v) = &mut self.snapshot.selected {
-                    v.gap = None;
-                    v.events.clear();
-                }
-                return self.pull(room);
+                return self.update_view(|worker| {
+                    worker.clear_room_presentation(room, None);
+                    worker.client.resynchronise_history(room)?;
+                    worker.pull(room)
+                });
             }
             SaveDraft {
                 room,
@@ -138,15 +159,17 @@ impl Worker {
                 self.response(response)?;
             }
             CryptoInspect { room, grant } => {
-                let view = self.client.crypto_inspect(room, grant.as_deref())?;
-                let selected = self
-                    .snapshot
-                    .selected
-                    .as_mut()
-                    .filter(|v| v.summary.room == room)
-                    .ok_or(Error::Input)?;
-                selected.crypto = Some(view);
-                return Ok(());
+                return self.update_view(|worker| {
+                    let view = worker.client.crypto_inspect(room, grant.as_deref())?;
+                    let selected = worker
+                        .snapshot
+                        .selected
+                        .as_mut()
+                        .filter(|v| v.summary.room == room)
+                        .ok_or(Error::Input)?;
+                    selected.crypto = Some(view);
+                    Ok(())
+                });
             }
             CryptoPublish { room, grant } => {
                 self.operation = Some(Operation::CryptoPublishKeyPackage);
@@ -174,15 +197,21 @@ impl Worker {
                 self.response(response)?;
             }
             CryptoSync { room, grant } => {
-                let view = self.client.crypto_sync(room, grant.as_deref())?;
-                let selected = self
-                    .snapshot
-                    .selected
-                    .as_mut()
-                    .filter(|v| v.summary.room == room)
-                    .ok_or(Error::Input)?;
-                selected.crypto = Some(view);
-                return Ok(());
+                return self.update_view(|worker| {
+                    let result = worker.client.crypto_sync(room, grant.as_deref());
+                    if result.is_err() {
+                        worker.reconcile_history_gap(room)?;
+                    }
+                    let view = result?;
+                    let selected = worker
+                        .snapshot
+                        .selected
+                        .as_mut()
+                        .filter(|v| v.summary.room == room)
+                        .ok_or(Error::Input)?;
+                    selected.crypto = Some(view);
+                    Ok(())
+                });
             }
             TrustContact {
                 account,
@@ -268,11 +297,13 @@ impl Worker {
                 )?;
             }
             InspectGrant(reference) => {
-                let preview = self.client.inspect_grant(reference)?;
-                self.snapshot.inspection.proposed = preview.candidates;
-                self.snapshot.inspection.proposed_content = preview.content;
-                self.snapshot.inspection.grant = Some(preview.inspection);
-                return Ok(());
+                return self.update_view(|worker| {
+                    let preview = worker.client.inspect_grant(reference)?;
+                    worker.snapshot.inspection.proposed = preview.candidates;
+                    worker.snapshot.inspection.proposed_content = preview.content;
+                    worker.snapshot.inspection.grant = Some(preview.inspection);
+                    Ok(())
+                });
             }
             ChangeGrant { grant, change } => {
                 let op = match change {
@@ -361,6 +392,8 @@ impl Worker {
                     .map_err(|_| Error::Storage)?;
             }
         }
+        // These mutations can change membership, policy or inspected metadata.
+        self.stale();
         let view = self.refresh();
         self.finish_view(view);
         Ok(())
@@ -424,7 +457,7 @@ impl Worker {
             parent,
             causation,
         };
-        let prepared = self.client.prepare_preserved_send_with(
+        let prepared = self.client.prepare_controller_send_with(
             room,
             &message,
             grant.as_deref(),
@@ -437,13 +470,13 @@ impl Worker {
                 Ok(())
             },
         )?;
-        let action = prepared.action;
+        let action = prepared.message.action.clone();
         let operation = action.operation;
         if let Some(g) = &grant
             && g.scope.mode == delegation::Mode::Approve
         {
             let approval = action.approval.ok_or(Error::Input)?;
-            let bytes = prepared.signed;
+            let bytes = prepared.message.signed;
             let now = self
                 .client
                 .profile
@@ -482,14 +515,17 @@ impl Worker {
         self.operation = Some(operation);
         self.delivery_room = Some(room);
         self.remember(&action)?;
-        let response = self.client.execute_signed(&prepared.signed)?;
-        self.response(response)?;
+        let response = self.client.execute_controller_send(prepared)?;
+        self.response_observed(response.response, response.exchange_ns)?;
         self.clear_matching_draft(&action)?;
-        let view = self.refresh();
+        let view = self.refresh_after_send(room);
         self.finish_view(view);
         Ok(())
     }
     pub(super) fn search(&mut self, query: messaging::Search, append: bool) -> Result<()> {
+        self.update_view(|worker| worker.search_current(query, append))
+    }
+    fn search_current(&mut self, query: messaging::Search, append: bool) -> Result<()> {
         let room = self.selected()?;
         let events = if append {
             self.snapshot
