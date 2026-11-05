@@ -1,7 +1,20 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Finite view assembly never publishes incomplete recipient policy or history.
+use super::super::runtime::read_retry::ReadRetry;
 use super::*;
 use home::views::{CommunityPage, CommunityRequest, MetadataPage, MetadataRequest};
+
+#[derive(Clone, Copy)]
+enum ReadMode {
+    Blocking,
+    Scheduled,
+}
+struct PageRead {
+    action: Action,
+    signed: Vec<u8>,
+    view_end: u64,
+    retry: ReadRetry,
+}
 
 fn deadline() -> Result<u64> {
     Ok(crate::clock::boot_ms()
@@ -10,13 +23,66 @@ fn deadline() -> Result<u64> {
 }
 fn read_page<T: serde::de::DeserializeOwned + serde::Serialize, B: serde::Serialize>(
     worker: &mut Worker,
-    operation: Operation,
-    target: Target,
+    request_target: (Operation, Target),
     request: &B,
     end: u64,
-) -> Result<T> {
-    let body: Value = worker.read_until(operation, target, request, end)?;
-    home::views::decode(&body).ok_or(Error::Input)
+    pending: &mut Option<PageRead>,
+    mode: ReadMode,
+) -> Result<Option<T>> {
+    let (operation, target) = request_target;
+    let body: Value = match mode {
+        ReadMode::Blocking => worker.read_view_until(operation, target, request, end)?,
+        ReadMode::Scheduled => {
+            if pending.is_none() {
+                current(end)?;
+                let read_end = deadline()?;
+                let action = worker.client.prepare(
+                    operation,
+                    target,
+                    Value::serialized(request).map_err(|_| Error::Input)?,
+                )?;
+                let signed = worker.client.sign(&action)?;
+                *pending = Some(PageRead {
+                    action,
+                    signed,
+                    view_end: end,
+                    retry: ReadRetry::new(read_end),
+                });
+            }
+            let read = pending.as_mut().expect("pending view read");
+            current(read.view_end)?;
+            let shared = Arc::clone(&worker.shared);
+            let response = read.retry.poll(
+                || shared.stop.load(Ordering::Acquire) || shared.disconnect.load(Ordering::Acquire),
+                |read_end| {
+                    worker.submit_view_read(
+                        &read.action,
+                        &read.signed,
+                        read_end,
+                        Some(read.view_end),
+                    )
+                },
+            )?;
+            let Some(response) = response else {
+                return Ok(None);
+            };
+            *pending = None;
+            match response.outcome {
+                Outcome::Result { body } => body,
+                outcome => return Err(Error::from_outcome(outcome)),
+            }
+        }
+    };
+    let page = home::views::decode(&body).ok_or(Error::Input)?;
+    current(end)?;
+    Ok(Some(page))
+}
+
+fn current(end: u64) -> Result<()> {
+    if crate::clock::boot_ms().map_err(|_| Error::Clock)? >= end {
+        return Err(Error::ReadDeadlineExpired);
+    }
+    Ok(())
 }
 
 fn page() -> home::InspectPage {
@@ -54,6 +120,7 @@ fn advance<T>(
     Ok(())
 }
 pub(super) struct MetadataAssembly {
+    pending: Option<PageRead>,
     request: MetadataRequest,
     rounds: u8,
     components: [u8; 4],
@@ -65,6 +132,7 @@ pub(super) struct MetadataAssembly {
 impl MetadataAssembly {
     fn new() -> Self {
         Self {
+            pending: None,
             request: MetadataRequest {
                 rooms: Some(conversations::List {
                     after: None,
@@ -83,12 +151,12 @@ impl MetadataAssembly {
             agents: Vec::new(),
         }
     }
-    fn step(&mut self, worker: &mut Worker, end: u64) -> Result<bool> {
-        if self.rounds >= 129 {
+    fn step(&mut self, worker: &mut Worker, end: u64, mode: ReadMode) -> Result<bool> {
+        if self.pending.is_none() && self.rounds >= 129 {
             return Err(Error::Input);
         }
         let mut issued = self.request.clone();
-        if self.rounds != 0 {
+        if self.rounds > u8::from(self.pending.is_some()) {
             // A continuation gives one component the full remaining representation budget.
             if issued.rooms.is_some() {
                 issued.filters = None;
@@ -101,27 +169,36 @@ impl MetadataAssembly {
                 issued.agents = None;
             }
         }
-        for (count, selected) in self.components.iter_mut().zip([
-            issued.rooms.is_some(),
-            issued.filters.is_some(),
-            issued.grants.is_some(),
-            issued.agents.is_some(),
-        ]) {
-            if selected {
-                *count += 1;
-                if *count > 33 {
-                    return Err(Error::Input);
+        if self.pending.is_none() {
+            for (count, selected) in self.components.iter_mut().zip([
+                issued.rooms.is_some(),
+                issued.filters.is_some(),
+                issued.grants.is_some(),
+                issued.agents.is_some(),
+            ]) {
+                if selected {
+                    *count += 1;
+                    if *count > 33 {
+                        return Err(Error::Input);
+                    }
                 }
             }
+            self.rounds += 1;
         }
-        self.rounds += 1;
-        let response: MetadataPage = read_page(
+        let Some(response): Option<MetadataPage> = read_page(
             worker,
-            Operation::ClientMetadata,
-            Target::Account(worker.snapshot.account),
+            (
+                Operation::ClientMetadata,
+                Target::Account(worker.snapshot.account),
+            ),
             &issued,
             end,
-        )?;
+            &mut self.pending,
+            mode,
+        )?
+        else {
+            return Ok(false);
+        };
         if self
             .request
             .filter_revision
@@ -190,11 +267,13 @@ impl MetadataAssembly {
     }
 }
 pub(super) struct CommunityAssembly {
+    pending: Option<PageRead>,
     end: u64,
     room: RoomId,
     request: CommunityRequest,
     rounds: u8,
     restart_available: bool,
+    initial_cursor: Option<Blob>,
     components: [u8; 2],
     filters: Vec<moderation::FilterState>,
     restrictions: Vec<moderation::RestrictionState>,
@@ -204,10 +283,12 @@ impl CommunityAssembly {
     fn new(worker: &mut Worker, room: RoomId) -> Result<Self> {
         let cached = cache::room(&mut worker.client.store, room).map_err(|_| Error::Storage)?;
         Ok(Self {
+            pending: None,
             room,
             end: deadline()?,
             rounds: 0,
             restart_available: cached.cursor.is_some(),
+            initial_cursor: cached.cursor.clone(),
             components: [0; 2],
             filters: Vec::new(),
             restrictions: Vec::new(),
@@ -229,18 +310,32 @@ impl CommunityAssembly {
         })
     }
     fn step(&mut self, worker: &mut Worker, end: u64) -> Result<bool> {
-        let issued = self.next_request()?;
+        self.step_mode(worker, end, ReadMode::Blocking)
+    }
+    fn turn(&mut self, worker: &mut Worker) -> Result<bool> {
+        self.step_mode(worker, self.end, ReadMode::Scheduled)
+    }
+    fn step_mode(&mut self, worker: &mut Worker, end: u64, mode: ReadMode) -> Result<bool> {
+        let issued = if self.pending.is_some() {
+            self.page_request()
+        } else {
+            self.next_request()?
+        };
         let response: CommunityPage = match read_page(
             worker,
-            Operation::CommunitySync,
-            Target::Room(self.room),
+            (Operation::CommunitySync, Target::Room(self.room)),
             &issued,
             end,
+            &mut self.pending,
+            mode,
         ) {
-            Ok(page) => page,
+            Ok(Some(page)) => page,
+            Ok(None) => return Ok(false),
             Err(error) => {
+                self.pending = None;
                 if self.restart_available && cache::cursor_context_changed(&error) {
                     self.restart_available = false;
+                    self.initial_cursor = None;
                     worker.clear_room_presentation(self.room, None);
                     cache::restart_community(&mut worker.client.store, self.room, None)
                         .map_err(|_| Error::Storage)?;
@@ -299,10 +394,7 @@ impl CommunityAssembly {
         if self.rounds >= 66 {
             return Err(Error::Input);
         }
-        let mut issued = self.request.clone();
-        if issued.history.is_none() && issued.filters.is_some() {
-            issued.restrictions = None;
-        }
+        let issued = self.page_request();
         for (count, selected) in self
             .components
             .iter_mut()
@@ -318,12 +410,20 @@ impl CommunityAssembly {
         self.rounds += 1;
         Ok(issued)
     }
+    fn page_request(&self) -> CommunityRequest {
+        let mut issued = self.request.clone();
+        if issued.history.is_none() && issued.filters.is_some() {
+            issued.restrictions = None;
+        }
+        issued
+    }
     fn accept(
         &mut self,
         worker: &mut Worker,
         issued: CommunityRequest,
         response: CommunityPage,
     ) -> Result<bool> {
+        current(self.end)?;
         if response.inspection.confidentiality != RoomConfidentiality::Community
             || self.request.context.is_some_and(|c| c != response.context)
         {
@@ -373,6 +473,22 @@ impl CommunityAssembly {
             .sample()
             .map_err(|_| Error::Clock)?
             .upper_ms;
+        if history.has_more {
+            let next = verify_cursor(&history.cursor.0, &key).map_err(|_| Error::Input)?;
+            let previous = self
+                .initial_cursor
+                .as_ref()
+                .map(|cursor| {
+                    verify_cursor(&cursor.0, &key)
+                        .map(|verified| verified.value().sequence)
+                        .map_err(|_| Error::Input)
+                })
+                .transpose()?
+                .unwrap_or(0);
+            if next.value().sequence <= previous {
+                return Err(Error::Input);
+            }
+        }
         cache::receive(
             &mut worker.client.store,
             self.room,
@@ -404,9 +520,33 @@ impl CommunityAssembly {
         Ok(true)
     }
 }
+// A continuation is view work, not a lease or an unbounded subscription. Each
+// component yields to commands; a finite burst shares the first page's end.
+pub(super) struct SelectedCatchup {
+    room: RoomId,
+    end: u64,
+    pages_left: u8,
+    assembly: Option<CommunityAssembly>,
+}
+impl SelectedCatchup {
+    fn eligible(&self, worker: &Worker, now: u64) -> bool {
+        now < self.end
+            && self.pages_left != 0
+            && !worker.shared.stop.load(Ordering::Acquire)
+            && !worker.shared.disconnect.load(Ordering::Acquire)
+            && worker.snapshot.connection == ConnectionState::Online
+            && worker.snapshot.selected.as_ref().is_some_and(|view| {
+                view.summary.room == self.room
+                    && view.summary.joined
+                    && view.focus.is_none()
+                    && view.gap.is_none()
+                    && view.summary.confidentiality == RoomConfidentiality::Community
+            })
+    }
+}
 enum Stage {
     Metadata(MetadataAssembly),
-    Selected,
+    Selected(Option<RoomId>),
     Background,
     Room(CommunityAssembly, bool),
     Privacy,
@@ -421,6 +561,12 @@ impl RefreshCycle {
         })
     }
     fn room_updated(&mut self, room: RoomId) {
+        if let Stage::Selected(updated) = &mut self.stage {
+            // Metadata has completed. Keep the room binding until the selected
+            // turn so an intervening selection or invalidation cannot be skipped.
+            *updated = Some(room);
+            return;
+        }
         if let Stage::Room(state, background) = &self.stage
             && state.room == room
         {
@@ -434,6 +580,9 @@ impl RefreshCycle {
         }
     }
     fn step(&mut self, worker: &mut Worker) -> Result<bool> {
+        self.step_mode(worker, ReadMode::Blocking)
+    }
+    fn step_mode(&mut self, worker: &mut Worker, mode: ReadMode) -> Result<bool> {
         if worker.shared.stop.load(Ordering::Acquire)
             || worker.shared.disconnect.load(Ordering::Acquire)
         {
@@ -441,19 +590,42 @@ impl RefreshCycle {
         }
         match &mut self.stage {
             Stage::Metadata(state) => {
-                if state.step(worker, deadline()?)? {
-                    self.stage = Stage::Selected;
+                if state.step(worker, deadline()?, mode)? {
+                    self.stage = Stage::Selected(None);
                 }
             }
-            Stage::Selected => {
+            Stage::Selected(updated) => {
+                let updated = *updated;
                 self.stage = Stage::Background;
                 if let Some(room) = worker.snapshot.selected.as_ref().map(|r| r.summary.room) {
+                    if worker
+                        .pending_room
+                        .as_ref()
+                        .is_some_and(|pending| pending.room == room)
+                    {
+                        return Ok(false);
+                    }
                     if worker
                         .snapshot
                         .rooms
                         .iter()
                         .any(|r| r.room == room && r.joined)
                     {
+                        if updated == Some(room)
+                            && worker.client.bounded_views()
+                            && !worker.snapshot.inspection.stale
+                            && !worker.snapshot.inspection.filters_stale
+                            && worker.snapshot.selected.as_ref().is_some_and(|view| {
+                                view.summary.joined
+                                    && view.summary.confidentiality
+                                        == RoomConfidentiality::Community
+                                    && !view.stale
+                                    && view.gap.is_none()
+                                    && view.focus.is_none()
+                            })
+                        {
+                            return Ok(false);
+                        }
                         if let Some(event) = worker.snapshot.selected.as_ref().and_then(|v| v.focus)
                         {
                             worker.open_event(room, event)?;
@@ -477,7 +649,14 @@ impl RefreshCycle {
                     .snapshot
                     .rooms
                     .iter()
-                    .filter(|r| r.joined && Some(r.room) != selected)
+                    .filter(|r| {
+                        r.joined
+                            && Some(r.room) != selected
+                            && worker
+                                .pending_room
+                                .as_ref()
+                                .is_none_or(|pending| pending.room != r.room)
+                    })
                     .map(|r| r.room)
                     .collect();
                 if !rooms.is_empty() {
@@ -491,7 +670,8 @@ impl RefreshCycle {
                 }
             }
             Stage::Room(state, background) => {
-                if state.step(worker, state.end)? {
+                if state.step_mode(worker, state.end, mode)? {
+                    worker.continue_selected(state.room, state.end);
                     self.stage = if *background {
                         Stage::Privacy
                     } else {
@@ -508,6 +688,135 @@ impl RefreshCycle {
     }
 }
 impl Worker {
+    pub(super) fn room_refresh_turn(&mut self, pending: &mut PendingRoomRefresh) -> Result<bool> {
+        if pending.assembly.is_none() {
+            if let Some(cycle) = &mut self.refresh_cycle {
+                cycle.room_updated(pending.room);
+            }
+            if self
+                .selected_catchup
+                .as_ref()
+                .is_some_and(|work| work.room == pending.room)
+            {
+                self.selected_catchup = None;
+            }
+            pending.assembly = Some(CommunityAssembly::new(self, pending.room)?);
+            pending.committed = 0;
+        }
+        let state = pending.assembly.as_mut().expect("pending room assembly");
+        if !state.turn(self)? {
+            return Ok(false);
+        }
+        if let Some(cycle) = &mut self.refresh_cycle {
+            cycle.room_updated(pending.room);
+        }
+        self.continue_selected(pending.room, state.end);
+        self.snapshot.privacy = Some(self.client.session()?.refresh_privacy()?);
+        pending.assembly = None;
+        // Commits made between complete page responses need one later pull.
+        // They never replace the unfinished assembly's original deadline.
+        Ok(pending.committed == 0)
+    }
+    fn continue_selected(&mut self, room: RoomId, end: u64) {
+        if !self.snapshot.selected.as_ref().is_some_and(|view| {
+            view.summary.room == room
+                && view.summary.joined
+                && view.has_more
+                && view.focus.is_none()
+                && view.gap.is_none()
+                && !view.stale
+        }) {
+            if self
+                .selected_catchup
+                .as_ref()
+                .is_some_and(|pending| pending.room == room)
+            {
+                self.selected_catchup = None;
+            }
+            return;
+        }
+        let pending = self
+            .selected_catchup
+            .take()
+            .filter(|pending| pending.room == room)
+            .map_or(
+                SelectedCatchup {
+                    room,
+                    end,
+                    pages_left: 8,
+                    assembly: None,
+                },
+                |mut pending| {
+                    pending.end = pending.end.min(end);
+                    pending.pages_left = pending.pages_left.saturating_sub(1);
+                    pending.assembly = None;
+                    pending
+                },
+            );
+        // A command's completed page supersedes a partial assembly, but cannot
+        // extend either the original end or its remaining page allowance.
+        if pending.pages_left != 0 {
+            self.selected_catchup = Some(pending);
+        }
+    }
+    pub(super) fn catchup_turn(&mut self) -> Result<()> {
+        self.catchup_turn_with(|state, worker| state.turn(worker))
+    }
+    fn catchup_turn_with(
+        &mut self,
+        read: impl FnOnce(&mut CommunityAssembly, &mut Worker) -> Result<bool>,
+    ) -> Result<()> {
+        let Some(mut pending) = self.selected_catchup.take() else {
+            return Ok(());
+        };
+        let room = pending.room;
+        let result = self.update_view(|worker| {
+            let now = crate::clock::boot_ms().map_err(|_| Error::Clock)?;
+            if !pending.eligible(worker, now) || !worker.grouped_room(pending.room) {
+                return Ok(());
+            }
+            let mut state = match pending.assembly.take() {
+                Some(state) => state,
+                None => {
+                    let mut state = CommunityAssembly::new(worker, pending.room)?;
+                    state.end = pending.end;
+                    state
+                }
+            };
+            if read(&mut state, worker)? {
+                if let Some(cycle) = &mut worker.refresh_cycle {
+                    cycle.room_updated(pending.room);
+                }
+                pending.pages_left -= 1;
+                if worker
+                    .snapshot
+                    .selected
+                    .as_ref()
+                    .is_none_or(|view| !view.has_more)
+                {
+                    return Ok(());
+                }
+            } else {
+                pending.assembly = Some(state);
+            }
+            if pending.eligible(worker, crate::clock::boot_ms().map_err(|_| Error::Clock)?) {
+                worker.selected_catchup = Some(pending);
+            }
+            Ok(())
+        });
+        if result.is_err() {
+            self.snapshot.notifications.clear();
+            self.snapshot.search = None;
+            let gap = self
+                .snapshot
+                .selected
+                .as_ref()
+                .filter(|view| view.summary.room == room)
+                .and_then(|view| view.gap.clone());
+            self.clear_room_presentation(room, gap);
+        }
+        result
+    }
     pub(super) fn grouped_room(&mut self, room: RoomId) -> bool {
         self.client.bounded_views()
             && self
@@ -548,6 +857,7 @@ impl Worker {
         if let Some(cycle) = &mut self.refresh_cycle {
             cycle.room_updated(room);
         }
+        self.continue_selected(room, state.end);
         Ok(())
     }
     pub(super) fn grouped_refresh(&mut self) -> Result<()> {
@@ -567,7 +877,7 @@ impl Worker {
                 cache::maintain(&mut worker.client.store).map_err(|_| Error::Storage)?;
                 return Ok((false, RefreshCycle::new()?));
             };
-            let done = cycle.step(worker)?;
+            let done = cycle.step_mode(worker, ReadMode::Scheduled)?;
             Ok((done, cycle))
         });
         match result {

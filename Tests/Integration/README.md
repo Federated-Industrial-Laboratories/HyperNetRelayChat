@@ -1,5 +1,211 @@
 # Native conversation qualification
 
+`NativeLoad.py` and the `native-load-client` example provide the separate bounded
+pilot/load workflow. Select `configuration.loadOnly=true` or
+`HRC_NATIVE_LOAD_ONLY=1`, and supply `configuration.loadClientBinary` or
+`HRC_NATIVE_LOAD_CLIENT`. It uses the existing real Alice/Bob/Agent companion
+prerequisites. This selection is exclusive with the local/confidential-only
+workflows and does not rerun or claim their functional evidence.
+
+The shipped CLI creates twelve distinct HRC accounts, endpoint keys and profiles:
+eight interactive users, two independently identified agents, and two operator
+users. The agents have explicit operator bindings. Ten human profiles share the
+Bob outgoing HyperNet application; two agents share the Agent application. Alice's
+application receives the twelve service streams. These are two distinct client
+HyperNet principals, not twelve independently administered devices. One operator
+owns and moderates the test room; the second holds a separate authenticated
+stream. The two transition slots and two federation slots remain unoccupied.
+Simultaneous federation capacity requires separate evidence.
+
+The isolated HyperNet fixture selects sixteen concurrent connections in both its
+relay and application route profiles, with matching signed admission and memory
+consent. This accommodates the twelve HRC streams and retained fixture transport.
+The generic eight-connection route defaults cannot run this topology. Finite
+voucher connection allowance and the companion's sixteen-stream ceiling are
+separate limits; neither overrides a lower route profile. These are explicit
+fixture policy settings, not changes to HyperNet's capacity implementation or
+HRC's performance thresholds.
+
+The installed HRC fixture selects a 1,200-second route and stream ceiling so
+setup and the complete workload fit within the same consented transport policy.
+Other installed fixture workflows retain their 120-second ceiling. The
+30-second idle limit and each operation, readiness and workload deadline remain
+unchanged; the longer route ceiling does not renew expired action authority.
+
+After offline profile validation, the eight interactive profiles start directly
+in production Controllers. Their ordinary commands connect, join the room, set
+recipient ignore and select the room. A filter-bound cursor gap receives one
+explicit resynchronisation command within the original 45-second readiness end.
+Join and ignore retain their original request, operation ID and action digest.
+Setup follows those exact deliveries through reconnect and accepts only a
+committed outcome, even when the original attempt has a temporary completion
+error. Unknown and temporary outcomes keep waiting within the same readiness end;
+terminal refusals, rejection, identity substitution and held or abandoned effects
+fail setup. No setup effect is redispatched to obtain a different identity.
+This setup avoids replacing eight temporary streams at once. The four supporting
+profiles retain one Client owner each, and no profile is opened twice.
+
+One scoped worker performs supporting health reads while the helper observes
+Controller state and dispatches commands. It stops and joins before readiness
+is accepted. An already-started bounded read can finish after the readiness end;
+the post-join deadline check then refuses acceptance. The original 45-second
+end also bounds the marker, filtering
+checks, supporting inspections and final readiness observation. A transient
+noncurrent room view may recover within that remaining interval. The final
+observer waits for all eight current views, joins its bounded supporting
+keepalive worker, then rechecks currentness before starting the pilot. A change
+during the join resumes observation under the same end. Expiry reports each
+Controller's freshness and gap state; it never starts another readiness window.
+All eight room views, inspection state and privacy observations must be current;
+ordinary background refresh remains enabled throughout both measurements.
+Presentation filtering is checked through the recipient Controller; the final
+raw history and search checks remain mandatory service-side evidence.
+
+The Rust helper has an original 360-second deadline inside the unchanged
+900-second outer fixture, with time retained for process cleanup. It measures a
+30-second baseline and a 45-second overload period. Five Controllers receive
+one send command each second, staggered by 200 milliseconds. The schedule keeps
+offering commands while earlier work is queued. Queue refusals and missed
+scheduled offers are counted instead of slowing the offered schedule. Every
+normal offered message must have an exactly bound committed outcome and direct
+exchange sample. After each fixed offer window, observation continues until the
+five sending Controllers have terminal outcomes, for at most 30 additional
+seconds. This observation does not renew product deadlines or resubmit effects.
+It avoids imposing a 200-millisecond total-completion limit on the final offer.
+Missing, refused, unknown or unsampled outcomes fail cohort qualification.
+The original 360-second helper deadline remains unchanged.
+
+During the observation tail, hostile send and search schedules continue at their
+original rates. Their additional offers and misses remain counted. Background
+refresh and supporting keepalives also continue. All eight Controllers must be
+current when observation ends. Results separately report commits within the
+fixed offer window, commits after it, tail duration, and completed messages per
+actual elapsed second. Tail commits never become in-window throughput. A passing
+cohort does not claim that its broader client completion delay is below the
+transport latency target. Only send/search refusals count as evidence of flood limits; supporting health
+refusals do not qualify that check. The recovery clock starts when the last
+hostile worker finishes. Joining supporting workers consumes that same original
+30-second recovery budget.
+
+The primary message-latency sample starts immediately before writing an already
+encoded message frame on an established authenticated stream. It ends when the
+complete acknowledgement payload arrives, before local response decoding. The
+sample is accepted only after verifying the committed acknowledgement's exact
+home, operation ID, action digest and event. Connection setup, Controller queue
+time, local persistence, frame encoding, response decoding and UI work are
+excluded. `p95MessageExchangeMs` must be below 500 milliseconds during normal
+traffic and below 1,000 milliseconds during the defined hostile workload.
+`messageExchangeLimitMs` reports the active limit;
+`messageExchangeP95Within500Ms` also retains the original strict comparison.
+Both phases retain complete direct coverage and every reliability requirement.
+The gate compares
+the original nanosecond samples without rounding. Every
+normal offered commit must have a direct exchange sample; missing samples are
+reported and cannot qualify the latency gate. Resolution, persisted retries and
+recovered deliveries do not manufacture an original exchange sample.
+
+`p95ScheduledToObservedCommitMs` separately reports usability delay from the
+scheduled offer until the Controller exposes its durable delivery. It includes
+queueing, preflight and local persistence. It is not the message-exchange latency
+and does not use either message-exchange gate. Per-Controller `completionMs` uses
+this broader boundary; supporting moderation completion keeps its separate
+one-second gate. Confirmed durable deliveries are published before trailing view
+reads finish; current room views remain a separate requirement for every
+Controller. Each request ID is bound to its observed operation
+ID and digest; an unrelated completion cannot count as its commit. All eight
+Controllers must also receive fresh messages from another account and finish
+with current selected-room state. State durations and snapshot revision counts
+are reported; revision counts are not presented as transport request counts.
+The helper cannot pass by reducing offered load or ignoring rejections.
+
+During overload, one agent offers up to ten signed protocol sends per
+second and the other agent offers two bounded sixteen-term searches per
+second. The flood stream permits at most eight outstanding sends; the query
+stream permits one outstanding search. Offers missed because of response time
+or the outstanding-work bound are counted. The eight Controllers remain active.
+The spare operator sends sixteen authenticated history requests, withholds reads for
+twelve seconds and then drains only bounded, request-bound signed responses.
+HRC uses authenticated pull delivery; this measures an unread response stream,
+not an unimplemented push fan-out queue. The moderator silences and unsilences
+the flood actor during the phase; both commits must take less than one second.
+A pass requires the flood to exercise actual rate/overload refusal and the
+active silence restriction, as well as the unaffected-client targets. A transport
+or local failure that stops either hostile schedule invalidates that overload
+measurement, even if earlier offers received the required refusals. Disconnecting
+an abusive stream may be a legitimate service response; the helper cannot use the
+remaining interval without that pressure to claim sustained-load qualification.
+
+Recipient ignore is enabled before the flood and rechecked through history and
+indexed search, with an unfiltered search proving the retained marker exists.
+The eighth Controller must never display an event from that ignored flood actor.
+Four subsequent connection openings and closures test bounded churn while an
+unaffected endpoint commits messages. Typed temporary admission refusals are
+recorded; the helper does not infer a particular connection rate policy from them.
+Additional authenticated streams receive a malformed CBOR frame
+and an oversized length header; observed closure must be distinguishable from a
+local timeout or authority failure. Two real agent identities exercise repeated
+causal-trigger rejection and the maximum four-effect depth. Default bot
+response suppression, notifications, Unicode editing, confidential conversation
+and federation behavior retain their separately identified functional evidence;
+the load helper does not claim to repeat them.
+
+Normal sends use the actual Controller command and durable Client path. Staging may retry
+only the exact saved operation identifier and digest, through product resolution
+and matching certified absence. Before a community setup message is prepared,
+a retryable preparation-read failure can reconnect and repeat preparation within
+the same absolute setup end. A successful preparation returns its saved identity
+and signed bytes once; subsequent uncertainty uses the existing exact-outcome path.
+Storage, authentication and permanent policy failures stop preparation. The helper
+never redispatches an offered send;
+the production Controller retains and resolves its original uncertain effects.
+During setup, a temporary refusal of an outcome-resolution query keeps the
+original effect pending and uses the original setup deadline. A resolver rejection
+or unknown result fails setup with a separate bounded diagnostic; it cannot be
+reported as the original effect's completion. Only the production client can
+resubmit the original bytes after a verified absence result.
+
+Startup emits connection-dispatch times and at most eight observed state changes
+per Controller, using host boot milliseconds for correlation with transport
+logs. These are published snapshot observations, not internal request timings.
+They include connection state, inspection staleness, privacy presence and whether
+the selected room is current. They contain no account IDs, room IDs, message
+content or keys. Startup logging does not change admission, polling cadence,
+retries or measurement bounds. Phase start/result and recovery records also
+include `observationBootMs`. These timestamps mark report observations, not exact
+scheduled measurement boundaries or internal request timings.
+
+Deliberately hostile protocol offers use the authenticated stream without a
+durable retry loop. The flood keeps at most eight signed requests outstanding
+on its single existing stream, so offering the next message need not wait for
+the previous reply. Every reply must match the home, operation ID and action
+digest after signature verification. A full window or missed schedule slot is
+reported as a missed offer. The query actor retains sequential submission so
+an additional query cannot be mistaken for in-flight search cancellation.
+At the phase boundary the flood stops new offers and drains only existing
+requests for at most five seconds. An invalid reply, transport failure or
+unanswered request fails pressure qualification. The peak pending count and
+unanswered count remain visible; a cost refusal does not excuse later failure.
+This drain is part of the hostile worker's lifetime and precedes the existing
+recovery clock. The original offer rate and cohort deadlines do not change.
+Recovery waits for the original offered effects to resolve, then submits one new
+marker through each sending Controller. All eight Controllers must become current
+and receive a remote recovery marker. Its thirty-second measurement starts at attack stop,
+including any wait for authority/transport health; a slow prerequisite does not
+silently move that clock.
+
+The parent samples only the HRC service's `/proc` RSS and thread count every
+200 milliseconds. Peak RSS must remain at or below 512 MiB; HyperNet and helper
+processes are excluded and thread count is reported without an invented limit.
+Each phase emits bounded JSON metrics before evaluating its result. Failures,
+partial output, output caps and the final service shutdown remain inspectable.
+Controller wire bytes are not observed. Supporting-session signed request sizes
+and decoded response sizes exclude hidden preflight traffic,
+response COSE overhead and HyperNet transport overhead. The slow-reader and
+invalid-frame cases separately report directly observed frame or byte counts.
+Internal queue occupancy, link saturation and total network amplification are
+not observable here and are explicitly unqualified. No product limits change
+when a measured threshold fails.
+
 `NativeConversation.py` drives the shipped HRC CLI against three independently
 admitted HyperNet principals: two humans and an agent. The fixture provisions
 real Core/Suite application service consent, service-scoped grants, retained
@@ -16,12 +222,20 @@ One isolated acknowledgement-loss case uses `CompanionFault.py`. The fixture
 temporarily moves one outgoing companion to a sibling private directory and
 places the proxy at its original local socket path. The proxy forwards exact
 control requests and responses, real verified peer context, and HRC payloads.
-After explicit arming it discards one complete HRC Response frame and closes the
-connection. It never creates identities, authority evidence or service results.
+After explicit arming with the service's public descriptor key and target room,
+it observes bounded canonical Action envelopes and discards only a correlated
+MessageSend committed response verified with that key. Home, operation ID and
+the exact signed Action payload digest must match; the acknowledgement must name
+a committed event. Preparatory reads, refusals, unrelated and unverified responses
+are forwarded unchanged. The selector uses the fixture's existing Python
+`cryptography` dependency, with at most 16 pending send correlations per connection,
+eight connections and the protocol's frame, nesting and collection limits. It
+never creates identities, authority evidence or service results.
 The driver verifies the actual committed event, the client's durable unresolved
 outbox, service restart, exact resolution and absence of duplicate publication.
-The ordinary companion is restored afterwards. Baseline conversation uses no
-proxy.
+The ordinary companion is restored afterwards. If restoration also fails after
+a scenario failure, the driver retains the original failure and records only a
+bounded secondary error category. Baseline conversation uses no proxy.
 
 `NativeLocalClient.rs`, built as the `native-local-client` example, optionally
 extends this same fixture with the production Controller used by the local
@@ -131,6 +345,38 @@ The baseline qualifies community conversations. The optional confidential helper
 below adds native encrypted client scenarios. Independently administered
 federation requires its own real integration scenario before release. A helper's
 presence or successful compilation is not a passing qualification result.
+
+### Stopped package upgrade only
+
+Set `configuration.upgradeBinary` or `HRC_NATIVE_UPGRADE_BINARY` to the new
+package's explicit `Bin/hrc`. The existing `configuration.binary` supplies the
+old package executable; the external fixture obtains it from `HRC_CHECK_BINARY`.
+`HRC_CONVERSATION_WORKFLOW` selects this driver directory. No upstream fixture
+change is required. Package and signature provenance remain the outer
+qualification's responsibility. The driver records SHA-256 hashes of both actual
+executables; it does not authenticate packages.
+
+The upgrade selector rejects missing, nonexecutable or identical executables,
+conflicting configuration/environment targets, other workflow-only selectors,
+and optional local/confidential client helpers. It never falls back to the normal
+workflow after an invalid selection. Without this selector, existing workflows
+are unchanged.
+
+This path uses ordinary admission, CLI service/profile creation and room join.
+It stores searchable Unicode history and an independent unsent Unicode draft,
+then uses the existing acknowledgement-loss fault to leave Bob's genuinely
+committed message unresolved locally. Only after an orderly service stop does
+it switch executables. Before restarting or resolving, the new executable must
+read the unchanged draft and exact pending operation ID/digest from the same
+guarded state. The resolution must identify the same committed event; a second
+resolution must be empty and history must contain one copy. Public acting account,
+endpoint and home identities, retained history and search event/content must
+survive. Session windows are ephemeral and are not compared. Final shutdown must
+also be orderly. Existing overall and subprocess deadlines remain in force.
+
+No bot, delegation, confidential, load or presentation workflow runs in this
+mode. It is CLI/service upgrade evidence; actual packaged GUI/TUI launches remain
+separate qualification checks. Use only the fixture's isolated state directories.
 
 
 ## Confidential conversation extension

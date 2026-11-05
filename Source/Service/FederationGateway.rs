@@ -153,7 +153,8 @@ pub(super) fn serve(
         proof.digest(),
         end,
         *expires_ms,
-        "GatewayAuthority",
+        admission::Request::transport(transport.network, principal, admission::Class::Interactive)
+            .named("GatewayAuthority"),
     )?;
     let context = GatewayContext::verify(
         &accepted,
@@ -242,7 +243,13 @@ fn exchange(
         action_digest,
         None,
         &Cancellation::default(),
-        "FederationExchange",
+        admission::Request::transport(
+            gateway.transport.network,
+            gateway.principal(),
+            admission::Class::Read,
+        )
+        .named("FederationExchange"),
+        None,
     )?;
     let mut response = Response {
         home: shared.config.descriptor.home,
@@ -256,12 +263,15 @@ fn exchange(
     };
     if check.permitted() {
         let privacy = privacy(&check)?;
-        let clock = shared.config.clock.sample().map_err(|_| Error::Clock)?;
-        let verified = shared
-            .home
-            .lock()
-            .map_err(|_| Error::State)?
-            .federation_verify(gateway, &envelope, &privacy, clock, &|| check.permitted());
+        let cancel = Cancellation::default();
+        let verified = match shared.operation_home(stream, &check, None, &cancel) {
+            Ok((mut home, clock)) => home
+                .federation_verify(gateway, &envelope, &privacy, clock, &|| {
+                    shared.operation_current(stream, &check, None, &cancel)
+                })
+                .map_err(failure),
+            Err(outcome) => Err(outcome),
+        };
         match verified {
             Ok(verified) => {
                 if (incoming.kind == FrameKind::CryptoFederation)
@@ -269,9 +279,9 @@ fn exchange(
                 {
                     return Err(Error::Frame);
                 }
-                response = execute_remote(shared, stream, &verified, clock, &check)?;
+                response = execute_remote(shared, stream, &verified, &check)?;
             }
-            Err(error) => response.outcome = failure(error),
+            Err(outcome) => response.outcome = outcome,
         }
     }
     let (kind, signed) = if incoming.kind == FrameKind::CryptoFederation {
@@ -297,27 +307,26 @@ fn execute_remote(
     shared: &Shared,
     stream: &Stream,
     verified: &federation::VerifiedRemoteSubmission,
-    clock: crate::clock::TimeBounds,
     check: &crate::hypernet::AuthorityCheck,
 ) -> Result<Response> {
     let cancel = Cancellation::default();
+    let end = (verified.action().action().operation == Operation::SearchQuery)
+        .then(|| crate::clock::boot_ms().map(|now| now + 10000))
+        .transpose()
+        .map_err(|_| Error::Clock)?;
     let execute = |cancel: &Cancellation| {
         let action = verified.action();
-        let outcome = match shared.home.try_lock() {
-            Ok(mut home) => match home.execute_remote_cancellable(
+        let outcome = match shared.operation_home(stream, check, end, cancel) {
+            Ok((mut home, clock)) => match home.execute_remote_cancellable(
                 verified,
                 clock,
-                &|| check.permitted(),
+                &|| shared.operation_current(stream, check, end, cancel),
                 cancel,
             ) {
                 Ok(response) => return response,
                 Err(_) => Outcome::Unknown,
             },
-            Err(_) => Outcome::Refused {
-                code: ErrorCode::Overloaded,
-                detail: "OperationBusy".into(),
-                retry_after_ms: Some(1000),
-            },
+            Err(outcome) => outcome,
         };
         Response {
             home: shared.config.descriptor.home,
@@ -326,10 +335,9 @@ fn execute_remote(
             outcome,
         }
     };
-    if verified.action().action().operation != Operation::SearchQuery {
+    let Some(end) = end else {
         return Ok(execute(&cancel));
-    }
-    let end = crate::clock::boot_ms().map_err(|_| Error::Clock)? + 10000;
+    };
     thread::scope(|scope| {
         let (sender, receiver) = std::sync::mpsc::sync_channel(1);
         let token = cancel.clone();
@@ -427,90 +435,122 @@ fn control(
         verified.digest(),
         None,
         &Cancellation::default(),
-        operation.name(),
+        admission::Request::transport(
+            gateway.transport.network,
+            gateway.principal(),
+            admission::Class::operation(*operation),
+        )
+        .named(operation.name()),
+        None,
     )?;
     let outcome = if check.permitted() {
         let privacy = privacy(&check)?;
-        let mut home = shared.home.lock().map_err(|_| Error::State)?;
-        let result = match operation {
-            Operation::FederationChallenge => {
-                let value: ChallengeRequest = body.deserialized().map_err(|_| Error::Frame)?;
-                if value.agreement != *reference {
+        let cancel = Cancellation::default();
+        match shared.operation_home(stream, &check, None, &cancel) {
+            Err(outcome) => outcome,
+            Ok((mut home, clock)) => {
+                if !clock.permits(*created_ms, *expires_ms) {
                     return Err(Error::Authentication);
                 }
-                home.federation_challenge(gateway, value.admission, value.subject, clock, &|| {
-                    check.permitted()
-                })
-                .and_then(|v| {
-                    Value::serialized(&v)
-                        .map_err(|_| federation::Error::Protocol(crate::protocol::Error::Encoding))
-                })
-            }
-            Operation::FederationSession => {
-                let value: RemoteSessionExchange = body.deserialized().map_err(|_| Error::Frame)?;
-                home.federation_open_remote(gateway, &value, &privacy, clock, &|| check.permitted())
-                    .and_then(|v| {
-                        Value::serialized(&v).map_err(|_| {
-                            federation::Error::Protocol(crate::protocol::Error::Encoding)
-                        })
-                    })
-            }
-            Operation::FederationIdentityPage => {
-                match body.deserialized().map_err(|_| Error::Frame)? {
-                    IdentityTransfer::Import { checkpoint, page } => home
-                        .federation_update_identity(
+                let permit = || {
+                    shared.operation_current(stream, &check, None, &cancel)
+                        && clock
+                            .refresh()
+                            .is_ok_and(|now| now.permits(*created_ms, *expires_ms))
+                };
+                let result = match operation {
+                    Operation::FederationChallenge => {
+                        let value: ChallengeRequest =
+                            body.deserialized().map_err(|_| Error::Frame)?;
+                        if value.agreement != *reference {
+                            return Err(Error::Authentication);
+                        }
+                        home.federation_challenge(
                             gateway,
-                            &IdentityImport {
-                                checkpoint,
-                                page,
-                                trust_anchor: None,
-                            },
+                            value.admission,
+                            value.subject,
                             clock,
-                            &|| check.permitted(),
+                            &permit,
                         )
                         .and_then(|v| {
                             Value::serialized(&v).map_err(|_| {
                                 federation::Error::Protocol(crate::protocol::Error::Encoding)
                             })
-                        }),
-                    IdentityTransfer::Freshness { lease } => home
-                        .federation_accept_freshness(gateway, &lease.0, clock, &|| {
-                            check.permitted()
                         })
+                    }
+                    Operation::FederationSession => {
+                        let value: RemoteSessionExchange =
+                            body.deserialized().map_err(|_| Error::Frame)?;
+                        home.federation_open_remote(gateway, &value, &privacy, clock, &permit)
+                            .and_then(|v| {
+                                Value::serialized(&v).map_err(|_| {
+                                    federation::Error::Protocol(crate::protocol::Error::Encoding)
+                                })
+                            })
+                    }
+                    Operation::FederationIdentityPage => {
+                        match body.deserialized().map_err(|_| Error::Frame)? {
+                            IdentityTransfer::Import { checkpoint, page } => home
+                                .federation_update_identity(
+                                    gateway,
+                                    &IdentityImport {
+                                        checkpoint,
+                                        page,
+                                        trust_anchor: None,
+                                    },
+                                    clock,
+                                    &permit,
+                                )
+                                .and_then(|v| {
+                                    Value::serialized(&v).map_err(|_| {
+                                        federation::Error::Protocol(
+                                            crate::protocol::Error::Encoding,
+                                        )
+                                    })
+                                }),
+                            IdentityTransfer::Freshness { lease } => home
+                                .federation_accept_freshness(gateway, &lease.0, clock, &permit)
+                                .and_then(|v| {
+                                    Value::serialized(&v).map_err(|_| {
+                                        federation::Error::Protocol(
+                                            crate::protocol::Error::Encoding,
+                                        )
+                                    })
+                                }),
+                            IdentityTransfer::Read { .. } => return Err(Error::Frame),
+                        }
+                    }
+                    Operation::FederationInspect => {
+                        let value: AdmissionRequest =
+                            body.deserialized().map_err(|_| Error::Frame)?;
+                        home.federation_find_admission(
+                            gateway,
+                            value.account,
+                            value.endpoint,
+                            value.binding_digest,
+                            clock,
+                            &permit,
+                        )
+                        .and_then(|v| {
+                            Value::serialized(&v).map_err(|_| {
+                                federation::Error::Protocol(crate::protocol::Error::Encoding)
+                            })
+                        })
+                    }
+                    Operation::FederationWithdraw => home
+                        .federation_withdraw_from_gateway(gateway, &verified, clock, &permit)
                         .and_then(|v| {
                             Value::serialized(&v).map_err(|_| {
                                 federation::Error::Protocol(crate::protocol::Error::Encoding)
                             })
                         }),
-                    IdentityTransfer::Read { .. } => return Err(Error::Frame),
+                    _ => return Err(Error::Frame),
+                };
+                match result {
+                    Ok(body) => Outcome::Result { body },
+                    Err(error) => failure(error),
                 }
             }
-            Operation::FederationInspect => {
-                let value: AdmissionRequest = body.deserialized().map_err(|_| Error::Frame)?;
-                home.federation_find_admission(
-                    gateway,
-                    value.account,
-                    value.endpoint,
-                    value.binding_digest,
-                    clock,
-                    &|| check.permitted(),
-                )
-                .and_then(|v| {
-                    Value::serialized(&v)
-                        .map_err(|_| federation::Error::Protocol(crate::protocol::Error::Encoding))
-                })
-            }
-            Operation::FederationWithdraw => home
-                .federation_withdraw_from_gateway(gateway, &verified, clock, &|| check.permitted())
-                .and_then(|v| {
-                    Value::serialized(&v)
-                        .map_err(|_| federation::Error::Protocol(crate::protocol::Error::Encoding))
-                }),
-            _ => return Err(Error::Frame),
-        };
-        match result {
-            Ok(body) => Outcome::Result { body },
-            Err(error) => failure(error),
         }
     } else {
         Outcome::Refused {

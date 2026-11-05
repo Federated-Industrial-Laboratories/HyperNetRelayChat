@@ -85,6 +85,80 @@ impl Worker {
         self.snapshot.privacy = Some(self.client.session()?.refresh_privacy()?);
         Ok(())
     }
+    pub(super) fn refresh_sent_room(&mut self, room: RoomId, direct_commit: bool) {
+        if direct_commit && self.coalescible_room(room) {
+            match &mut self.pending_room {
+                Some(pending) if pending.room == room => {
+                    pending.committed = pending.committed.saturating_add(1);
+                }
+                None => {
+                    self.pending_room = Some(PendingRoomRefresh {
+                        room,
+                        oldest: Instant::now(),
+                        committed: 1,
+                        assembly: None,
+                    });
+                }
+                // A changed target supersedes only its unfinished view work.
+                Some(_) => {
+                    self.clear_pending_room();
+                    let view = self.refresh_after_send(room);
+                    self.finish_view(view);
+                }
+            }
+            self.publish();
+        } else {
+            let view = self.refresh_after_send(room);
+            self.finish_view(view);
+        }
+    }
+    fn coalescible_room(&mut self, room: RoomId) -> bool {
+        room.home == self.client.profile.active_server().home
+            && self.snapshot.selected.as_ref().is_some_and(|view| {
+                view.summary.room == room && view.focus.is_none() && view.gap.is_none()
+            })
+            && self.grouped_room(room)
+    }
+    pub(super) fn pending_room_due(&self, now: Instant) -> bool {
+        self.pending_room.as_ref().is_some_and(|pending| {
+            pending.assembly.is_some()
+                || pending.committed >= 2
+                || now.saturating_duration_since(pending.oldest) >= Duration::from_secs(1)
+        })
+    }
+    pub(super) fn pending_room_allows(&mut self, command: &Command) -> bool {
+        let Some(room) = self.pending_room.as_ref().map(|pending| pending.room) else {
+            return true;
+        };
+        // These operations deliberately replace/close the current context.
+        matches!(
+            command,
+            Command::Connect | Command::Disconnect | Command::SelectService(_)
+        ) || (matches!(command, Command::Send { room: target, grant: None, .. } if *target == room)
+            && self.coalescible_room(room))
+    }
+    pub(super) fn clear_pending_room(&mut self) {
+        if let Some(pending) = self.pending_room.take()
+            && let Some(view) = &mut self.snapshot.selected
+            && view.summary.room == pending.room
+        {
+            // A discarded refresh cannot leave its unrefreshed room presented
+            // as current. The normal current read must restore that state.
+            view.stale = true;
+        }
+    }
+    pub(super) fn flush_pending_room(&mut self) {
+        let Some(mut pending) = self.pending_room.take() else {
+            return;
+        };
+        let view = self.update_view(|worker| worker.room_refresh_turn(&mut pending));
+        match view {
+            Ok(false) => self.pending_room = Some(pending),
+            Ok(true) => {}
+            Err(error) => self.finish_view(Err(error)),
+        }
+        self.publish();
+    }
     pub(super) fn refresh_after_send(&mut self, room: RoomId) -> Result<()> {
         self.update_view(|worker| {
             if worker.grouped_room(room) {
@@ -211,6 +285,7 @@ impl Worker {
         self.update_view(|worker| worker.select_current(room))
     }
     fn select_current(&mut self, room: RoomId) -> Result<()> {
+        self.selected_catchup = None;
         let summary = self
             .snapshot
             .rooms
@@ -408,7 +483,7 @@ impl Worker {
                 return Err(Error::Offline);
             }
             if crate::clock::boot_ms().map_err(|_| Error::Clock)? >= end {
-                return Err(Error::Network(super::super::network::Error::Transport));
+                return Err(Error::ReadDeadlineExpired);
             }
             let result = read(
                 self,
@@ -447,7 +522,7 @@ impl Worker {
                         return Err(Error::Offline);
                     }
                     if crate::clock::boot_ms().map_err(|_| Error::Clock)? >= end {
-                        return Err(Error::Network(super::super::network::Error::Transport));
+                        return Err(Error::ReadDeadlineExpired);
                     }
                     return Ok(page);
                 }

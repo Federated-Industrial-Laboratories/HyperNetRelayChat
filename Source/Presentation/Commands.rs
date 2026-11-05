@@ -456,7 +456,7 @@ pub fn parse(
             })
         }
         "/msg" | "/whisper" => {
-            return Err("Confidential direct conversations are unavailable in this build");
+            return Err("Choose a recipient with /msg ACCOUNT or /whisper ACCOUNT");
         }
         _ => {
             return Err(

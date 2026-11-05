@@ -5,6 +5,7 @@ The fixture supplies only HyperNet prerequisites and bounded transport faults.
 Every HRC registration, permission change, message and query uses the executable.
 No database keys, signing secrets or private SQL state are read by this driver.
 """
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -106,7 +107,7 @@ class Conversation:
         assert ready['status'] == 'Ready' and ready['home'] == self.home, ready
         self.record(dict(case='HrcServiceReady', passed=True, home=self.home))
 
-    def stop(self):
+    def stop(self, require_clean=False):
         if self.server is not None:
             if self.server.poll() is None:
                 self.server.terminate()
@@ -117,9 +118,13 @@ class Conversation:
                 out, err = self.server.communicate(timeout=5)
                 raise AssertionError('HRC service did not stop within its cleanup budget')
             assert len(out) <= 65536 and len(err) <= 65536
-            self.record(dict(case='HrcServiceStopped', exitCode=self.server.returncode,
+            exit_code = self.server.returncode
+            self.record(dict(case='HrcServiceStopped', exitCode=exit_code,
                              stdout=out.decode(errors='replace'), stderr=err.decode(errors='replace')))
             self.server = None
+            if require_clean:
+                assert exit_code == 0, 'HRC service did not complete orderly shutdown'
+                assert json.loads(out) == dict(status='Stopped'), 'Missing orderly shutdown result'
 
     def setup(self):
         companions = self.config['companions']
@@ -128,6 +133,7 @@ class Conversation:
             '--network', self.home['network']['network'], '--incarnation', self.home['network']['incarnation'],
             '--service', self.home['service'], *self.clock(companions['Alice']['directory']))
         assert descriptor['home'] == self.home
+        self.service_signing_key = descriptor['signingKey']
         accounts = {}
         for name in ('Alice', 'Bob', 'Agent'):
             invitation = self.exchange / (name+'Invitation.json')
@@ -187,6 +193,27 @@ class Conversation:
         return reference, exported
 
     def main(self):
+        upgrade = self.upgrade_selection()
+        if upgrade is not None:
+            self.stopped_upgrade(*upgrade)
+            return
+        load_only = self.config.get('loadOnly', False)
+        assert isinstance(load_only, bool), 'loadOnly must be boolean'
+        load_setting = os.environ.get('HRC_NATIVE_LOAD_ONLY', '0')
+        assert load_setting in ('0', '1'), 'Invalid load workflow selection'
+        if load_only or load_setting == '1':
+            assert not (self.config.get('localClientOnly', False) or
+                        self.config.get('confidentialClientOnly', False) or
+                        os.environ.get('HYPERNET_HRC_LOCAL_CLIENT_ONLY', '0') == '1' or
+                        os.environ.get('HRC_NATIVE_CONFIDENTIAL_ONLY', '0') == '1'), 'Select one independent workflow'
+            binary = self.config.get('loadClientBinary') or os.environ.get('HRC_NATIVE_LOAD_CLIENT')
+            assert binary, 'Load workflow requires its executable'
+            import importlib.util
+            spec = importlib.util.spec_from_file_location('NativeLoad', Path(__file__).with_name('NativeLoad.py'))
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            module.run(self, binary)
+            return
         self.setup()
         room = self.room('Native room')
         only_local = self.config.get('localClientOnly', False)
@@ -267,7 +294,7 @@ class Conversation:
         self.denied_send('Agent',room,'Expired permission effect',expiring,'OperationExpired')
         self.record(dict(case='NativeExpiredDelegationRefusesEffect',passed=True))
         self.filters(room)
-        self.stop(); self.start()
+        self.stop(require_clean=True); self.start()
         assert any(e['body'].get('text')==text for e in self.events('Alice',room,'café') if isinstance(e['body'],dict))
         self.acknowledgement_loss(room)
         self.local_client(room)
@@ -477,10 +504,98 @@ class Conversation:
         self.record(dict(case='NativeRecipientIgnoreAndRoomSilence',passed=True,
                          recipientSearchFiltered=True,sharedHistoryPreserved=True,publicationPrevented=True))
 
-    def acknowledgement_loss(self, room):
+    def upgrade_selection(self):
+        configured = 'upgradeBinary' in self.config
+        environment = 'HRC_NATIVE_UPGRADE_BINARY' in os.environ
+        if not (configured or environment):
+            return None
+        for key, variable in (
+                ('loadOnly', 'HRC_NATIVE_LOAD_ONLY'),
+                ('localClientOnly', 'HYPERNET_HRC_LOCAL_CLIENT_ONLY'),
+                ('confidentialClientOnly', 'HRC_NATIVE_CONFIDENTIAL_ONLY')):
+            value = self.config.get(key, False)
+            setting = os.environ.get(variable, '0')
+            assert isinstance(value, bool) and setting in ('0', '1'), 'Invalid workflow selection'
+            assert not value and setting == '0', 'Select one independent workflow'
+        assert not (self.local_client_binary() or self.confidential_client_binary()), 'Select one independent workflow'
+        choices = []
+        if configured:
+            choices.append(self.config['upgradeBinary'])
+        if environment:
+            choices.append(os.environ['HRC_NATIVE_UPGRADE_BINARY'])
+        paths = []
+        for value in choices:
+            assert isinstance(value, (str, os.PathLike)) and str(value), 'Missing upgrade executable'
+            path = Path(value).resolve(strict=True)
+            assert path.is_file() and os.access(path, os.X_OK), 'Upgrade executable unavailable'
+            paths.append(path)
+        assert all(path == paths[0] for path in paths), 'Conflicting upgrade executables'
+        old = Path(self.binary)
+        assert old.is_file() and os.access(old, os.X_OK), 'Original executable unavailable'
+        assert not old.samefile(paths[0]), 'Upgrade requires a different executable'
+        old_digest, new_digest = self.binary_digest(old), self.binary_digest(paths[0])
+        assert old_digest != new_digest, 'Upgrade requires different executable bytes'
+        return str(paths[0]), old_digest, new_digest
+
+    @staticmethod
+    def binary_digest(path):
+        with Path(path).open('rb') as source:
+            return hashlib.file_digest(source, 'sha256').hexdigest()
+
+    def stopped_upgrade(self, target, old_digest, new_digest):
+        self.record(dict(case='NativeStoppedUpgradeExecutables', oldSha256=old_digest, newSha256=new_digest))
+        self.setup()
+        room = self.room('Stopped upgrade room')
+        self.outcome(self.cli('UpgradeBobJoined', 'room', 'join', '--profile', self.profiles['Bob'],
+                              '--room', address(room)))
+        identities = {name: dict(home=self.sessions[name]['home'], acting=self.sessions[name]['acting'])
+                      for name in ('Alice', 'Bob')}
+        text = 'Upgrade café e\u0301 👩🏽‍🚀 مرحبا history'
+        sent = self.send('Alice', room, text)
+        self.outcome(sent)
+        before = self.events('Alice', room, 'café')
+        assert len(before) == 1 and before[0]['body']['text'] == text
+        assert before[0]['event'] == sent['outcome']['event']
+        assert [event for event in self.events('Alice', room)
+                if event['event'] == before[0]['event']] == before
+        draft_text = 'Independent unsent café e\u0301 👩🏽‍🚀 مرحبا draft'
+        self.cli('UpgradeDraftSaved', 'draft', 'save', '--profile', self.profiles['Alice'],
+                 '--room', address(room), '--text', draft_text)
+        draft = self.cli('UpgradeDraftBeforeStop', 'draft', 'get', '--profile', self.profiles['Alice'],
+                         '--room', address(room))
+        assert draft['draft'] == draft_text
+
+        def stopped(pending):
+            assert self.server is None, 'Upgrade requires a stopped service'
+            assert self.binary_digest(self.binary) == old_digest, 'Original executable changed'
+            assert self.binary_digest(target) == new_digest, 'Upgrade executable changed'
+            self.binary = target
+            assert self.cli('UpgradeDraftBeforeResolution', 'draft', 'get',
+                            '--profile', self.profiles['Alice'], '--room', address(room)) == draft
+            retained = self.cli('UpgradeOutboxBeforeResolution', 'outbox', '--profile', self.profiles['Bob'])
+            assert retained == [pending], 'Upgrade changed the exact pending operation'
+            assert not pending['held'] and not pending['abandoned'], 'Pending effect cannot be resolved'
+
+        self.acknowledgement_loss(room, stopped=stopped)
+        for name, expected in identities.items():
+            current = self.session(name)
+            assert dict(home=current['home'], acting=current['acting']) == expected, 'Upgrade changed identity'
+        assert self.events('Alice', room, 'café') == before, 'Upgrade changed indexed Unicode history'
+        assert [event for event in self.events('Alice', room)
+                if event['event'] == before[0]['event']] == before, 'Upgrade changed retained history'
+        assert self.cli('UpgradeDraftAfterResolution', 'draft', 'get', '--profile', self.profiles['Alice'],
+                        '--room', address(room)) == draft
+        self.stop(require_clean=True)
+        self.record(dict(case='NativeStoppedUpgrade', passed=True, oldSha256=old_digest, newSha256=new_digest,
+                         home=self.home, identities=identities, historyEvent=before[0]['event'],
+                         indexedUnicodeHistory=True, independentDraft=True, exactPendingResolution=True,
+                         cleanStops=True, noDirectFallback=True))
+
+    def acknowledgement_loss(self, room, stopped=None):
         proxy = self.controls['begin_ack_loss']('Bob')
+        primary_failure = None
         try:
-            proxy.arm()
+            proxy.arm(self.service_signing_key, self.home, room)
             text = 'Committed once despite lost acknowledgement'
             self.send('Bob',room,text,failure=True)
             assert proxy.dropped.wait(2), 'No actual service response was discarded'
@@ -490,17 +605,42 @@ class Conversation:
             assert len(before)==1
             assert pending[0]['operationId']==before[0]['operationId']
             assert pending[0]['actionDigest']==before[0]['actionDigest']
-            self.stop(); self.start()
+            self.stop(require_clean=True)
+            if stopped is not None:
+                stopped(pending[0])
+            self.start()
             resolved = self.cli('ResolveAfterRestart','resolve','--profile',self.profiles['Bob'])
             assert resolved, 'Exact persisted operation was not resolved'
-            self.cli('ResolveAgain','resolve','--profile',self.profiles['Bob'])
+            if stopped is not None:
+                assert len(resolved) == 1 and resolved[0]['home'] == self.home, 'Unexpected resolution response'
+                result = self.outcome(resolved[0], 'result')
+                assert result['operationId'] == pending[0]['operationId'], 'Resolution operation changed'
+                assert result['actionDigest'] == pending[0]['actionDigest'], 'Resolution digest changed'
+                assert result['outcome']['status'] == 'committed', 'Original effect is not committed'
+                assert result['outcome']['event'] == before[0]['event'], 'Resolution event changed'
+            again = self.cli('ResolveAgain','resolve','--profile',self.profiles['Bob'])
+            if stopped is not None:
+                assert again == [], 'Resolved operation remained pending'
             assert not self.cli('OutboxResolved','outbox','--profile',self.profiles['Bob'])
             after = self.events('Alice',room,text)
             assert len(after)==1 and after[0]['event']==before[0]['event']
             self.record(dict(case='NativeUnknownSendResolvesExactlyOnce',passed=True,
                              event=after[0]['event'],fault=proxy.evidence,serviceRestart=True))
+        except BaseException as error:
+            primary_failure = error
+            raise
         finally:
-            self.controls['end_ack_loss']('Bob',proxy)
+            try:
+                self.controls['end_ack_loss']('Bob',proxy)
+            except Exception as error:
+                if primary_failure is None:
+                    raise
+                # Keep the original scenario traceback; cleanup is separate bounded evidence.
+                try:
+                    self.record(dict(case='NativeAckLossCleanupFailed', secondary=True,
+                                     errorType=type(error).__name__[:64]))
+                except Exception:
+                    pass
 
     def authority_refusal(self, room):
         text = 'Preserved draft after HyperNet authority withdrawal'
@@ -556,5 +696,7 @@ def run(configuration, controls, record):
         except Exception as error:
             record(dict(case='NativeCompanionDiagnostics',available=False,error=type(error).__name__))
         raise
+    else:
+        workflow.stop(require_clean=True)
     finally:
         workflow.stop()

@@ -369,3 +369,390 @@ fn a_current_page_install_cannot_hide_an_existing_history_gap() {
     assert!(view.stale);
     assert_eq!(view.gap.as_deref(), Some("CursorHistoryGap"));
 }
+
+fn coalescing_worker() -> (Fixture, Worker, RoomId) {
+    let (fixture, mut worker, room) = worker();
+    worker
+        .client
+        .install_closed_view_test_session(&fixture.root);
+    worker.shared.stop.store(false, Ordering::Release);
+    worker.shared.disconnect.store(false, Ordering::Release);
+    (fixture, worker, room)
+}
+fn queued_send(room: RoomId) -> Command {
+    Command::Send {
+        room,
+        text: "next".into(),
+        mentions: vec![],
+        parent: None,
+        causation: None,
+        action: false,
+        grant: None,
+    }
+}
+fn retain_committed_send(worker: &mut Worker, room: RoomId, n: u8) -> Action {
+    let mut action = action();
+    action.operation_id.operation = Id::from_bytes([n; 32]);
+    let message: messaging::Send = action.body.deserialized().unwrap();
+    worker
+        .preserve_send_draft(room, &message.text, &message.mentions)
+        .unwrap();
+    let key = crate::service::files::key(
+        &worker
+            .client
+            .profile
+            .companion
+            .parent()
+            .unwrap()
+            .join("Endpoint.key"),
+    )
+    .unwrap();
+    let exact = verify_action(&sign_action(&action, &key).unwrap(), &key.verifying_key()).unwrap();
+    // This is the same exact durable draft binding used by Controller preparation.
+    worker
+        .client
+        .store
+        .write(|tx| {
+            super::super::super::outbox::prepare_transaction(
+                tx,
+                &exact,
+                &RetryWindow {
+                    id: action.operation_id.window,
+                    expires_ms: TimeBounds::test_now().upper_ms + 60000,
+                },
+                TimeBounds::test_now(),
+            )?;
+            super::super::super::outbox::bind_draft_transaction(tx, &action, &message)?;
+            Ok(crate::storage::Commit::new(
+                (),
+                b"exact deferred-view send".to_vec(),
+            ))
+        })
+        .unwrap();
+    outcome(
+        worker,
+        &action,
+        Outcome::Committed {
+            event: Some(Id::from_bytes([n.wrapping_add(1); 32])),
+            position: u64::from(n),
+            body: Value::Null,
+        },
+    )
+    .unwrap();
+    worker.clear_matching_draft(&action).unwrap();
+    worker.refresh_sent_room(room, true);
+    action
+}
+
+#[test]
+fn deferred_room_refresh_keeps_durable_delivery_and_draft_completion_immediate() {
+    let (_fixture, mut worker, room) = coalescing_worker();
+    let action = retain_committed_send(&mut worker, room, 101);
+    worker.complete(77, Ok(()));
+    worker.request = None;
+    let visible = worker.shared.snapshot.lock().unwrap().clone();
+    assert!(visible.updating && !worker.snapshot.updating);
+    assert!(!visible.selected.as_ref().unwrap().stale);
+    assert!(!visible.inspection.stale && !visible.inspection.filters_stale);
+    assert_eq!(
+        visible.deliveries.last().unwrap().operation_id,
+        action.operation_id
+    );
+    assert!(matches!(
+        visible.deliveries.last().unwrap().outcome,
+        Some(Outcome::Committed { .. })
+    ));
+    assert!(visible.completions.last().unwrap().error.is_none());
+    assert!(worker.client.pending().unwrap().is_empty());
+    assert!(worker.client.draft(room).unwrap().is_none());
+    assert!(
+        visible.selected.as_ref().unwrap().events.is_empty(),
+        "the acknowledgement must not invent a history event"
+    );
+
+    // A real deferred read fails against the closed fixture peer/missing clock.
+    // It cannot rewrite the completed send or recreate its durable outbox entry.
+    worker.flush_pending_room();
+    let visible = worker.shared.snapshot.lock().unwrap().clone();
+    assert!(!visible.updating && worker.pending_room.is_none());
+    assert!(visible.selected.as_ref().unwrap().stale);
+    assert_eq!(visible.status.as_ref().unwrap().code, "ViewRefreshFailed");
+    assert_eq!(visible.status.as_ref().unwrap().request_id, None);
+    assert!(visible.completions.last().unwrap().error.is_none());
+    assert!(matches!(
+        visible.deliveries.last().unwrap().outcome,
+        Some(Outcome::Committed { .. })
+    ));
+    assert!(worker.client.pending().unwrap().is_empty());
+    assert!(worker.client.draft(room).unwrap().is_none());
+}
+
+#[test]
+fn a_send_burst_keeps_the_first_deadline_and_stops_after_two_commits() {
+    let (_fixture, mut worker, room) = coalescing_worker();
+    retain_committed_send(&mut worker, room, 103);
+    let oldest = worker.pending_room.as_ref().unwrap().oldest;
+    assert!(!worker.pending_room_due(oldest + Duration::from_millis(999)));
+    assert!(worker.pending_room_due(oldest + Duration::from_secs(1)));
+    assert!(worker.pending_room_allows(&queued_send(room)));
+    retain_committed_send(&mut worker, room, 105);
+    assert_eq!(worker.pending_room.as_ref().unwrap().oldest, oldest);
+    assert!(worker.pending_room_due(Instant::now()));
+    assert_eq!(worker.client.pending().unwrap().len(), 0);
+    assert_eq!(worker.snapshot.deliveries.len(), 2);
+    let end = worker.poll;
+    worker.flush_pending_room();
+    assert!(worker.pending_room.is_none());
+    assert_eq!(
+        worker.poll, end,
+        "a targeted flush must not postpone metadata"
+    );
+    assert_eq!(worker.snapshot.deliveries.len(), 2);
+    assert!(worker.client.pending().unwrap().is_empty());
+}
+
+#[test]
+fn pending_progress_is_separate_from_nested_read_progress_and_stale_authority() {
+    let (_fixture, mut worker, room) = coalescing_worker();
+    worker.stale();
+    worker.refresh_sent_room(room, true);
+    worker
+        .update_view(|worker| {
+            worker.update_view(|_| Ok(()))?;
+            assert!(worker.snapshot.updating);
+            Ok(())
+        })
+        .unwrap();
+    assert!(!worker.snapshot.updating);
+    let visible = worker.shared.snapshot.lock().unwrap();
+    assert!(visible.updating);
+    assert!(visible.selected.as_ref().unwrap().stale && visible.inspection.stale);
+}
+
+#[test]
+fn incompatible_contexts_and_lost_capability_cannot_join_a_pending_burst() {
+    let (_fixture, mut worker, room) = coalescing_worker();
+    worker.refresh_sent_room(room, true);
+    let other = RoomId {
+        local: Id::from_bytes([111; 32]),
+        ..room
+    };
+    for command in [
+        queued_send(other),
+        Command::SelectRoom(room),
+        Command::LoadMore,
+        Command::Refresh,
+        Command::MarkRead { room, sequence: 1 },
+        Command::Resynchronise,
+        Command::SetTopic {
+            room,
+            topic: "new".into(),
+        },
+    ] {
+        assert!(!worker.pending_room_allows(&command));
+    }
+    worker.snapshot.selected.as_mut().unwrap().gap = Some("CursorHistoryGap".into());
+    assert!(!worker.pending_room_allows(&queued_send(room)));
+    worker.snapshot.selected.as_mut().unwrap().gap = None;
+    worker.snapshot.selected.as_mut().unwrap().focus = Some(Id::from_bytes([112; 32]));
+    assert!(!worker.pending_room_allows(&queued_send(room)));
+    worker.snapshot.selected.as_mut().unwrap().focus = None;
+    worker.client.disconnect();
+    assert!(!worker.pending_room_allows(&queued_send(room)));
+    worker.offline();
+    assert!(worker.pending_room.is_none());
+    assert!(!worker.shared.snapshot.lock().unwrap().updating);
+    assert!(worker.snapshot.selected.as_ref().unwrap().stale);
+}
+
+#[test]
+fn pending_room_work_preserves_due_metadata_turns_and_existing_cache_maintenance() {
+    let (_fixture, mut worker, room) = coalescing_worker();
+    worker.refresh_sent_room(room, true);
+    let oldest = worker.pending_room.as_ref().unwrap().oldest;
+    worker.poll = Instant::now() - Duration::from_secs(6);
+    let poll = worker.poll;
+    // The ordinary first finite metadata turn performs local retention and starts
+    // its assembly even though one compatible send is awaiting its room view.
+    worker.tick();
+    assert!(worker.refresh_cycle.is_some());
+    assert!(worker.metadata_due());
+    assert_eq!(worker.poll, poll);
+    assert_eq!(worker.pending_room.as_ref().unwrap().oldest, oldest);
+    assert!(worker.shared.snapshot.lock().unwrap().updating);
+    // A failed scope still clears the pending context, never its committed effects.
+    worker.error(Error::Input);
+    assert!(worker.pending_room.is_none());
+    assert!(worker.snapshot.selected.as_ref().unwrap().stale);
+}
+
+#[test]
+fn worker_drains_a_full_or_aged_burst_before_starting_another_queued_send() {
+    for aged in [false, true] {
+        let (_fixture, mut worker, room) = coalescing_worker();
+        retain_committed_send(&mut worker, room, 114);
+        if aged {
+            worker.pending_room.as_mut().unwrap().oldest = Instant::now() - Duration::from_secs(1);
+        } else {
+            retain_committed_send(&mut worker, room, 116);
+        }
+        worker.request = None;
+        // Deliberately offline intent permits the next command's explicit Offline
+        // result after the deferred read closes this failed fixture session.
+        worker.desired = false;
+        let committed = worker.snapshot.deliveries.len();
+        let (sender, receiver) = mpsc::sync_channel(32);
+        let (local_sender, local_receiver) = mpsc::sync_channel(32);
+        sender.send(Queued::new(88, queued_send(room))).unwrap();
+        worker.shared.queue.lock().unwrap().pending = 1;
+        drop(sender);
+        drop(local_sender);
+        worker.run(receiver, local_receiver);
+        let completion = worker
+            .snapshot
+            .completions
+            .iter()
+            .find(|c| c.request_id == 88)
+            .unwrap();
+        assert_eq!(completion.error.as_ref().unwrap().code, "Offline");
+        assert_eq!(worker.snapshot.deliveries.len(), committed);
+        assert!(
+            worker
+                .snapshot
+                .deliveries
+                .iter()
+                .all(|d| matches!(d.outcome, Some(Outcome::Committed { .. })))
+        );
+        assert!(worker.client.pending().unwrap().is_empty());
+        assert_eq!(worker.client.draft(room).unwrap().as_deref(), Some("next"));
+        assert!(worker.pending_room.is_none());
+    }
+}
+
+#[test]
+fn idle_worker_flushes_one_committed_send_without_waiting_for_another_command() {
+    let (_fixture, mut worker, room) = coalescing_worker();
+    retain_committed_send(&mut worker, room, 118);
+    worker.complete(77, Ok(()));
+    worker.request = None;
+    worker.desired = false;
+    let shared = Arc::clone(&worker.shared);
+    let (sender, receiver) = mpsc::sync_channel(32);
+    let (local_sender, local_receiver) = mpsc::sync_channel(32);
+    let flushed = thread::scope(|scope| {
+        let current = &mut worker;
+        let task = scope.spawn(move || current.run(receiver, local_receiver));
+        let until = Instant::now() + Duration::from_secs(2);
+        let flushed = loop {
+            if shared
+                .snapshot
+                .lock()
+                .unwrap()
+                .status
+                .as_ref()
+                .is_some_and(|s| s.code == "ViewRefreshFailed")
+            {
+                break true;
+            }
+            if Instant::now() >= until {
+                break false;
+            }
+            thread::yield_now();
+        };
+        shared.stop.store(true, Ordering::Release);
+        drop(sender);
+        drop(local_sender);
+        task.join().unwrap();
+        flushed
+    });
+    assert!(flushed);
+    assert!(worker.pending_room.is_none());
+    assert!(worker.snapshot.completions.last().unwrap().error.is_none());
+    assert!(worker.client.pending().unwrap().is_empty());
+    assert!(matches!(
+        worker.snapshot.deliveries.last().unwrap().outcome,
+        Some(Outcome::Committed { .. })
+    ));
+}
+
+#[test]
+fn changing_selection_discards_pending_work_and_reports_its_own_current_read() {
+    let (fixture, mut worker, room) = coalescing_worker();
+    let _clock = worker.client.start_view_test_clock(&fixture.root);
+    retain_committed_send(&mut worker, room, 120);
+    worker.complete(77, Ok(()));
+    worker.request = None;
+    worker.desired = false;
+    let mut other = worker.snapshot.rooms[0].clone();
+    other.room.local = Id::from_bytes([122; 32]);
+    worker.snapshot.rooms.push(other.clone());
+    let (sender, receiver) = mpsc::sync_channel(32);
+    let (local_sender, local_receiver) = mpsc::sync_channel(32);
+    sender
+        .send(Queued::new(89, Command::SelectRoom(other.room)))
+        .unwrap();
+    worker.shared.queue.lock().unwrap().pending = 1;
+    drop(sender);
+    drop(local_sender);
+    worker.run(receiver, local_receiver);
+    // The old background work is discarded. Selection performs its own current
+    // read against the closed fixture peer and reports that failure on itself.
+    assert_eq!(
+        worker
+            .snapshot
+            .completions
+            .iter()
+            .find(|c| c.request_id == 89)
+            .unwrap()
+            .error
+            .as_ref()
+            .unwrap()
+            .code,
+        "TransportUnavailable",
+    );
+    assert_eq!(
+        worker.snapshot.selected.as_ref().unwrap().summary.room,
+        other.room
+    );
+    assert!(worker.snapshot.selected.as_ref().unwrap().stale);
+    assert!(worker.pending_room.is_none());
+    assert!(worker.client.pending().unwrap().is_empty());
+    assert_eq!(worker.snapshot.deliveries.len(), 1);
+    assert!(
+        worker
+            .snapshot
+            .completions
+            .iter()
+            .find(|c| c.request_id == 77)
+            .unwrap()
+            .error
+            .is_none()
+    );
+}
+
+#[test]
+fn ineligible_send_paths_keep_their_synchronous_view_failure() {
+    for case in 0..5 {
+        let (_fixture, mut worker, room) = coalescing_worker();
+        match case {
+            0 => worker.snapshot.selected.as_mut().unwrap().gap = Some("CursorHistoryGap".into()),
+            1 => worker.snapshot.selected.as_mut().unwrap().focus = Some(Id::from_bytes([123; 32])),
+            2 => worker.snapshot.rooms[0].confidentiality = RoomConfidentiality::PrivateGroup,
+            3 => worker.client.disconnect(),
+            _ => {}
+        }
+        worker.refresh_sent_room(room, case != 4);
+        assert!(worker.pending_room.is_none());
+        assert_eq!(
+            worker.snapshot.status.as_ref().unwrap().code,
+            "ViewRefreshFailed"
+        );
+        assert!(worker.snapshot.selected.as_ref().unwrap().stale);
+        if case == 0 {
+            assert_eq!(
+                worker.snapshot.selected.as_ref().unwrap().gap.as_deref(),
+                Some("CursorHistoryGap")
+            );
+        }
+    }
+}

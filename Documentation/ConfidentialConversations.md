@@ -1,9 +1,12 @@
 # Confidential conversation operations
 
-This document fixes the service and client integration contract for the existing
-[persistent MLS boundary](CryptoRuntime.md). Implementation and native qualification
-are in progress. Direct conversations and private groups use the same ordered
-encrypted-room lifecycle. Community rooms remain service-readable.
+This document describes the implemented service and client integration contract
+for the [persistent MLS boundary](CryptoRuntime.md). Encrypted direct conversations
+and private groups use the same ordered encrypted-room lifecycle. Community rooms
+remain service-readable.
+
+HRC 0.1.0 qualification covers the [bounded Linux profile](IntegrationProfile.md#8-linux-pilot-qualification)
+and the separately recorded conversation and federation workflows.
 
 ## Admission and identity
 

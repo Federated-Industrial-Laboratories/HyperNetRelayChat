@@ -6,35 +6,47 @@ mod exchange_timing;
 
 // A fixture session supplies bindings only; its closed peer cannot acknowledge an effect.
 pub(in crate::client) fn closed_view_session(root: &std::path::Path, profile: &Profile) -> Session {
-    let (companion, stream) =
-        crate::client::controller::completion_tests::session_reuse::retained_handle(root);
+    let (session, peer) = live_view_session(root, profile);
+    drop(peer);
+    session
+}
+
+pub(in crate::client) fn live_view_session(
+    root: &std::path::Path,
+    profile: &Profile,
+) -> (Session, std::os::unix::net::UnixStream) {
+    let (companion, stream, peer) =
+        crate::client::controller::completion_tests::session_reuse::retained_peer(root);
     let action = crate::client::tests::action();
     let server_key = VerifyingKey::from_bytes(profile.server.signing_key.as_bytes()).unwrap();
-    Session {
-        companion,
-        stream,
-        server_key,
-        origin_key: server_key,
-        origin: action.home,
-        clock: profile.clock.clone(),
-        remote: None,
-        ready: SessionReady {
-            home: action.home,
-            session: Id::from_bytes([70; 32]),
-            challenge_digest: Id::from_bytes([71; 32]),
-            window: RetryWindow {
-                id: action.operation_id.window,
-                expires_ms: clock::TimeBounds::test_now().upper_ms + 60000,
+    (
+        Session {
+            companion,
+            stream,
+            server_key,
+            origin_key: server_key,
+            origin: action.home,
+            clock: profile.clock.clone(),
+            remote: None,
+            ready: SessionReady {
+                home: action.home,
+                session: Id::from_bytes([70; 32]),
+                challenge_digest: Id::from_bytes([71; 32]),
+                window: RetryWindow {
+                    id: action.operation_id.window,
+                    expires_ms: clock::TimeBounds::test_now().upper_ms + 60000,
+                },
+                maximum_frame_bytes: ORDINARY_FRAME_BYTES as u64,
+                maximum_crypto_frame_bytes: CRYPTO_FRAME_BYTES as u64,
+                capabilities: vec![CLIENT_VIEWS_CAPABILITY.into()],
+                account_revision: 1,
+                binding_digest: action.actor.acting().binding_digest,
+                acting: action.actor.acting().clone(),
+                classification: AccountClass::Human,
             },
-            maximum_frame_bytes: ORDINARY_FRAME_BYTES as u64,
-            maximum_crypto_frame_bytes: CRYPTO_FRAME_BYTES as u64,
-            capabilities: vec![CLIENT_VIEWS_CAPABILITY.into()],
-            account_revision: 1,
-            binding_digest: action.actor.acting().binding_digest,
-            acting: action.actor.acting().clone(),
-            classification: AccountClass::Human,
         },
-    }
+        peer,
+    )
 }
 
 #[test]

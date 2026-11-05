@@ -1,9 +1,18 @@
 # Service and client setup
 
-The Linux command-line workflow uses existing HyperNet Core 0.10.1 and Suite 0.10.0
+The Linux command-line workflow requires a HyperNet Core 0.10.2 and Suite 0.10.1
 deployment. Its receiving application service and each caller require explicit
 HyperNet admission, current grants, and a configured `hrc/1` stream binding or
 target. HRC does not create application consent or renew it automatically.
+
+When Core uses Suite's native authority connector, reserve capacity for its two
+independently admitted authority sessions in the selected relay and authority
+policies. Include other traffic sharing those policies. This does not increase
+the companion's sixteen application-stream slots. See the
+[integration profile](IntegrationProfile.md) for the distinct bounds.
+
+HRC 0.1.0 qualification covers the [bounded Linux profile](IntegrationProfile.md#8-linux-pilot-qualification)
+and the separately recorded conversation and federation workflows.
 
 The service is authoritative for accounts, rooms, delegation, moderation and
 ordered history. Each client owns a separate endpoint signing key and encrypted
@@ -13,7 +22,8 @@ authentication.
 
 ## Create a home service
 
-Build with the [repository instructions](../README.md). Use absolute canonical
+Install a [verified package](Installation.md) or build with the
+[repository instructions](../README.md). Use absolute canonical
 paths. Parent directories for configuration, invitation and registration files
 must already exist, belong to the current user and have mode `0700`. Files are
 created with mode `0600`. New service and profile directories must not exist.
@@ -67,12 +77,29 @@ Add `--diagnostics` to `service run` to report fixed lifecycle categories on
 standard error. Diagnostics contain no messages, account identifiers or keys.
 Failed authority observations include fixed disposition categories and monotonic
 deadline timings. Authentication failures identify their fixed validation stage.
-Output is limited to a burst of eight lines, one line per second thereafter and
-128 output attempts per process. The bounded diagnostic writer holds at most 32
-queued records of at most 1,024 bytes each, plus its current record and channel
-metadata. Producers discard saturated, closed or oversized output; service
-shutdown never waits for the output sink. Client errors distinguish local configuration and storage,
-HyperNet preparation, session authentication, clock and handshake failures.
+Lifecycle output is limited to a burst of eight lines, one line per second
+thereafter and 128 output attempts per process. The bounded diagnostic writer
+holds at most 32 queued records of at most 1,024 bytes each, plus its current
+record and channel metadata. Producers discard saturated, closed or oversized
+output; service shutdown never waits for the output sink. Client errors
+distinguish local configuration and storage, HyperNet preparation, session
+authentication, clock and handshake failures.
+
+The same opt-in flag separately samples verified local message sends at two per
+second, with a burst of four and at most 512 samples per process. One fixed
+`MessageTiming` record follows each sampled response write. `bootMs` is the
+dispatch observation; the process-local sample number is not an operation ID.
+Nanosecond spans cover complete frame receipt to dispatch, the entire authority
+check including its admission wait, remaining execution, response signing and
+encoding, and response write. `executeNs` excludes `authorityNs`; these spans
+sum to `totalNs`. The record contains only these timings, the fixed outcome
+variant and whether the write completed or failed. Each record is below 384
+bytes and uses the same nonblocking writer without consuming the lifecycle
+failure budget. Contention, clock or output failure, or response construction
+failure can omit a sample. Missing samples do not establish success. These are
+service processing spans, not delivery, client exchange latency, or UI timings;
+a completed response write does not prove recipient delivery.
+
 `AcceptWaitEnded/Timeout` can mean an ordinary idle wait; it does not establish a
 failed client operation. Periodic retention runs in one background task every
 30 seconds and writes only when expired state exists. Every operation still

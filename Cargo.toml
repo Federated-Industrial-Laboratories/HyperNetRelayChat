@@ -1,6 +1,6 @@
 [package]
 name = "hypernet-relay-chat"
-version = "0.1.0-dev.1"
+version = "0.1.0"
 edition = "2024"
 rust-version = "1.96"
 publish = false
@@ -25,6 +25,10 @@ path = "Tests/Integration/NativeConfidential.rs"
 [[example]]
 name = "native-federation-client"
 path = "Tests/Integration/NativeFederation.rs"
+
+[[example]]
+name = "native-load-client"
+path = "Tests/Integration/NativeLoad.rs"
 
 [dependencies]
 clap = { version = "4.6.7", features = ["derive"] }

@@ -13,7 +13,7 @@ agreement acceptance, explicit remote admissions, verified origin continuity,
 purpose-bound bootstrap and shared local/remote execution. Tests use two guarded
 home stores and actual signatures, delegation and MLS operations. Transport
 evidence in those domain tests is synthetic: it does not establish that both
-HyperNet legs work. The gateway/client integration and real two-network
+HyperNet legs work. The gateway and client paths are implemented. Real two-network
 qualification must complete before this document can describe a shipped or
 qualified federation runtime. The ordinary local handshake still authenticates
 locally enrolled endpoints only; remote execution has its own verified context.
@@ -399,12 +399,15 @@ an assertion. Immediately before signing, recheck the source stream, checkpoint
 heads, account generations and original check deadline.
 
 For conservative time conversion, sample the healthy clock with bounds
-`[L,U]` at source boot time `b`, bracketed so elapsed sampling time is included.
+`[L,U]` at source boot time `b`, bracketed by boot readings `start <= b <= after`.
 Let `d` be the earliest original local call/companion/receipt boot deadline.
 Set `sourceEvaluatedMs = L` and
-`sourceNotAfterMs <= L + max(0,d-b)`, also no later than the conservative
-authority/credential expiry. Record the bounded clock uncertainty; reject if
-it exceeds 250 ms or no positive safe interval remains. Do not use `U` to add
+`sourceNotAfterMs <= L + max(0,d-after)`, also no later than the conservative
+authority/credential expiry. Sampling and verification time therefore shorten
+remaining lifetime. Record `ceil((U-L)/2)` as the uncertainty of the captured
+observation; elapsed processing does not widen that already captured interval.
+Reject if uncertainty exceeds 250 ms or no positive safe interval remains.
+Do not use `U` to add
 permission lifetime. The represented positive interval is at most 5,000 ms.
 The home requires its current upper time bound to precede
 this expiry and all applicable credential/agreement/admission expiries.
@@ -417,6 +420,27 @@ challenge only within its still-valid home window; this never renews the old
 source check. The final home authorization is before the earliest bound.
 Durable completion may follow authorization; a late response does not imply
 that an effect was rejected.
+
+An origin can recertify the same prepared subject once when a currently permitted
+receipt leaves no safe assertion lifetime before forwarding. For an Action,
+it can also recertify once after an exactly bound, home-signed
+`Refused/Unavailable/SourceAuthorityExpired` response. This response rejects the
+source evidence before effect dispatch or challenge consumption. Both cases
+share one retry allowance, the same home challenge, exact Action bytes and
+original clipped forwarding end. The origin rechecks current account,
+checkpoint and endpoint generations before the new authority call and before
+signing. It honours the signed retry delay within that end; insufficient time
+returns the original refusal, including expiry while waiting to retry. That
+known refusal is retained only until the new attempt starts; it cannot replace
+an uncertain outcome from the new attempt. No new challenge or retry window is
+created.
+Expired or consumed challenges, changed identity, denial, unknown outcomes,
+transport failures, invalid signatures and other refusal details do not enter
+this path. Session-control destination refusals retain their existing handling.
+A second short receipt or source-expiry response ends the attempt. The new check
+never extends the old receipt, and every destination effect check remains in
+place. This bounded recovery cannot guarantee availability within the remaining
+permission lifetime.
 
 `sourcePrivacy` is a closed normalized record from the verified fresh incoming
 observation: `{endpointMode, transportProtection, relayArrival, provenance,
@@ -573,6 +597,23 @@ still current at the origin. Dirty-first work and account-ordered round-robin
 renewal are separate bounded queries; a busy account cannot hide untouched
 recipients from renewal. No network operation holds the home writer.
 
+Foreground forwarding and freshness maintenance share one admitted gateway
+stream per configured agreement. Agreement lookup does not depend on the stream
+being idle. At most 32 foreground calls, including the active call, wait in FIFO
+order under their original operation deadlines. Known source cancellation and
+service shutdown remove waiting calls. Admission does not grant authority: the
+current agreement is checked after waiting, and the existing current-authority
+and final effect checks still apply.
+
+The maintenance worker reserves one turn without blocking work on the other
+configured route. When foreground and maintenance work are both waiting, their
+completed turns alternate. A maintenance reservation persists until its next
+ordinary poll, and shutdown withdraws it. The current owner retains the stream
+through the complete correlated request and response; no second stream or
+parallel exchange is introduced. Maintenance keeps its existing bounded cycle
+and polling interval. A slow exchange can still outlast an identity observation;
+the five-second freshness bound and resulting availability barrier are unchanged.
+
 The receiving home accepts observations only for independently pinned,
 completely imported identities in that gateway's admission scope. It checks
 the original signed expiry and records a conservative receiving boot deadline.
@@ -643,7 +684,7 @@ actor/represented-account budgets into a single gateway identity.
 | Identity propagation | At most 256 persistent watched accounts per agreement; pages and freshness batches at most 32 accounts. Freshness lasts at most five seconds and cannot survive a home restart without new authenticated observation. Missed renewal is an availability barrier, not permission to retain stale recipients. |
 | Pending proof work | One page fetch per peer, two service-wide; at most 256 KiB unverified staging. No proof fetch holds a home transaction or extends a challenge. |
 | Checks and handshakes | At most four fresh checks per companion, one per incoming stream, including ordinary clients; respect the upstream serialized endpoint read. At most four HRC handshakes service-wide. |
-| Exchange | One active forwarded operation per gateway stream; queue before challenge issuance. At most four pending home challenges service-wide, two per gateway and one per exact subject. |
+| Exchange | One active exchange per gateway stream; at most 32 active or waiting foreground calls per route, queued before challenge issuance and sharing fair turns with freshness maintenance. At most four pending home challenges service-wide, two per gateway and one per exact subject. |
 | Challenge admission | Gateway sustained two requests/s, burst four, plus actor/represented-account and service budgets. Invalid/expired attempts still consume bounded admission work. |
 | Controls | Existing four costly workers with one reserved for authenticated controls; 64 KiB reserved within the global queue budget, four control operations/s and 8-KiB maximum reserved-control frames. Proof pages use ordinary metadata budgets, not this reserve. |
 | Queues and output | Existing 32 pending operations/actor, 64/room, 512 KiB outbound/stream and 16-MiB aggregate queue cap; 256 KiB/s output/peer and 1 MiB/s service. All lower applicable bounds win. |
@@ -655,6 +696,19 @@ separate cheap pre-authentication budgets before that point. Shared relay
 addresses are not actor identities. Diagnostic output contains fixed categories
 and bounded references, never message plaintext, keys or admission secrets.
 No response automatically generates another response or onward federation event.
+
+When service diagnostics are enabled, failed origin authority conversions emit
+`FederationOriginAuthorityFailure` through the existing rate-limited, 128-record
+service budget. Fixed reason codes distinguish identity checkpoint changes,
+identity-export checks and page failures, challenge validity, and assertion
+evidence, binding, lifetime, privacy and final currentness. Records include only
+the existing authority freshness fields when a check was returned. Checkpoint
+mismatch, challenge expiry and failed check calls have no `AuthorityCheck`, so
+their authority field is null. No identity, message, key or nonce data is added.
+Successful forwarding emits no such record. These local categories do not change
+the signed public `Unavailable` / `CurrentAuthorityUnavailable` refusal or its
+retry guidance. Missing diagnostic output is not evidence of successful authority;
+the existing budget and best-effort sink can omit records.
 
 Implementation qualification must demonstrate two independently administered
 networks and distinct actual gateway admissions, including refusal on either

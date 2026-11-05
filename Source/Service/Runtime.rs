@@ -24,6 +24,10 @@ mod federation_gateway;
 mod federation_origin;
 #[path = "Handshake.rs"]
 mod handshake;
+#[path = "HomeAccess.rs"]
+mod home_access;
+#[path = "MessageTiming.rs"]
+mod message_timing;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -96,7 +100,7 @@ const CAPABILITIES: &[&str] = &[
 struct Shared {
     config: Config,
     signer: SigningKey,
-    home: Mutex<Home>,
+    home: home_access::HomeAccess,
     companion: Companion,
     boot: Id,
     handshakes: AtomicUsize,
@@ -104,18 +108,114 @@ struct Shared {
     diagnostics: Option<Mutex<Budget>>,
     diagnostic_lines: AtomicUsize,
     authority_admission: admission::Admission,
-    federation_routes: Vec<Mutex<federation_origin::Outbound>>,
+    federation_routes: Vec<federation_origin::OutboundRoute>,
     stop: Arc<AtomicBool>,
 }
 impl Shared {
+    fn operation_current(
+        &self,
+        stream: &Stream,
+        check: &crate::hypernet::AuthorityCheck,
+        end: Option<u64>,
+        cancel: &Cancellation,
+    ) -> bool {
+        !self.stop.load(Ordering::Acquire)
+            && !cancel.is_cancelled()
+            && stream.check_authority_supported()
+            && current(check, end)
+    }
+    fn operation_home(
+        &self,
+        stream: &Stream,
+        check: &crate::hypernet::AuthorityCheck,
+        end: Option<u64>,
+        cancel: &Cancellation,
+    ) -> std::result::Result<(home_access::Guard<'_>, clock::TimeBounds), Outcome> {
+        let end = check
+            .attestation()
+            .map(|evidence| evidence.not_after_boot_ms())
+            .map_or(end, |receipt_end| {
+                Some(end.map_or(receipt_end, |outer| outer.min(receipt_end)))
+            });
+        let home = self
+            .home
+            .acquire(end, || self.operation_current(stream, check, end, cancel))
+            .map_err(home_access::Error::refusal)?;
+        // Time captured before queueing is not the operation's current clock sample.
+        let now = self.config.clock.sample().map_err(|_| Outcome::Refused {
+            code: ErrorCode::Unavailable,
+            detail: "Clock".into(),
+            retry_after_ms: Some(1000),
+        })?;
+        if !self.operation_current(stream, check, end, cancel) {
+            return Err(home_access::Error::Invalidated.refusal());
+        }
+        Ok((home, now))
+    }
+    fn budget_exhausted(
+        &self,
+        stream: &Stream,
+        action: &VerifiedAction,
+        session: &AuthenticatedSession,
+        end: Option<u64>,
+        cancel: &Cancellation,
+    ) -> bool {
+        let active = || {
+            !self.stop.load(Ordering::Acquire)
+                && !cancel.is_cancelled()
+                && stream.check_authority_supported()
+                && end.is_none_or(|end| clock::boot_ms().is_ok_and(|now| now < end))
+        };
+        if !Home::budget_screen_candidate(action.action()) || !active() {
+            return false;
+        }
+        let Ok(now) = self.config.clock.sample() else {
+            return false;
+        };
+        let timeout = match end {
+            Some(end) => match remaining(end) {
+                Ok(left) => left.min(Duration::from_millis(25)),
+                Err(_) => return false,
+            },
+            None => Duration::from_millis(25),
+        };
+        let exhausted = self
+            .home
+            .try_lock()
+            .is_ok_and(|mut home| home.budget_exhausted(action, session, now, timeout));
+        exhausted && active()
+    }
+    fn admission_request(
+        &self,
+        action: &VerifiedAction,
+        session: &AuthenticatedSession,
+        end: Option<u64>,
+    ) -> admission::Request {
+        let owner = if matches!(action.action().actor, Actor::Delegated { .. }) {
+            let timeout = end.map_or(Ok(Duration::from_millis(25)), |end| {
+                remaining(end).map(|left| left.min(Duration::from_millis(25)))
+            });
+            match (timeout, self.config.clock.sample(), self.home.try_lock()) {
+                (Ok(timeout), Ok(clock), Ok(mut home)) => {
+                    home.admission_owner(action, session, clock, timeout)
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+        admission::Request::action(session, action, owner)
+    }
     fn check_authority(
         &self,
         stream: &Stream,
         digest: Id,
         end: Option<u64>,
         cancel: &Cancellation,
-        operation: &'static str,
+        request: admission::Request,
+        timing: Option<&mut message_timing::Sample>,
     ) -> Result<crate::hypernet::AuthorityCheck> {
+        let operation = request.operation;
         let map = |error| match error {
             admission::Error::Busy => Error::AuthorityAdmissionBusy,
             admission::Error::Stopped => Error::AuthorityAdmissionStopped,
@@ -124,13 +224,16 @@ impl Shared {
         };
         let permit = self
             .authority_admission
-            .acquire(end, || {
+            .acquire(request, end, || {
                 self.stop.load(Ordering::Acquire)
                     || cancel.is_cancelled()
                     || !stream.check_authority_supported()
             })
             .map_err(map)?;
         let check_end = permit.check_deadline().map_err(map)?;
+        if let Some(timing) = timing {
+            timing.authority_admitted();
+        }
         let result = self
             .companion
             .check_authority_until(stream, *digest.as_bytes(), check_end)
@@ -263,7 +366,7 @@ struct Budget {
     burst: u64,
 }
 impl Budget {
-    fn new(rate: u64, burst: u64) -> Self {
+    const fn new(rate: u64, burst: u64) -> Self {
         Self {
             at: 0,
             remaining: burst * 1000,
@@ -303,7 +406,7 @@ fn load_shared(directory: &Path, stop: Arc<AtomicBool>, diagnostics: bool) -> Re
     let shared = Shared {
         config,
         signer,
-        home: Mutex::new(home),
+        home: home_access::HomeAccess::new(home, Arc::clone(&stop)),
         companion,
         boot,
         handshakes: AtomicUsize::new(0),
@@ -409,6 +512,24 @@ fn frame(stream: &Stream, kind: FrameKind, payload: Vec<u8>, timeout: Duration) 
     )
     .map_err(|_| Error::Transport)
 }
+fn message_frame(
+    stream: &Stream,
+    kind: FrameKind,
+    payload: Vec<u8>,
+    mut timing: message_timing::Sample,
+) -> Result<()> {
+    let response = Frame::new(kind, payload).map_err(|_| Error::Frame)?;
+    // Match io::send: the original five-second write end includes frame encoding.
+    let end = clock::boot_ms()
+        .map_err(|_| Error::Transport)?
+        .checked_add(5000)
+        .ok_or(Error::Transport)?;
+    let encoded = response.encode().map_err(|_| Error::Transport)?;
+    timing.encoding_complete();
+    let result = io::send_encoded_before(stream, &encoded, end).map_err(|_| Error::Transport);
+    timing.finish(result.is_ok());
+    result
+}
 fn serve(shared: &Shared, stream: &Stream) -> Result<()> {
     let handshake = Handshake(&shared.handshakes);
     let Peer::Incoming(peer) = stream.peer() else {
@@ -497,21 +618,32 @@ fn serve(shared: &Shared, stream: &Stream) -> Result<()> {
         proof.digest(),
         end,
         challenge.expires_ms,
-        "SessionAuthority",
+        admission::Request::account(endpoint.acting.account, admission::Class::Interactive)
+            .named("SessionAuthority"),
     )?;
-    let now = shared.config.clock.sample().map_err(|_| Error::Clock)?;
-    if now.upper_ms >= challenge.expires_ms || clock::boot_ms().map_err(|_| Error::Clock)? >= end {
-        return Err(Error::HandshakeExpired);
-    }
-    if !check.current(shared) {
-        return Err(Error::Authority);
-    }
-    let window = shared
-        .home
-        .lock()
-        .map_err(|_| Error::State)?
-        .open_window(&endpoint, now, &|| check.current(shared))
-        .map_err(|_| Error::RetryWindow)?;
+    let window = {
+        let mut home = shared
+            .home
+            .acquire(Some(end), || {
+                check.current(shared) && stream.check_authority_supported()
+            })
+            .map_err(|_| Error::State)?;
+        let now = shared.config.clock.sample().map_err(|_| Error::Clock)?;
+        if now.upper_ms >= challenge.expires_ms
+            || clock::boot_ms().map_err(|_| Error::Clock)? >= end
+        {
+            return Err(Error::HandshakeExpired);
+        }
+        if !check.current(shared) {
+            return Err(Error::Authority);
+        }
+        home.open_window(&endpoint, now, &|| {
+            !shared.stop.load(Ordering::Acquire)
+                && stream.check_authority_supported()
+                && check.current(shared)
+        })
+        .map_err(|_| Error::RetryWindow)?
+    };
     let session = AuthenticatedSession::new(
         &endpoint,
         principal,
@@ -540,8 +672,12 @@ fn serve(shared: &Shared, stream: &Stream) -> Result<()> {
     drop(handshake);
     let mut budget = Budget::new(32, 8);
     loop {
-        let incoming =
-            io::receive(stream, Duration::from_secs(60)).map_err(|_| Error::Transport)?;
+        let receive_end = clock::boot_ms()
+            .map_err(|_| Error::Transport)?
+            .checked_add(60_000)
+            .ok_or(Error::Transport)?;
+        let (incoming, received) =
+            io::receive_before_observed(stream, receive_end).map_err(|_| Error::Transport)?;
         if incoming.kind == FrameKind::Close {
             return Ok(());
         }
@@ -587,6 +723,9 @@ fn serve(shared: &Shared, stream: &Stream) -> Result<()> {
             )?;
             continue;
         }
+        let mut timing = (verified.action().operation == Operation::MessageSend)
+            .then(|| message_timing::begin(shared.diagnostics.is_some(), received))
+            .flatten();
         let response = execute(
             shared,
             stream,
@@ -594,7 +733,11 @@ fn serve(shared: &Shared, stream: &Stream) -> Result<()> {
             &session,
             &Cancellation::default(),
             None,
+            timing.as_mut(),
         );
+        if let Some(timing) = &mut timing {
+            timing.executed(&response.outcome);
+        }
         let (kind, bytes) = if verified.action().operation.is_crypto_transition() {
             (
                 FrameKind::CryptoResponse,
@@ -606,12 +749,11 @@ fn serve(shared: &Shared, stream: &Stream) -> Result<()> {
                 sign_response(&response, &shared.signer),
             )
         };
-        frame(
-            stream,
-            kind,
-            bytes.map_err(|_| Error::Frame)?,
-            Duration::from_secs(5),
-        )?;
+        let bytes = bytes.map_err(|_| Error::Frame)?;
+        match timing {
+            Some(timing) => message_frame(stream, kind, bytes, timing)?,
+            None => frame(stream, kind, bytes, Duration::from_secs(5))?,
+        }
     }
 }
 fn execute(
@@ -621,6 +763,7 @@ fn execute(
     session: &AuthenticatedSession,
     cancel: &Cancellation,
     end: Option<u64>,
+    mut timing: Option<&mut message_timing::Sample>,
 ) -> Response {
     let base = |outcome| Response {
         home: shared.config.descriptor.home,
@@ -635,13 +778,24 @@ fn execute(
             retry_after_ms: Some(1000),
         })
     };
-    let check = match shared.check_authority(
+    if shared.budget_exhausted(stream, action, session, end, cancel) {
+        return refused(ErrorCode::RateLimited, "OperationBudget");
+    }
+    if let Some(timing) = &mut timing {
+        timing.authority_started();
+    }
+    let checked = shared.check_authority(
         stream,
         action.digest(),
         end,
         cancel,
-        action.action().operation.name(),
-    ) {
+        shared.admission_request(action, session, end),
+        timing.as_deref_mut(),
+    );
+    if let Some(timing) = timing {
+        timing.authority_complete();
+    }
+    let check = match checked {
         Ok(check) => check,
         Err(error) => {
             shared.report(action.action().operation.name(), error.code());
@@ -668,13 +822,17 @@ fn execute(
         shared.report_check(action.action().operation.name(), detail, Some(&check));
         return refused(code, detail);
     }
-    let Ok(now) = shared.config.clock.sample() else {
-        return refused(ErrorCode::Unavailable, "Clock");
+    let (mut home, now) = match shared.operation_home(stream, &check, end, cancel) {
+        Ok(value) => value,
+        Err(outcome) => return base(outcome),
     };
-    let Ok(mut home) = shared.home.try_lock() else {
-        return refused(ErrorCode::Overloaded, "OperationBusy");
-    };
-    match home.execute_cancellable(action, session, now, &|| current(&check, end), cancel) {
+    match home.execute_cancellable(
+        action,
+        session,
+        now,
+        &|| shared.operation_current(stream, &check, end, cancel),
+        cancel,
+    ) {
         Ok(response) => response,
         Err(_) => base(Outcome::Unknown),
     }
@@ -699,7 +857,7 @@ fn search(
         let (sender, receiver) = std::sync::mpsc::sync_channel(1);
         let token = cancel.clone();
         scope.spawn(move || {
-            let response = execute(shared, stream, query, session, &token, Some(end));
+            let response = execute(shared, stream, query, session, &token, Some(end), None);
             let _ = sender.send(response);
         });
         let mut control = None;
@@ -720,6 +878,7 @@ fn search(
                             session,
                             &Cancellation::accepted_control(),
                             Some(end),
+                            None,
                         );
                         frame(
                             stream,
@@ -769,7 +928,8 @@ fn search(
                     verified.digest(),
                     Some(end),
                     &Cancellation::default(),
-                    "SearchCancel",
+                    shared.admission_request(&verified, session, Some(end)),
+                    None,
                 )?;
                 if !current(&authority, Some(end)) {
                     return Err(Error::Authority);

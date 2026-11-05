@@ -6,6 +6,14 @@ pub(in crate::service::runtime) struct Maintenance {
     stop: Arc<AtomicBool>,
     worker: Option<thread::JoinHandle<()>>,
 }
+struct PendingTurns<'a>(&'a [OutboundRoute]);
+impl Drop for PendingTurns<'_> {
+    fn drop(&mut self) {
+        for route in self.0 {
+            route.admission.cancel_maintenance();
+        }
+    }
+}
 impl Maintenance {
     pub(in crate::service::runtime) fn start(shared: Arc<Shared>) -> Result<Self> {
         let stop = Arc::new(AtomicBool::new(false));
@@ -17,6 +25,7 @@ impl Maintenance {
                 thread::Builder::new()
                     .name("hrc-origin-freshness".into())
                     .spawn(move || {
+                        let _pending = PendingTurns(&shared.federation_routes);
                         while !flag.load(Ordering::Acquire) && !shared.stop.load(Ordering::Acquire)
                         {
                             for route in &shared.federation_routes {
@@ -25,7 +34,26 @@ impl Maintenance {
                                 {
                                     break;
                                 }
-                                let Ok(mut outbound) = route.try_lock() else {
+                                let _turn = match route.admission.maintenance(|| {
+                                    flag.load(Ordering::Acquire)
+                                        || shared.stop.load(Ordering::Acquire)
+                                }) {
+                                    Ok(Some(turn)) => turn,
+                                    Ok(None) => continue,
+                                    Err(error) => {
+                                        shared.report(
+                                            "FederationFreshnessUnavailable",
+                                            admission_error(error).code(),
+                                        );
+                                        continue;
+                                    }
+                                };
+                                // Keep the connection exclusively owned through each complete reply.
+                                let Ok(mut outbound) = route.outbound.try_lock() else {
+                                    shared.report(
+                                        "FederationFreshnessUnavailable",
+                                        Error::State.code(),
+                                    );
                                     continue;
                                 };
                                 if let Err(error) = tick(&shared, &mut outbound, &flag) {
@@ -60,6 +88,9 @@ impl Drop for Maintenance {
 }
 
 fn tick(shared: &Shared, outbound: &mut Outbound, stop: &AtomicBool) -> Result<()> {
+    if stop.load(Ordering::Acquire) || shared.stop.load(Ordering::Acquire) {
+        return Err(Error::AuthorityAdmissionStopped);
+    }
     let reference = outbound.route.agreement;
     let now = shared.config.clock.sample().map_err(|_| Error::Clock)?;
     let (state, dirty, page) = {
@@ -88,6 +119,9 @@ fn tick(shared: &Shared, outbound: &mut Outbound, stop: &AtomicBool) -> Result<(
         return Ok(());
     }
     let end = clock::boot_ms().map_err(|_| Error::Clock)? + 4000;
+    if stop.load(Ordering::Acquire) || shared.stop.load(Ordering::Acquire) {
+        return Err(Error::AuthorityAdmissionStopped);
+    }
     outbound.connect(shared, &state.agreement, end)?;
     for account in dirty.items.iter().map(|item| item.account) {
         if stop.load(Ordering::Acquire) || remaining(end)?.as_millis() < 200 {

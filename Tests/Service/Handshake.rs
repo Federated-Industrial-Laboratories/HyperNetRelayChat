@@ -168,7 +168,15 @@ fn sample() -> Result<clock::TimeBounds> {
 }
 fn check(companion: &Companion, stream: &Stream, end: u64) -> Result<AuthorityCheck> {
     let admission = admission::Admission::default();
-    let permit = admission.acquire(Some(end), || false).unwrap();
+    let request = admission::Request::transport(
+        NetworkId {
+            network: Id::from_bytes([1; 32]),
+            incarnation: Id::from_bytes([2; 32]),
+        },
+        Id::from_bytes([7; 32]),
+        admission::Class::Interactive,
+    );
+    let permit = admission.acquire(request, Some(end), || false).unwrap();
     companion
         .check_authority_until(stream, [42; 32], permit.check_deadline().unwrap())
         .map_err(|_| Error::Authority)

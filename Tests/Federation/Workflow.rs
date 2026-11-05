@@ -1268,3 +1268,103 @@ fn a_room_cannot_bridge_a_third_origin_even_after_its_first_agreement_is_withdra
         .unwrap();
     assert!(accept(&mut p.home, &other).is_ok());
 }
+
+#[test]
+fn expired_source_assertion_has_no_effect_and_same_unconsumed_challenge_accepts_fresh_evidence() {
+    let mut pair = Pair::new();
+    let mut remote = pair.remote.clone();
+    let admission = pair.admit(&remote);
+    pair.bootstrap(&mut remote, admission.reference);
+    let join = pair.action(
+        &remote,
+        Operation::RoomJoin,
+        Target::Room(pair.room),
+        &Empty {},
+    );
+    let original = pair.envelope(&remote, admission.reference, &join);
+    let nonce = verify_federation_challenge(
+        &original.challenge.0,
+        &pair.home.signing_key().verifying_key(),
+    )
+    .unwrap()
+    .value()
+    .nonce;
+    let state = |pair: &mut Pair| {
+        pair.home
+            .store
+            .read(Duration::from_secs(1), |db| {
+                let used: bool = db.query_row(
+                    "SELECT consumed FROM federation_challenges WHERE nonce=?1",
+                    [nonce.as_hex()],
+                    |r| r.get(0),
+                )?;
+                let effects: u64 = db.query_row(
+                    "SELECT count(*) FROM hrc_operations WHERE window=?1 AND operation=?2",
+                    rusqlite::params![
+                        join.operation_id.window.as_hex(),
+                        join.operation_id.operation.as_hex()
+                    ],
+                    |r| r.get(0),
+                )?;
+                Ok((used, effects))
+            })
+            .unwrap()
+    };
+    let mut stale = original.clone();
+    let mut assertion =
+        verify_origin_assertion(&original.origin_assertion.0, &pair.attestor.verifying_key())
+            .unwrap()
+            .value()
+            .clone();
+    let now = TimeBounds::test_now();
+    assertion.source_evaluated_ms = now.lower_ms - 1000;
+    assertion.source_not_after_ms = now.lower_ms - 1;
+    stale.origin_assertion = Blob(sign_origin_assertion(&assertion, &pair.attestor).unwrap());
+    assert!(matches!(
+        pair.home
+            .federation_verify(&pair.gateway, &stale, &privacy(), now, &|| true),
+        Err(fed::Error::Refused {
+            code: ErrorCode::Unavailable,
+            detail: "SourceAuthorityExpired"
+        })
+    ));
+    assert_eq!(state(&mut pair), (false, 0));
+    assert_eq!(stale.challenge, original.challenge);
+    assert_eq!(stale.action, original.action);
+    // A new assertion uses the same subject and original, unconsumed challenge.
+    let subject = pair
+        .origin
+        .federation_origin_subject(
+            &remote.session,
+            fed::SourceSubject::Action(original.action.clone()),
+            pair.agreement.reference,
+            TimeBounds::test_now(),
+        )
+        .unwrap();
+    let challenge = verify_federation_challenge(
+        &original.challenge.0,
+        &pair.home.signing_key().verifying_key(),
+    )
+    .unwrap();
+    let mut fresh = original.clone();
+    fresh.origin_assertion = pair.assertion(&subject, &challenge, &remote);
+    assert_eq!(fresh.challenge, stale.challenge);
+    assert_eq!(fresh.action, stale.action);
+    assert!(matches!(
+        pair.run(&fresh).outcome,
+        Outcome::Committed { .. }
+    ));
+    assert_eq!(state(&mut pair), (true, 1));
+    assert!(
+        pair.home
+            .federation_verify(
+                &pair.gateway,
+                &fresh,
+                &privacy(),
+                TimeBounds::test_now(),
+                &|| true
+            )
+            .is_err()
+    );
+    assert_eq!(state(&mut pair), (true, 1));
+}

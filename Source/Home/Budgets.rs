@@ -2,7 +2,7 @@
 //! Persisted token budgets survive reconnects and process restarts.
 use super::types::*;
 use crate::protocol::*;
-use rusqlite::{OptionalExtension, Transaction, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 struct Budget {
     key: String,
     capacity: u64,
@@ -10,6 +10,13 @@ struct Budget {
     cost: u64,
 }
 pub(super) fn admit(db: &Transaction<'_>, action: &Action, now: u64) -> Domain<bool> {
+    evaluate(db, plan(db, action)?, now)
+}
+/// A negative admission decision only; no credit is reserved or consumed.
+pub(super) fn exhausted(db: &Connection, action: &Action, now: u64) -> Domain<bool> {
+    Ok(credits(db, plan(db, action)?, now)?.is_none())
+}
+fn plan(db: &Connection, action: &Action) -> Domain<Vec<Budget>> {
     let sends = matches!(
         action.operation,
         Operation::MessageSend | Operation::MessageReply | Operation::MessageAction
@@ -123,9 +130,9 @@ pub(super) fn admit(db: &Transaction<'_>, action: &Action, now: u64) -> Domain<b
             cost: 60_000,
         });
     }
-    evaluate(db, budgets, now)
+    Ok(budgets)
 }
-fn evaluate(db: &Transaction<'_>, budgets: Vec<Budget>, now: u64) -> Domain<bool> {
+fn credits(db: &Connection, budgets: Vec<Budget>, now: u64) -> Domain<Option<Vec<(String, u64)>>> {
     let mut updated = Vec::new();
     for budget in budgets {
         let current: Option<(u64, u64)> = db
@@ -143,10 +150,16 @@ fn evaluate(db: &Transaction<'_>, budgets: Vec<Budget>, now: u64) -> Domain<bool
             })
             .unwrap_or(budget.capacity);
         if credit < budget.cost {
-            return Ok(false);
+            return Ok(None);
         }
         updated.push((budget.key, credit - budget.cost));
     }
+    Ok(Some(updated))
+}
+fn evaluate(db: &Transaction<'_>, budgets: Vec<Budget>, now: u64) -> Domain<bool> {
+    let Some(updated) = credits(db, budgets, now)? else {
+        return Ok(false);
+    };
     for (key, credit) in updated {
         db.execute("INSERT INTO hrc_budgets VALUES(?1,?2,?3) ON CONFLICT(key) DO UPDATE SET credit=excluded.credit,updated=excluded.updated",params![key,credit,now])?;
     }

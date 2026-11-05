@@ -746,6 +746,33 @@ fn denied_send(c: &mut Client, action: &Action, signed: &[u8], end: Instant) -> 
     }
 }
 
+fn denied_retained_send(c: &Client, action: &Action, signed: &[u8], end: Instant) -> Result<()> {
+    ensure(Instant::now() < end, "QueuedRefusalDeadline")?;
+    let key =
+        ed25519_dalek::VerifyingKey::from_bytes(c.profile.registration.endpoint_key.as_bytes())
+            .map_err(|_| "QueuedEndpointKey")?;
+    let verified = verify_action(signed, &key).map_err(|_| "QueuedSignature")?;
+    ensure(
+        verified.digest() == action_digest(action).map_err(|_| "ActionDigest")?,
+        "QueuedActionBinding",
+    )?;
+    // Submit the original bytes on the retained authenticated session. The
+    // high-level send would first inspect the room and could stop at that denial.
+    // Session::submit verifies the origin signature, complete request binding
+    // and refusal lifetime. A lost stream must not reconnect a retired endpoint.
+    let result = match net(c.session())?.submit(signed, &key) {
+        Err(client::network::Error::ForwardRefused {
+            code: ErrorCode::Denied,
+            detail,
+            ..
+        }) if detail == "EndpointDisabled" => Ok(()),
+        Err(error) => Err(describe_error(&client::Error::Network(error))),
+        Ok(_) => Err("ExpectedRecoveredEndpointRefusal".into()),
+    };
+    result?;
+    ensure(Instant::now() < end, "QueuedRefusalDeadline")
+}
+
 fn workflow(run: &mut Run, r: &Request) -> Result<serde_json::Value> {
     let mut alice = run.step("Alice", "OpenLocal", |_| net(Client::open(&r.alice)))?;
     let mut bob = run.step("Bob", "OpenForeign", |_| net(Client::open(&r.bob)))?;
@@ -1082,6 +1109,16 @@ fn workflow(run: &mut Run, r: &Request) -> Result<serde_json::Value> {
     let ready = run.step("Agent", "DelegatedWelcomeAndReady", |end| {
         synchronise(&mut agent, r.private, Some(&grant), end)
     })?;
+    run.step("Bob", "PinOwnerAuthorizedAgentRoster", |end| {
+        let view = pin(&mut bob, r.private, None, end)?;
+        ensure(
+            view.remote.members.iter().any(|member| {
+                member.credential.actor == agent_actor
+                    && matches!(member.actor, Actor::Delegated { .. })
+            }),
+            "DelegatedMemberMissing",
+        )
+    })?;
     run.step("Bob", "AdvanceAfterAgentAdmission", |end| {
         synchronise(&mut bob, r.private, None, end)
     })?;
@@ -1202,6 +1239,13 @@ fn workflow(run: &mut Run, r: &Request) -> Result<serde_json::Value> {
         })
         .map_err(|_| "RecoveryPreparation".to_string())
     })?;
+    run.step("Bob", "RetainAuthorisedSessionBeforeRecovery", |_| {
+        net(bob.connect())?;
+        ensure(
+            net(bob.session())?.ready.acting == bob_actor,
+            "RetainedRecoverySessionBinding",
+        )
+    })?;
     let recovered = run.step("Bob", "ProveNewEndpointAndOwnerKey", |end| {
         loop {
             match client::devices::activate(&recovery, Some(&r.bob_recovery)) {
@@ -1218,18 +1262,8 @@ fn workflow(run: &mut Run, r: &Request) -> Result<serde_json::Value> {
         recovered.identity.security_generation > bob_actor.security_generation,
         "RecoveryGeneration",
     )?;
-    let changed = run.step("Alice", "AutomaticRunningOriginRecoveryFence", |end| {
-        loop {
-            let view = current_read(&mut alice, end, |c| c.crypto_inspect(r.private, None))?;
-            if view.remote.required_removals.contains(&bob_actor.endpoint) {
-                return Ok(view);
-            }
-            pause(end, 500)?;
-        }
-    })?;
-    ensure(changed.remote.send_barrier, "RecoveryMustFenceCiphertext")?;
     run.step("Bob", "OldGenerationQueuedEffectRefused", |end| {
-        denied_send(&mut bob, &queued.0, &queued.1, end)
+        denied_retained_send(&bob, &queued.0, &queued.1, end)
     })?;
     let page = run.step("Alice", "NoExpiredOrRecoveredEffect", |end| {
         history(&mut alice, r.community, None, end)
@@ -1240,6 +1274,16 @@ fn workflow(run: &mut Run, r: &Request) -> Result<serde_json::Value> {
         }),
         "RevokedAuthorityPublished",
     )?;
+    let changed = run.step("Alice", "AutomaticRunningOriginRecoveryFence", |end| {
+        loop {
+            let view = current_read(&mut alice, end, |c| c.crypto_inspect(r.private, None))?;
+            if view.remote.required_removals.contains(&bob_actor.endpoint) {
+                return Ok(view);
+            }
+            pause(end, 500)?;
+        }
+    })?;
+    ensure(changed.remote.send_barrier, "RecoveryMustFenceCiphertext")?;
     let recovered_actor = recovered
         .endpoint
         .clone()

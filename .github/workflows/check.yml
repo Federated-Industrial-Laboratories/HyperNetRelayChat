@@ -27,3 +27,5 @@ jobs:
         env:
           RUSTUP_TOOLCHAIN: 1.96.0
         run: bash Tools/Check.sh
+      - name: Check maintained Python tools and native helpers
+        run: python3 -m compileall -q Tools Tests/Integration

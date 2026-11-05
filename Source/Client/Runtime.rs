@@ -8,6 +8,9 @@ use super::{
 use crate::{protocol::*, service::files, storage::Store};
 use std::path::Path;
 
+#[path = "ReadRetry.rs"]
+pub(super) mod read_retry;
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("private endpoint configuration is unavailable")]
@@ -22,6 +25,10 @@ pub enum Error {
     Network(#[from] network::Error),
     #[error("client is offline")]
     Offline,
+    /// A local read budget ended before dispatch or after a verified complete reply.
+    /// No exchange remains outstanding; this never represents a socket timeout.
+    #[error("the original read deadline expired")]
+    ReadDeadlineExpired,
     #[error("operation refused: {detail}")]
     Rejected { code: ErrorCode, detail: String },
     #[error("operation was not admitted: {detail}")]
@@ -43,6 +50,7 @@ impl Error {
             Self::Network(error) => error.code(),
             Self::Unknown => "OutcomeUnknown",
             Self::Offline => "Offline",
+            Self::ReadDeadlineExpired => "ReadDeadlineExpired",
             Self::Rejected {
                 code: ErrorCode::Denied,
                 ..
@@ -81,25 +89,27 @@ impl Error {
             _ => Self::Unknown,
         }
     }
-    /// A verified temporary service or forwarding refusal leaves the session synchronized.
+    /// A verified temporary refusal or local read expiry leaves the session synchronized.
     /// This permits bounded recovery, not stale authority or a replacement operation.
     pub fn can_reuse_session(&self) -> bool {
         matches!(
             self,
-            Self::Refused {
-                code: ErrorCode::Unavailable | ErrorCode::RateLimited | ErrorCode::Overloaded,
-                ..
-            } | Self::Network(network::Error::ForwardRefused {
-                code: ErrorCode::Unavailable | ErrorCode::RateLimited | ErrorCode::Overloaded,
-                ..
-            })
+            Self::ReadDeadlineExpired
+                | Self::Refused {
+                    code: ErrorCode::Unavailable | ErrorCode::RateLimited | ErrorCode::Overloaded,
+                    ..
+                }
+                | Self::Network(network::Error::ForwardRefused {
+                    code: ErrorCode::Unavailable | ErrorCode::RateLimited | ErrorCode::Overloaded,
+                    ..
+                })
         )
     }
     /// Reconnection may resolve exact retained effects; it never creates a replacement action.
     pub(crate) fn retry_delay_ms(&self) -> Option<u64> {
         use network::Error as Network;
         match self {
-            Self::Clock | Self::Unknown => Some(0),
+            Self::Clock | Self::Unknown | Self::ReadDeadlineExpired => Some(0),
             Self::Refused {
                 code: ErrorCode::Unavailable | ErrorCode::RateLimited | ErrorCode::Overloaded,
                 retry_after_ms,
@@ -186,8 +196,34 @@ impl Client {
         Ok(self.session()?.action(operation, target, body)?)
     }
     pub fn execute(&mut self, action: &Action) -> Result<Response> {
+        // Capture the read's end before signing; retries cannot restart its budget.
+        let read_end = if crate::home::is_read_operation(action.operation) {
+            Some(
+                crate::clock::boot_ms()
+                    .map_err(|_| Error::Clock)?
+                    .saturating_add(10_000),
+            )
+        } else {
+            None
+        };
         let bytes = self.sign(action)?;
-        self.execute_signed(&bytes)
+        match read_end {
+            Some(end) => self.read_signed_until(&bytes, end),
+            None => self.execute_signed(&bytes),
+        }
+    }
+    fn read_signed_until(&self, bytes: &[u8], end: u64) -> Result<Response> {
+        // Session validation also rejects a mutation passed to this bounded read path.
+        read_retry::retry_read(
+            end,
+            || false,
+            |end| {
+                self.session()?
+                    .submit_read_until(bytes, &self.key.verifying_key(), end)
+                    .map(|response| response.value().clone())
+                    .map_err(Error::from)
+            },
+        )
     }
     pub fn sign(&self, action: &Action) -> Result<Vec<u8>> {
         if action.home != self.profile.active_server().home
@@ -204,11 +240,12 @@ impl Client {
         let verified = verify_action(bytes, &self.key.verifying_key()).map_err(|_| Error::Input)?;
         if crate::home::is_read_operation(verified.action().operation) {
             return Ok(ExecutedResponse {
-                response: self
-                    .session()?
-                    .submit(bytes, &self.key.verifying_key())?
-                    .value()
-                    .clone(),
+                response: self.read_signed_until(
+                    bytes,
+                    crate::clock::boot_ms()
+                        .map_err(|_| Error::Clock)?
+                        .saturating_add(10_000),
+                )?,
                 exchange_ns: None,
             });
         }

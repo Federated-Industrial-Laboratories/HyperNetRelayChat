@@ -29,7 +29,7 @@ pub(super) fn authority(
     digest: Id,
     end: u64,
     expires_ms: u64,
-    operation: &'static str,
+    request: admission::Request,
 ) -> Result<Authority> {
     let cancel = Cancellation::default();
     recover(
@@ -41,7 +41,7 @@ pub(super) fn authority(
                 || cancel.is_cancelled()
                 || !stream.check_authority_supported()
         },
-        |end| shared.check_authority(stream, digest, Some(end), &cancel, operation),
+        |end| shared.check_authority(stream, digest, Some(end), &cancel, request, None),
         thread::sleep,
     )
 }

@@ -53,7 +53,9 @@ pub(super) fn worker() -> (Fixture, Worker, RoomId) {
         delivery_room: None,
         poll_room: 0,
         refresh_cycle: None,
+        selected_catchup: None,
         refresh_yield: false,
+        pending_room: None,
     };
     worker.select(room).unwrap();
     worker.snapshot.selected.as_mut().unwrap().stale = false;
@@ -714,18 +716,122 @@ fn read_retry_has_a_finite_attempt_count_and_honours_interruption_and_retry_guid
 }
 #[test]
 fn a_read_result_after_the_original_deadline_is_not_reported_as_current() {
+    let (fixture, mut worker, room) = worker();
+    worker
+        .client
+        .install_closed_view_test_session(&fixture.root);
+    worker.shared.stop.store(false, Ordering::Release);
+    worker.shared.disconnect.store(false, Ordering::Release);
+    let stream = worker.client.session().unwrap().stream_handle();
+    *worker.shared.stream.lock().unwrap() = Some(Arc::clone(&stream));
+    let session = worker.client.session().unwrap().ready.session;
+    let response = read_result(Outcome::Result { body: Value::Null });
+    let key = SigningKey::from_bytes(&[11; 32]);
+    let verified = verify_response(
+        &sign_response(&response, &key).unwrap(),
+        &key.verifying_key(),
+    )
+    .unwrap();
+    let end = crate::clock::boot_ms().unwrap() + 50;
+    let mut calls = 0;
     let result = retry_read(
-        crate::clock::boot_ms().unwrap() + 20,
+        end,
         || false,
-        |_| {
-            thread::sleep(Duration::from_millis(30));
-            Ok(read_result(Outcome::Result { body: Value::Null }))
+        |original_end| {
+            calls += 1;
+            assert_eq!(original_end, end);
+            while crate::clock::boot_ms().unwrap() < end {
+                thread::sleep(Duration::from_millis(1));
+            }
+            Ok(verified.value().clone())
         },
     );
+    assert_eq!(calls, 1);
+    assert!(matches!(result, Err(Error::ReadDeadlineExpired)));
+    worker.error(result.unwrap_err());
+    assert_eq!(
+        worker.snapshot.status.as_ref().unwrap().code,
+        "ReadDeadlineExpired"
+    );
     assert!(matches!(
-        result,
-        Err(Error::Network(crate::client::network::Error::Transport))
+        worker.snapshot.connection,
+        ConnectionState::Backoff { .. }
     ));
+    assert!(worker.snapshot.selected.as_ref().unwrap().stale);
+    assert!(worker.snapshot.inspection.stale && worker.snapshot.inspection.filters_stale);
+    assert!(worker.snapshot.privacy.is_none());
+    assert!(worker.client.pending().unwrap().is_empty());
+    assert_eq!(worker.client.session().unwrap().ready.session, session);
+    assert!(Arc::ptr_eq(
+        &worker.client.session().unwrap().stream_handle(),
+        &stream
+    ));
+    assert!(Arc::ptr_eq(
+        worker.shared.stream.lock().unwrap().as_ref().unwrap(),
+        &stream
+    ));
+
+    // The expired budget cannot dispatch another read. Backoff cannot begin a
+    // refresh or send another frame, even when the metadata poll is already due.
+    assert!(matches!(
+        retry_read(end, || false, |_| panic!("expired read dispatched")),
+        Err(Error::ReadDeadlineExpired)
+    ));
+    let retry = worker.retry;
+    worker.poll = Instant::now() - Duration::from_secs(10);
+    worker.tick();
+    assert_eq!(worker.retry, retry);
+    assert_eq!(worker.client.session().unwrap().ready.session, session);
+    assert_eq!(
+        worker.snapshot.selected.as_ref().unwrap().summary.room,
+        room
+    );
+
+    // An actual uncertain transport failure still destroys this same session.
+    worker.error(Error::Network(crate::client::network::Error::Transport));
+    assert!(worker.client.session().is_err());
+    assert!(worker.shared.stream.lock().unwrap().is_none());
+}
+
+#[test]
+fn late_verified_denial_and_authentication_failure_do_not_become_local_read_expiry() {
+    for denied in [false, true] {
+        let end = crate::clock::boot_ms().unwrap() + 50;
+        let mut calls = 0;
+        let result = retry_read(
+            end,
+            || false,
+            |_| {
+                calls += 1;
+                while crate::clock::boot_ms().unwrap() < end {
+                    thread::sleep(Duration::from_millis(1));
+                }
+                if denied {
+                    Ok(read_result(Outcome::Refused {
+                        code: ErrorCode::Denied,
+                        detail: "CurrentAuthorityDenied".into(),
+                        retry_after_ms: Some(250),
+                    }))
+                } else {
+                    Err(Error::Network(
+                        crate::client::network::Error::Authentication,
+                    ))
+                }
+            },
+        );
+        assert_eq!(calls, 1);
+        let error = result.unwrap_err();
+        assert!(!error.can_reuse_session());
+        assert!(error.retry_delay_ms().is_none());
+        assert_eq!(
+            error.code(),
+            if denied {
+                "OperationDenied"
+            } else {
+                "SessionAuthenticationFailed"
+            }
+        );
+    }
 }
 
 #[test]
@@ -1081,12 +1187,15 @@ fn community_cursor_recovery_never_loops_or_retries_real_gaps_and_access_failure
 
 #[test]
 fn community_cursor_recovery_stops_at_the_original_deadline_and_disconnect() {
-    for cancel in [false, true] {
+    for (cancel, context_change) in [(false, true), (true, true), (false, false)] {
         let (_fixture, mut worker, room) = worker();
         let page = cached_community(&mut worker, room);
-        let end = crate::clock::boot_ms().unwrap() + if cancel { 10_000 } else { 20 };
+        let cursor = page.cursor.clone();
+        let retained = page.events.len();
+        let mut page = Some(page);
+        let end = crate::clock::boot_ms().unwrap() + if cancel { 10_000 } else { 50 };
         let mut calls = 0;
-        let result = worker.community_page(room, Some(page.cursor), end, |worker, _, deadline| {
+        let result = worker.community_page(room, Some(cursor), end, |worker, _, deadline| {
             calls += 1;
             assert_eq!(deadline, end);
             if cancel {
@@ -1096,23 +1205,33 @@ fn community_cursor_recovery_stops_at_the_original_deadline_and_disconnect() {
                     thread::sleep(Duration::from_millis(1));
                 }
             }
-            Err(cursor_error("CursorContext"))
+            if context_change {
+                Err(cursor_error("CursorContext"))
+            } else {
+                Ok(page.take().expect("late page was retried"))
+            }
         });
-        assert!(result.is_err());
+        assert!(if cancel {
+            matches!(result, Err(Error::Offline))
+        } else {
+            matches!(result, Err(Error::ReadDeadlineExpired))
+        });
         assert_eq!(calls, 1);
-        assert!(
+        assert_eq!(
             cache::room(&mut worker.client.store, room)
                 .unwrap()
                 .events
-                .is_empty()
+                .len(),
+            if context_change { 0 } else { retained }
         );
     }
     let (_fixture, mut worker, room) = worker();
-    assert!(
-        worker
-            .community_page(room, None, 0, |_, _, _| panic!("expired read started"))
-            .is_err()
-    );
+    worker.shared.stop.store(false, Ordering::Release);
+    worker.shared.disconnect.store(false, Ordering::Release);
+    assert!(matches!(
+        worker.community_page(room, None, 0, |_, _, _| panic!("expired read started")),
+        Err(Error::ReadDeadlineExpired)
+    ));
 }
 
 #[test]

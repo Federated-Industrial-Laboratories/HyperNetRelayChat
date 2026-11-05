@@ -8,14 +8,116 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import selectors
 import subprocess
 import stat
+import sys
+import threading
 import time
 
 _spec = importlib.util.spec_from_file_location('HrcNativeConversation', Path(__file__).with_name('NativeConversation.py'))
 _conversation = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_conversation)
 Conversation, address = _conversation.Conversation, _conversation.address
+
+
+def collect_helper(process, end, control, record, case):
+    """Drain this owned child while controls run, retaining bounded failure evidence."""
+    limit = 65536
+    pipes = (process.stdout, process.stderr)
+    captured = (bytearray(), bytearray())
+    truncated, eof = [False, False], [False, False]
+    stop, failed = threading.Event(), threading.Event()
+    read_errors = []
+
+    def drain():
+        try:
+            with selectors.DefaultSelector() as selector:
+                for index, pipe in enumerate(pipes):
+                    os.set_blocking(pipe.fileno(), False)
+                    selector.register(pipe, selectors.EVENT_READ, index)
+                while selector.get_map() and not stop.is_set():
+                    for key, _ in selector.select(.05):
+                        index = key.data
+                        try:
+                            data = os.read(key.fd, 4096)
+                        except BlockingIOError:
+                            continue
+                        if not data:
+                            eof[index] = True
+                            selector.unregister(key.fileobj)
+                            continue
+                        left = limit - len(captured[index])
+                        captured[index].extend(data[:left])
+                        if len(data) > left:
+                            truncated[index] = True
+                            failed.set()
+                            # Excess output is a terminal helper failure, including while
+                            # a bounded control callback is still finishing its own work.
+                            try:
+                                process.kill()
+                            except ProcessLookupError:
+                                pass
+        except BaseException as error:
+            read_errors.append(error)
+            failed.set()
+
+    reader = threading.Thread(target=drain, name='hrc-federation-output', daemon=True)
+    failure, traceback, cleanup_errors = None, None, []
+    started = False
+    try:
+        reader.start()
+        started = True
+        while process.poll() is None:
+            if failed.is_set():
+                assert not any(truncated), 'Federation helper output limit'
+                raise AssertionError('Federation helper output incomplete')
+            assert time.monotonic() < end, 'Federation helper deadline'
+            control(process)
+            failed.wait(min(.1, max(0, end-time.monotonic())))
+    except BaseException as error:
+        failure, traceback = error, sys.exc_info()[2]
+    finally:
+        if process.poll() is None:
+            try:
+                process.terminate()
+                try:
+                    process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=5)
+            except BaseException as error:
+                cleanup_errors.append(error)
+        if started:
+            reader.join(timeout=5)
+            stop.set()
+            reader.join(timeout=1)
+        for pipe in pipes:
+            try:
+                pipe.close()
+            except BaseException as error:
+                cleanup_errors.append(error)
+
+    output, errors = map(bytes, captured)
+    item = dict(case=case, exitCode=process.returncode,
+        stdout=output.decode(errors='replace'), stderr=errors.decode(errors='replace'),
+        stdoutTruncated=truncated[0] or not eof[0], stderrTruncated=truncated[1] or not eof[1],
+        outputComplete=all(eof))
+    try:
+        record(item)
+    except BaseException as error:
+        cleanup_errors.append(error)
+    # Preserve the original control/timeout exception even if draining or cleanup fails.
+    if failure is not None:
+        for error in [*read_errors, *cleanup_errors]:
+            failure.add_note('Helper cleanup: '+type(error).__name__)
+        raise failure.with_traceback(traceback)
+    if cleanup_errors:
+        raise cleanup_errors[0]
+    assert not any(truncated), 'Federation helper output limit'
+    assert not read_errors and all(eof), 'Federation helper output incomplete'
+    assert time.monotonic() < end, 'Federation helper deadline'
+    return output, errors
 
 
 def run(configuration, controls, record):
@@ -29,7 +131,6 @@ def run(configuration, controls, record):
         return Conversation(dict(binary=configuration['binary'], directory=str(root/name),
             home=peer['home'], clock=configuration['clock'], maximumSeconds=configuration['maximumSeconds']), {}, record)
     home, origin = local('Home', configuration['home']), local('Origin', configuration['origin'])
-    process = None
     try:
         descriptors, accounts, actors = {}, {}, {}
         for name, flow, peer in (('Home', home, configuration['home']), ('Origin', origin, configuration['origin'])):
@@ -150,8 +251,6 @@ def run(configuration, controls, record):
         controls_path = root/'Controls'; controls_path.mkdir(mode=0o700)
         remaining = min(900,int(end-time.monotonic())-120)
         assert remaining >= 180, 'Insufficient bounded client qualification time'
-        process = subprocess.Popen([str(helper),'--request',str(request),'--maximum-seconds',str(remaining)],
-            stdout=subprocess.PIPE,stderr=subprocess.PIPE)
         handled = set()
         gateway_samples, sample_failures, next_sample = {}, 0, time.monotonic()
         def private_json(path, maximum):
@@ -198,8 +297,8 @@ def run(configuration, controls, record):
         operations = {'PauseOrigin':origin.stop,'ResumeOrigin':origin.start,
             'StopForRecoveredAdmission':stop_for_admission,'AdmitRecoveredBob':admit_recovered,
             'ResumeAfterRecoveredAdmission':resume_after_admission}
-        while process.poll() is None:
-            assert time.monotonic()<end, 'Federation helper deadline'
+        def poll_controls(process):
+            nonlocal sample_failures, next_sample
             for name,action in operations.items():
                 marker = controls_path/(name+'.request')
                 if marker.exists() and name not in handled:
@@ -231,41 +330,33 @@ def run(configuration, controls, record):
                 except (OSError,RuntimeError,ValueError):
                     sample_failures += 1
                 next_sample = time.monotonic()+2
-            time.sleep(.1)
-        output,errors = process.communicate(timeout=5)
-        record(dict(case='NativeFederationClient',exitCode=process.returncode,
-            stdout=output.decode(errors='replace'),stderr=errors.decode(errors='replace')))
-        assert len(output)<=65536 and len(errors)<=65536 and process.returncode == 0
+        process = subprocess.Popen([str(helper),'--request',str(request),'--maximum-seconds',str(remaining)],
+            stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+        output,_ = collect_helper(process,end,poll_controls,record,'NativeFederationClient')
+        assert process.returncode == 0
         result = json.loads(output)
         assert result['status'] == 'Passed' and handled == set(operations)
         assert any(count >= 3 for count in gateway_samples.values()), 'No observed gateway connection reuse'
         record(dict(case='ObservedGatewayConnectionReuse',passed=True,
             distinctSampledConnections=len(gateway_samples),samplesPerConnection=sorted(gateway_samples.values()),
             unavailableSamples=sample_failures,completeConnectionCensus=False,concurrentLimit=16,voucherConnectionLimit=128))
-        process = None
         # The origin's local stop and actual destination acknowledgement are separate effects.
         origin.stop()
         withdrawal = origin.cli('WithdrawAndNotifyHome','federation','withdraw','--directory',origin.service,
             '--agreement',reference_file)
         assert withdrawal['status'] == 'HomeWithdrawalAcknowledged' and withdrawal['homeBarrier'] is not None
         origin.start()
-        refused = subprocess.run([str(helper),'--request',str(request),'--maximum-seconds','60','--withdrawal'],
-            capture_output=True,timeout=min(65,end-time.monotonic()))
-        assert len(refused.stdout)<=65536 and len(refused.stderr)<=65536
-        record(dict(case='NativeFederationWithdrawal',exitCode=refused.returncode,
-            stdout=refused.stdout.decode(errors='replace'),stderr=refused.stderr.decode(errors='replace')))
-        assert refused.returncode == 0 and json.loads(refused.stdout)['agreementWithdrawn']
+        withdrawal_end = min(end,time.monotonic()+65)
+        refused = subprocess.Popen([str(helper),'--request',str(request),'--maximum-seconds','60','--withdrawal'],
+            stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+        output,_ = collect_helper(refused,withdrawal_end,lambda _: None,record,'NativeFederationWithdrawal')
+        assert refused.returncode == 0 and json.loads(output)['agreementWithdrawn']
         home.stop()
         inspected = home.cli('InspectHomeWithdrawal','federation','inspect','--directory',home.service,'--agreement',reference_file)
         assert inspected['withdrawn'] and inspected['barrierPosition'] == withdrawal['homeBarrier']
         record(dict(case='ActualBilateralWithdrawal',passed=True,homeBarrier=withdrawal['homeBarrier']))
     finally:
-        if process is not None:
-            process.terminate()
-            try:
-                process.communicate(timeout=10)
-            except subprocess.TimeoutExpired:
-                process.kill(); process.communicate(timeout=5)
+        original_error = sys.exc_info()[1]
         failures = []
         for flow in (origin,home):
             try:
@@ -273,4 +364,7 @@ def run(configuration, controls, record):
             except BaseException as error:
                 failures.append(type(error).__name__+': '+str(error))
         if failures:
-            raise RuntimeError('HRC federation service cleanup: '+'; '.join(failures))
+            message = 'HRC federation service cleanup: '+'; '.join(failures)
+            if original_error is None:
+                raise RuntimeError(message)
+            original_error.add_note(message)

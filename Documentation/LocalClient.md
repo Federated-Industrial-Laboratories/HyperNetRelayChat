@@ -24,12 +24,33 @@ metadata refresh cannot occupy every intervening command turn. Initial connectio
 and membership or policy changes still complete their required refresh before
 reporting readiness.
 Room selection and targeted post-send reads do not postpone that deadline.
+A selected community page with authenticated `has_more` schedules a finite
+catch-up burst without waiting for the next metadata interval. Each turn reads
+one bounded grouped component, then yields to queued commands; due metadata has
+priority. Up to eight additional history pages share the first page's original
+ten-second admission and currentness end, including time spent on intervening work.
+Each newly dispatched read separately owns the existing ten-second exchange bound,
+captured before signing. Its exact retries cannot restart that bound. A read already
+in flight may finish after the view end, within its own original exchange bound;
+total completion can extend the logical view end only by that bounded in-flight
+read. Such a late reply is consumed and authenticated without publishing its content,
+advancing a cursor, installing filters or scheduling another continuation. No new
+request starts after the view end. Incomplete recipient
+policy cannot publish history. Each completed page advances the authenticated
+cursor; an unchanged position with `has_more` is rejected. Initial catch-up does
+not emit live notifications. A completed command pull supersedes matching partial
+work without extending its end or page allowance. Cancellation, disconnection,
+room or focused-context changes, gaps and failures stop continuation. A finite
+burst that exhausts its time or page allowance leaves `has_more` visible; the next
+ordinary refresh can resume it. No read grants authority to a subsequent read.
 A slow full refresh does not schedule an immediate second full refresh.
 A failed full attempt also waits that interval before another metadata attempt;
-connection backoff can require a longer wait. Failure never makes a view current.
+transport or authority backoff can require a longer wait. Failure never makes a view current.
 
 Snapshots distinguish `updating` from stale room or inspection state. The GUI and
-TUI show "refreshing views" while reads run. Starting an ordinary refresh retains
+TUI show "refreshing views" while reads run or a committed community send has a
+bounded room update or selected-room catch-up pending. Pending work does not make retained policy current
+and does not extend the lifetime of any authority observation. Starting an ordinary refresh retains
 the last successfully synchronized view; it does not itself signal lost access.
 Cached or already-stale views remain stale until their required current reads
 succeed. A failed view scope marks its retained views stale, including local
@@ -104,13 +125,36 @@ Saturated, closed or oversized output is discarded. Connection workers never
 wait for the output sink, and shutdown does not join the diagnostic writer.
 Unavailable diagnostic output does not change the connection outcome.
 
-A temporary refusal of an authenticated view read retries that exact read on the
-same session, at most five attempts within its original ten-second budget. Retry
+Controller and direct CLI/API reads share the same temporary-refusal recovery.
+An authenticated temporary read refusal retries the same signed bytes on the
+same session, at most five attempts within one original ten-second budget.
+This also covers room inspection before direct message preparation. Retry
 guidance must fit that budget. Each attempt requires a new service authority
 check; earlier successful refresh reads are not restarted. Permanent refusals,
-invalid responses and transport loss end the attempt. Disconnect and shutdown
-interrupt retry waiting. This read path cannot submit mutations or recreate a
+invalid responses and transport loss end the attempt. Controller disconnect and
+shutdown interrupt retry waiting; synchronous direct reads retain the same fixed
+budget. This read path cannot submit mutations or recreate a
 pending message. Room lists stop when the final partial page is received.
+
+Periodic metadata, community catch-up and coalesced post-send reads retain their
+exact signed request and original deadlines while waiting for retry guidance.
+The worker can start queued commands between complete authenticated responses.
+A scheduled read does not hold the worker during its retry timer, consume another
+pagination allowance, or obtain an extra connection. An incomplete response
+still owns the stream until completion or transport failure. Synchronous initial
+readiness, explicit reads and unsupported view paths retain the same retry policy.
+
+A read or logical view budget that ends before dispatch or after a complete verified response
+reports `ReadDeadlineExpired`. Late content cannot make a view current. The
+Controller retains the synchronized session and marks affected views stale.
+If an already-online background or post-send view expires, the next periodic
+view attempt waits the ordinary five-second interval. Other commands can proceed
+through their current service checks without connection backoff or outcome replay.
+This does not change initial readiness or recovery of uncertain effects.
+Terminal refusals retain their authority meaning;
+an incomplete exchange at its own read deadline or actual socket failure still
+requires reconnection. A logical view deadline never shortens an already dispatched
+frame exchange. Neither deadline grants authority or permits mutation retries.
 
 The command queue contains at most 32 bounded commands. Dispatch returns a local
 request number. Immutable snapshots carry that number on command status and
@@ -139,7 +183,21 @@ local persistence succeeds. A later room, grant or inspection refresh can fail
 without changing that confirmed outcome or replaying the effect. The original
 durable delivery is published before follow-up view reads start. A normal send
 refreshes recipient filters, the affected room and the companion privacy
-observation. Unrelated room-list, account, service, grant and agent metadata wait
+observation. Direct committed sends to the selected, unfocused local community
+room may share this work when bounded views are negotiated and no history gap is
+present. The first pending update's one-second age is never reset by newer sends;
+the next background turn starts at that age or after the second commit. Idle time
+starts it sooner. Each turn reads at most one complete page response. Further
+commits share the pending work and request one later pull if they arrived after
+its assembly began. They never extend that assembly's deadline. A different
+operation or room context discards unfinished background work and leaves the
+old view stale before performing its own current operation. Disconnect and
+shutdown also discard pending work; none of these paths replays committed effects.
+Delegated and approval sends, confidential conversations, focused history,
+background-room sends and unsupported view paths retain their immediate refresh.
+The existing finite metadata turns and five-second cadence continue between
+commands, and a targeted pull supersedes its matching partial room assembly.
+Unrelated room-list, account, service, grant and agent metadata wait
 until the existing full-refresh deadline. The affected-room pull retains current
 room authorization, filtered history and restriction inspection; focused history
 also receives its current context check. Membership and policy mutations still

@@ -120,7 +120,27 @@ unknown outcome remain. `/resolve WINDOW:OPERATION DIGEST` can query a later res
 without resubmitting an abandoned effect.
 
 The [shared-client contract](LocalClient.md) documents bounds, persistence,
-cancellation and inspection. The CLI continues to provide structured noninteractive
-JSON through the same operation semantics. Confidential direct conversations,
-encrypted private groups and federation remain in the first-release roadmap; this
-community-room increment does not present them as available.
+cancellation and inspection. The CLI provides structured noninteractive JSON
+through the same operation semantics.
+
+## Confidential conversations and network selection
+
+Use the private-group or direct-conversation controls to create an encrypted room.
+`/private NAME`, `/msg ACCOUNT` and `/whisper ACCOUNT` expose the same
+workflows. Check contact fingerprints and current endpoint membership before
+establishing an encrypted epoch. A pending membership barrier prevents sending;
+neither the GUI nor the TUI substitutes a plaintext message. See
+[confidential conversations](ConfidentialConversations.md) for the exact initial
+trust, invitation and encryption controls.
+
+Explicitly configured bilateral agreements appear in the home-service selector.
+Use `/network local` or `/network AGREEMENT` in the TUI. The selection changes the
+receiving home and available rooms; it does not change the account's network origin.
+Local drafts, uncertain operations and filters retain their service context.
+Switch back to the account's origin for its identity lifecycle operations.
+An unavailable or withdrawn agreement remains a failed remote path, with no direct
+transport fallback. The [federation guide](FederationRuntime.md) describes gateway
+admission and the two separately observed HyperNet transport legs.
+
+These development workflows still require release qualification. Use the exact
+release's documented platform and capacity limits when deploying it.
