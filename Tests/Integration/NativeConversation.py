@@ -133,6 +133,7 @@ class Conversation:
             '--network', self.home['network']['network'], '--incarnation', self.home['network']['incarnation'],
             '--service', self.home['service'], *self.clock(companions['Alice']['directory']))
         assert descriptor['home'] == self.home
+        self.service_signing_key = descriptor['signingKey']
         accounts = {}
         for name in ('Alice', 'Bob', 'Agent'):
             invitation = self.exchange / (name+'Invitation.json')
@@ -592,8 +593,9 @@ class Conversation:
 
     def acknowledgement_loss(self, room, stopped=None):
         proxy = self.controls['begin_ack_loss']('Bob')
+        primary_failure = None
         try:
-            proxy.arm()
+            proxy.arm(self.service_signing_key, self.home, room)
             text = 'Committed once despite lost acknowledgement'
             self.send('Bob',room,text,failure=True)
             assert proxy.dropped.wait(2), 'No actual service response was discarded'
@@ -624,8 +626,21 @@ class Conversation:
             assert len(after)==1 and after[0]['event']==before[0]['event']
             self.record(dict(case='NativeUnknownSendResolvesExactlyOnce',passed=True,
                              event=after[0]['event'],fault=proxy.evidence,serviceRestart=True))
+        except BaseException as error:
+            primary_failure = error
+            raise
         finally:
-            self.controls['end_ack_loss']('Bob',proxy)
+            try:
+                self.controls['end_ack_loss']('Bob',proxy)
+            except Exception as error:
+                if primary_failure is None:
+                    raise
+                # Keep the original scenario traceback; cleanup is separate bounded evidence.
+                try:
+                    self.record(dict(case='NativeAckLossCleanupFailed', secondary=True,
+                                     errorType=type(error).__name__[:64]))
+                except Exception:
+                    pass
 
     def authority_refusal(self, room):
         text = 'Preserved draft after HyperNet authority withdrawal'

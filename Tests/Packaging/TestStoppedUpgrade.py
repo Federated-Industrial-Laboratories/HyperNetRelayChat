@@ -61,6 +61,7 @@ class StoppedUpgrade(unittest.TestCase):
     def acknowledgement(self, clean=True):
         workflow = NATIVE.Conversation.__new__(NATIVE.Conversation)
         workflow.binary, workflow.home = 'old', {'service': 'home'}
+        workflow.service_signing_key = 'public-service-key'
         workflow.profiles = {'Bob': 'Bob'}
         pending = dict(operationId={'window': 'window', 'operation': 'original'}, actionDigest='digest',
                        held=False, abandoned=False)
@@ -112,6 +113,22 @@ class StoppedUpgrade(unittest.TestCase):
         self.assertEqual(trace, ['PendingAfterAckLoss:old', 'stop', 'switch', 'start:new',
                                 'ResolveAfterRestart:new', 'ResolveAgain:new', 'OutboxResolved:new'])
         workflow.controls['end_ack_loss'].assert_called_once()
+
+    def test_cleanup_failure_preserves_primary_scenario_error(self):
+        workflow, values, _, stopped = self.acknowledgement()
+        values['PendingAfterAckLoss'] = []
+        workflow.controls['end_ack_loss'].side_effect = RuntimeError('private cleanup detail')
+        with self.assertRaisesRegex(AssertionError, 'one unresolved operation'):
+            workflow.acknowledgement_loss('room', stopped=stopped)
+        workflow.start.assert_not_called()
+        workflow.record.assert_called_once_with(dict(
+            case='NativeAckLossCleanupFailed', secondary=True, errorType='RuntimeError'))
+
+    def test_cleanup_failure_after_success_is_not_hidden(self):
+        workflow, _, _, stopped = self.acknowledgement()
+        workflow.controls['end_ack_loss'].side_effect = RuntimeError('restoration failed')
+        with self.assertRaisesRegex(RuntimeError, 'restoration failed'):
+            workflow.acknowledgement_loss('room', stopped=stopped)
 
     def test_substituted_or_unresolved_outcome_cannot_qualify(self):
         for field in ('operationId', 'actionDigest', 'event', 'status', 'home', 'second', 'duplicate'):

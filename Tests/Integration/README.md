@@ -216,12 +216,20 @@ One isolated acknowledgement-loss case uses `CompanionFault.py`. The fixture
 temporarily moves one outgoing companion to a sibling private directory and
 places the proxy at its original local socket path. The proxy forwards exact
 control requests and responses, real verified peer context, and HRC payloads.
-After explicit arming it discards one complete HRC Response frame and closes the
-connection. It never creates identities, authority evidence or service results.
+After explicit arming with the service's public descriptor key and target room,
+it observes bounded canonical Action envelopes and discards only a correlated
+MessageSend committed response verified with that key. Home, operation ID and
+the exact signed Action payload digest must match; the acknowledgement must name
+a committed event. Preparatory reads, refusals, unrelated and unverified responses
+are forwarded unchanged. The selector uses the fixture's existing Python
+`cryptography` dependency, with at most 16 pending send correlations per connection,
+eight connections and the protocol's frame, nesting and collection limits. It
+never creates identities, authority evidence or service results.
 The driver verifies the actual committed event, the client's durable unresolved
 outbox, service restart, exact resolution and absence of duplicate publication.
-The ordinary companion is restored afterwards. Baseline conversation uses no
-proxy.
+The ordinary companion is restored afterwards. If restoration also fails after
+a scenario failure, the driver retains the original failure and records only a
+bounded secondary error category. Baseline conversation uses no proxy.
 
 `NativeLocalClient.rs`, built as the `native-local-client` example, optionally
 extends this same fixture with the production Controller used by the local
