@@ -2,8 +2,10 @@
 
 This document describes the implemented service and client integration contract
 for the [persistent MLS boundary](CryptoRuntime.md). Encrypted direct conversations
-and private groups use the same ordered encrypted-room lifecycle. Overall release
-qualification remains in progress. Community rooms remain service-readable.
+and private groups use the same ordered encrypted-room lifecycle. Community rooms
+remain service-readable.
+
+HRC 0.1.0 release qualification is pending.
 
 ## Admission and identity
 

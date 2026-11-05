@@ -67,6 +67,19 @@ fn only_authenticated_temporary_refusals_preserve_the_session() {
 pub(in crate::client) fn retained_handle(
     root: &Path,
 ) -> (crate::hypernet::Companion, Arc<crate::hypernet::Stream>) {
+    let (companion, stream, socket) = retained_peer(root);
+    // No read is needed to prove whether the Controller retains its close handle.
+    drop(socket);
+    (companion, stream)
+}
+
+pub(in crate::client) fn retained_peer(
+    root: &Path,
+) -> (
+    crate::hypernet::Companion,
+    Arc<crate::hypernet::Stream>,
+    std::os::unix::net::UnixStream,
+) {
     let path = root.join("Companion");
     fs::create_dir(&path).unwrap();
     fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
@@ -129,10 +142,7 @@ pub(in crate::client) fn retained_handle(
         .connect(&hex::encode([3; 32]), PROTOCOL, Duration::from_secs(2))
         .unwrap();
     let socket = server.join().unwrap();
-    // The adapter's lifecycle remains active when its peer has closed; no read is
-    // needed to prove whether the Controller retains and can close its handle.
-    drop(socket);
-    (companion, Arc::new(stream))
+    (companion, Arc::new(stream), socket)
 }
 
 #[test]

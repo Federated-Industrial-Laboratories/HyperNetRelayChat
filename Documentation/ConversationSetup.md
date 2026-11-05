@@ -1,9 +1,11 @@
 # Service and client setup
 
-The Linux command-line workflow uses existing HyperNet Core 0.10.1 and Suite 0.10.0
+The Linux command-line workflow requires a HyperNet Core 0.10.2 and Suite 0.10.1
 deployment. Its receiving application service and each caller require explicit
 HyperNet admission, current grants, and a configured `hrc/1` stream binding or
 target. HRC does not create application consent or renew it automatically.
+
+HRC 0.1.0 release qualification is pending.
 
 The service is authoritative for accounts, rooms, delegation, moderation and
 ordered history. Each client owns a separate endpoint signing key and encrypted
@@ -13,7 +15,8 @@ authentication.
 
 ## Create a home service
 
-Build with the [repository instructions](../README.md). Use absolute canonical
+Install a [verified package](Installation.md) or build with the
+[repository instructions](../README.md). Use absolute canonical
 paths. Parent directories for configuration, invitation and registration files
 must already exist, belong to the current user and have mode `0700`. Files are
 created with mode `0600`. New service and profile directories must not exist.

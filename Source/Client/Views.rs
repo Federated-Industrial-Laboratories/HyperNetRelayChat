@@ -449,7 +449,7 @@ impl SelectedCatchup {
 }
 enum Stage {
     Metadata(MetadataAssembly),
-    Selected,
+    Selected(Option<RoomId>),
     Background,
     Room(CommunityAssembly, bool),
     Privacy,
@@ -464,6 +464,12 @@ impl RefreshCycle {
         })
     }
     fn room_updated(&mut self, room: RoomId) {
+        if let Stage::Selected(updated) = &mut self.stage {
+            // Metadata has completed. Keep the room binding until the selected
+            // turn so an intervening selection or invalidation cannot be skipped.
+            *updated = Some(room);
+            return;
+        }
         if let Stage::Room(state, background) = &self.stage
             && state.room == room
         {
@@ -485,10 +491,11 @@ impl RefreshCycle {
         match &mut self.stage {
             Stage::Metadata(state) => {
                 if state.step(worker, deadline()?)? {
-                    self.stage = Stage::Selected;
+                    self.stage = Stage::Selected(None);
                 }
             }
-            Stage::Selected => {
+            Stage::Selected(updated) => {
+                let updated = *updated;
                 self.stage = Stage::Background;
                 if let Some(room) = worker.snapshot.selected.as_ref().map(|r| r.summary.room) {
                     if worker
@@ -497,6 +504,21 @@ impl RefreshCycle {
                         .iter()
                         .any(|r| r.room == room && r.joined)
                     {
+                        if updated == Some(room)
+                            && worker.client.bounded_views()
+                            && !worker.snapshot.inspection.stale
+                            && !worker.snapshot.inspection.filters_stale
+                            && worker.snapshot.selected.as_ref().is_some_and(|view| {
+                                view.summary.joined
+                                    && view.summary.confidentiality
+                                        == RoomConfidentiality::Community
+                                    && !view.stale
+                                    && view.gap.is_none()
+                                    && view.focus.is_none()
+                            })
+                        {
+                            return Ok(false);
+                        }
                         if let Some(event) = worker.snapshot.selected.as_ref().and_then(|v| v.focus)
                         {
                             worker.open_event(room, event)?;

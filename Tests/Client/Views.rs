@@ -179,6 +179,104 @@ fn a_command_pull_supersedes_only_its_pending_room_group_without_restarting_meta
 }
 
 #[test]
+fn completed_room_pull_satisfies_the_selected_turn_but_keeps_privacy_and_metadata_due() {
+    let (fixture, mut worker, room) = worker();
+    worker
+        .client
+        .install_closed_view_test_session(&fixture.root);
+    worker.shared.stop.store(false, Ordering::Release);
+    worker.shared.disconnect.store(false, Ordering::Release);
+    worker.poll = Instant::now() - Duration::from_secs(6);
+    let poll = worker.poll;
+    let mut cycle = RefreshCycle {
+        stage: Stage::Selected(None),
+    };
+    // The callback is used only after the grouped pull has installed every
+    // filter, restriction and history component. The fixture view is current.
+    cycle.room_updated(room);
+    assert!(!cycle.step(&mut worker).unwrap());
+    assert!(matches!(cycle.stage, Stage::Background));
+    // With no other joined room, both turns succeed without touching the closed
+    // session. Previously the second turn attempted a duplicate CommunitySync.
+    assert!(!cycle.step(&mut worker).unwrap());
+    assert!(matches!(cycle.stage, Stage::Privacy));
+    assert_eq!(worker.poll, poll);
+    assert!(worker.metadata_due());
+    // The required companion privacy observation is still attempted separately.
+    assert!(matches!(cycle.step(&mut worker), Err(Error::Network(_))));
+}
+
+#[test]
+fn selected_turn_does_not_reuse_an_unfinished_or_invalidated_room_update() {
+    for invalidation in ["metadata", "selection", "view", "filters", "gap"] {
+        let (fixture, mut worker, room) = worker();
+        worker
+            .client
+            .install_closed_view_test_session(&fixture.root);
+        worker.shared.stop.store(false, Ordering::Release);
+        worker.shared.disconnect.store(false, Ordering::Release);
+        let mut cycle = if invalidation == "metadata" {
+            RefreshCycle::new().unwrap()
+        } else {
+            RefreshCycle {
+                stage: Stage::Selected(None),
+            }
+        };
+        cycle.room_updated(room);
+        match invalidation {
+            "metadata" => {
+                assert!(matches!(cycle.stage, Stage::Metadata(_)));
+                assert!(
+                    cycle.step(&mut worker).is_err(),
+                    "metadata must still be read"
+                );
+                continue;
+            }
+            "selection" => {
+                let other = RoomId {
+                    local: Id::from_bytes([97; 32]),
+                    ..room
+                };
+                let mut summary = worker.snapshot.rooms[0].clone();
+                summary.room = other;
+                worker.snapshot.rooms.push(summary.clone());
+                cache::save_rooms(&mut worker.client.store, room.home, &worker.snapshot.rooms)
+                    .unwrap();
+                worker.snapshot.selected.as_mut().unwrap().summary = summary;
+            }
+            "view" => worker.snapshot.selected.as_mut().unwrap().stale = true,
+            "filters" => worker.snapshot.inspection.filters_stale = true,
+            "gap" => {
+                worker.snapshot.selected.as_mut().unwrap().gap = Some("CursorHistoryGap".into())
+            }
+            _ => unreachable!(),
+        }
+        if invalidation == "gap" {
+            assert!(!cycle.step(&mut worker).unwrap());
+            assert!(matches!(cycle.stage, Stage::Background));
+            assert_eq!(
+                worker.snapshot.selected.as_ref().unwrap().gap.as_deref(),
+                Some("CursorHistoryGap"),
+                "a completed page must not clear an existing history gap"
+            );
+            assert!(!cycle.step(&mut worker).unwrap());
+            assert!(matches!(cycle.stage, Stage::Privacy));
+            assert!(matches!(cycle.step(&mut worker), Err(Error::Network(_))));
+        } else {
+            assert!(!cycle.step(&mut worker).unwrap());
+            assert!(
+                matches!(cycle.stage, Stage::Room(_, false)),
+                "{invalidation}"
+            );
+            assert!(
+                cycle.step(&mut worker).is_err(),
+                "{invalidation} must still attempt its room read"
+            );
+        }
+    }
+}
+
+#[test]
 fn ordinary_bounded_polling_reclaims_expired_candidates_and_old_drafts_once_per_cycle() {
     let (fixture, mut worker, room) = worker();
     worker

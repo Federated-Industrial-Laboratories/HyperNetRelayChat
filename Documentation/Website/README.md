@@ -1,22 +1,25 @@
 # HRC website manuals
 
 This MDS consumer builds the maintained HRC manuals for `/docs/hrc/` on the
-HyperNet website. It is a local development candidate. HRC release qualification
-is still in progress; these files do not establish a supported or published release.
+HyperNet website.
+
+HRC 0.1.0 release qualification is pending; do not publish this manual set until
+qualification is complete.
 
 ## Source and publication scope
 
-The configuration pins HRC `0.1.0-dev.1` documentation to
-`cd534304be077fedcf68dd113c554754a1ad9ae7`. It exports only the 21 maintained
-Markdown manuals directly under `Documentation/`, the root README, Apache-2.0
+The HRC `0.1.0` publication configuration selects `source.tag = "v0.1.0"` and omits
+`source.revision`. The builder resolves that exact tag to its full commit before
+exporting. It exports only the 21 maintained Markdown manuals directly under
+`Documentation/`, the root README, Apache-2.0
 license, third-party adaptation notices and publisher public key: 25 pages. The
 README is the manual home. Website build instructions and generated snapshots are
 not product manuals.
 
 Navigation separates operating procedures, implementation contracts and the
 preserved design proposals. The original status and limits remain in each source.
-The `preview` label and `noindex` metadata apply to every page. No public HRC
-repository or download URL is implied. The repository and package distribution
+Before publication, retain the `preview` channel and `noindex` metadata. No public
+HRC repository or download URL is implied. The repository and package distribution
 remain private after manuals are published. Package-specific dependency inventories
 and source archives remain package deliverables described by the
 [installation guide](../Installation.md).
@@ -61,7 +64,7 @@ node /path/to/mds/bin/mds.mjs preview --config /path/to/hrc-website/mds.config.j
 Stop the preview after inspection. Its HRC home is
 `http://127.0.0.1:4177/docs/hrc/`. The parent `/docs/` link and sibling Core/Suite
 manual links need the complete HyperNet site for local navigation.
-`check --release` intentionally refuses the current preview channel.
+`check --release` refuses a preview channel.
 
 ## Routes and upstream links
 
@@ -70,17 +73,15 @@ source headings across updates. All relative HRC manual and license links resolv
 inside `/docs/hrc/`; MDS checks those paths and heading anchors. Local search is
 owned at `/docs/hrc/search/` and requires no external search service.
 
-The current preview's twelve explicit publication edits map Core 0.10.1 and
-Suite 0.10.0 documentation URLs to the existing `/docs/core/` and `/docs/suite/`
-routes. They match the published
-Core `f3b95f798def698087bd229dca9dcd0ec2c513e4` and Suite
-`3055f06a691fbc2f0214b4d9bb706a004d5c22ad` source identities. Each original URL
-must match exactly once. Code references and historical draft links remain as
-authored. The preview mappings predate the required Core 0.10.2 and Suite 0.10.1
-candidate pair. Before exporting the final manuals, update each
-`publicationEdits[].from` to the exact final upstream source URL in its named
-manual, preserving its `source` and `to` mapping. No technical prose or code example
-is rewritten during publication.
+Twelve explicit publication edits map documentation URLs from the exact Core
+0.10.2 and Suite 0.10.1 source revisions to the existing `/docs/core/` and
+`/docs/suite/` routes. Each `publicationEdits[].source` names an HRC manual;
+`from` must match its pinned upstream URL exactly once, and `to` selects the
+corresponding published manual route. Reconcile the `from` values with the final
+upstream revisions in the HRC manuals before exporting. Preserve the source-to-route
+mapping when changing a source pin. Code references and historical draft links
+remain as authored. No technical prose or code example is rewritten during
+publication.
 Check the sibling routes against the complete site before deployment; the MDS
 checker checks only its owned HRC tree.
 
@@ -93,8 +94,8 @@ the existing MDS runtime.
 
 1. Complete HRC qualification and update its authoritative status, compatibility,
    capacity and package instructions. Commit those manuals with the release work.
-2. Set the product version and source tag, for example `0.1.0` and `v0.1.0`.
-   Remove the development source revision. Commit the final configuration and
+2. Set `site.version` to `0.1.0` and `source.tag` to `v0.1.0`, with no
+   `source.revision`. Commit the final configuration and
    manuals before creating the release tag. The builder resolves that explicit
    tag to a full commit before exporting; a missing tag fails without using HEAD.
    The exported configuration and manifest retain both the full commit and tag.
@@ -113,6 +114,6 @@ the existing MDS runtime.
    deployment for rollback and verify the public home, installation, license,
    search assets and sibling links. No new DNS name or proxy route is needed.
 
-Local generation does not change repository visibility or publish a development
-candidate. Public hosting and the final release identity remain separate delivery
+Local generation does not change repository visibility or publish a release.
+Public hosting and the final release identity remain separate delivery
 steps.

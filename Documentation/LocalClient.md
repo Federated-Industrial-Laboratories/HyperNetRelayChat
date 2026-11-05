@@ -118,12 +118,15 @@ Saturated, closed or oversized output is discarded. Connection workers never
 wait for the output sink, and shutdown does not join the diagnostic writer.
 Unavailable diagnostic output does not change the connection outcome.
 
-A temporary refusal of an authenticated view read retries that exact read on the
-same session, at most five attempts within its original ten-second budget. Retry
+Controller and direct CLI/API reads share the same temporary-refusal recovery.
+An authenticated temporary read refusal retries the same signed bytes on the
+same session, at most five attempts within one original ten-second budget.
+This also covers room inspection before direct message preparation. Retry
 guidance must fit that budget. Each attempt requires a new service authority
 check; earlier successful refresh reads are not restarted. Permanent refusals,
-invalid responses and transport loss end the attempt. Disconnect and shutdown
-interrupt retry waiting. This read path cannot submit mutations or recreate a
+invalid responses and transport loss end the attempt. Controller disconnect and
+shutdown interrupt retry waiting; synchronous direct reads retain the same fixed
+budget. This read path cannot submit mutations or recreate a
 pending message. Room lists stop when the final partial page is received.
 
 A read budget that ends before dispatch or after a complete verified response

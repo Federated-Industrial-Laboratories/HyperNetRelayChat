@@ -4,9 +4,8 @@ HRC packages contain the GUI, TUI, CLI and deterministic bot in one `Bin/hrc`
 executable. HyperNet Core and Suite are separate prerequisites. Installing HRC
 does not create a network, grant application access or start a service.
 
-Release qualification is in progress. Development packages are not a supported
-stable release. Check the package's release notes and qualification record before
-using its stated platform or capacity limits.
+HRC 0.1.0 release qualification is pending. Check the package's release notes and
+qualification record for its stated platform and capacity limits.
 
 ## Requirements
 
@@ -16,9 +15,14 @@ The GUI additionally needs a working Wayland or X11 session, EGL/OpenGL, XKB and
 Fontconfig. Install fonts for the languages in use; missing terminal or GUI glyphs
 do not change stored text. Sound is optional and off initially.
 
-The required upstream pair is Core 0.10.2 and Suite 0.10.1, currently checked
-candidates rather than published releases. Use independently verified binaries
-matching the [contract map](HyperNetContract.md), with the version-2 application
+Native network qualification uses Ubuntu 26.04 (resolute), kernel
+`7.0.0-42-generic`, amd64 and GNU libc 2.43. Packaged CLI and offline GUI/TUI checks
+use Ubuntu 24.04 with GNU libc 2.39; the current binary requires GNU libc 2.39 or
+later. Those offline checks do not establish full native-load qualification on
+Ubuntu 24.04. Other platforms are not qualified.
+
+The required upstream pair is Core 0.10.2 and Suite 0.10.1. Use independently
+verified binaries matching the [contract map](HyperNetContract.md), with the version-2 application
 companion and `checkAuthority-v2`. Each service and caller needs its own current
 application admission and approved stream configuration. See
 [service setup](ConversationSetup.md) for identities, clock observations and
@@ -27,9 +31,11 @@ private directory permissions. There is no direct Internet fallback.
 ## Verify and unpack
 
 Obtain the selected binary archive, source archive, `SHA256SUMS`, its
-`SHA256SUMS.sig` OpenSSH signature, and `PublisherKey.txt` from the authorized private
-release channel. Repository and package distribution remain private; published
-manuals do not provide public download access.
+`SHA256SUMS.sig` OpenSSH signature, and `PublisherKey.txt` from the
+[private v0.1.0 release](https://github.com/Federated-Industrial-Laboratories/HyperNetRelayChat/releases/tag/v0.1.0)
+once published. Access requires an authorized repository account. Repository and
+package distribution remain private; published manuals do not provide public
+download access.
 Verify the publisher key against this independently pinned SHA-256 fingerprint:
 
 `SHA256:XaKyGFow6q4DkZee5rQLUXN66AxQogVEtWb1sQS6m24`
@@ -69,7 +75,7 @@ it is an inventory inside the archive, not a replacement for external verificati
 ## Upgrade
 
 The checked development upgrade starts at the `0.1.0-dev.1` build from source
-`d6e68cc934adcde3023c866f003024718038eab2` and installs the `0.1.0` candidate,
+`d6e68cc934adcde3023c866f003024718038eab2` and installs `0.1.0`,
 with storage continuity and Home schemas remaining at version 1.
 The stopped upgrade preserved account, endpoint and home identities, indexed
 Unicode history, an independent unsent draft and the exact pending operation after
