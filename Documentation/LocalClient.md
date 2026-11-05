@@ -45,7 +45,7 @@ burst that exhausts its time or page allowance leaves `has_more` visible; the ne
 ordinary refresh can resume it. No read grants authority to a subsequent read.
 A slow full refresh does not schedule an immediate second full refresh.
 A failed full attempt also waits that interval before another metadata attempt;
-connection backoff can require a longer wait. Failure never makes a view current.
+transport or authority backoff can require a longer wait. Failure never makes a view current.
 
 Snapshots distinguish `updating` from stale room or inspection state. The GUI and
 TUI show "refreshing views" while reads run or a committed community send has a
@@ -138,8 +138,12 @@ pending message. Room lists stop when the final partial page is received.
 
 A read or logical view budget that ends before dispatch or after a complete verified response
 reports `ReadDeadlineExpired`. Late content cannot make a view current. The
-Controller retains the synchronized session, marks affected views stale and uses
-its existing bounded backoff. Terminal refusals retain their authority meaning;
+Controller retains the synchronized session and marks affected views stale.
+If an already-online background or post-send view expires, the next periodic
+view attempt waits the ordinary five-second interval. Other commands can proceed
+through their current service checks without connection backoff or outcome replay.
+This does not change initial readiness or recovery of uncertain effects.
+Terminal refusals retain their authority meaning;
 an incomplete exchange at its own read deadline or actual socket failure still
 requires reconnection. A logical view deadline never shortens an already dispatched
 frame exchange. Neither deadline grants authority or permits mutation retries.

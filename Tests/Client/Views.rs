@@ -48,6 +48,46 @@ fn expired_queued_view_dispatches_nothing_and_retains_its_session() {
 }
 
 #[test]
+fn expired_periodic_view_yields_without_connection_backoff_or_immediate_retry() {
+    let (fixture, mut worker, room, mut peer) = live_worker();
+    let _clock = worker.client.start_view_test_clock(&fixture.root);
+    let session = worker.client.session().unwrap().ready.session;
+    let retry = worker.retry;
+    let mut state = CommunityAssembly::new(&mut worker, room).unwrap();
+    state.end = 0;
+    worker.refresh_cycle = Some(RefreshCycle {
+        stage: Stage::Room(state, false),
+    });
+    worker.poll = Instant::now() - Duration::from_secs(6);
+    worker.tick();
+    let visible = Arc::clone(&worker.shared.snapshot.lock().unwrap());
+    assert_eq!(visible.connection, ConnectionState::Online);
+    assert_eq!(visible.status.as_ref().unwrap().code, "ReadDeadlineExpired");
+    assert!(visible.inspection.stale && visible.inspection.filters_stale);
+    assert!(visible.selected.as_ref().unwrap().stale);
+    assert!(visible.privacy.is_none());
+    assert!(worker.refresh_cycle.is_none() && worker.selected_catchup.is_none());
+    assert!(!worker.metadata_due());
+    assert_eq!(worker.retry, retry);
+    assert_eq!(worker.attempt, 0);
+    assert_eq!(worker.client.session().unwrap().ready.session, session);
+    // The failed view waits its normal interval. No recovery or new read runs
+    // merely because another worker turn begins on the synchronized session.
+    let revision = visible.revision;
+    worker.tick();
+    assert_eq!(worker.snapshot.revision, revision);
+    peer.set_nonblocking(true).unwrap();
+    let mut byte = [0];
+    assert_eq!(
+        std::io::Read::read(&mut peer, &mut byte)
+            .unwrap_err()
+            .kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+    assert!(worker.client.pending().unwrap().is_empty());
+}
+
+#[test]
 fn fragmented_late_view_reply_is_drained_without_publishing_or_reconnecting() {
     let (fixture, mut worker, room, peer) = live_worker();
     let _clock = worker.client.start_view_test_clock(&fixture.root);
@@ -99,6 +139,19 @@ fn fragmented_late_view_reply_is_drained_without_publishing_or_reconnecting() {
     );
     assert!(worker.client.community_modes.is_empty());
     assert!(!stream.privacy().is_historical());
+    let retry = worker.retry;
+    worker.finish_view(result.map(|_| ()));
+    worker.publish();
+    assert_eq!(worker.snapshot.connection, ConnectionState::Online);
+    assert_eq!(
+        worker.snapshot.status.as_ref().unwrap().code,
+        "ViewRefreshFailed"
+    );
+    assert!(worker.snapshot.selected.as_ref().unwrap().stale);
+    assert!(worker.snapshot.inspection.stale && worker.snapshot.inspection.filters_stale);
+    assert_eq!(worker.retry, retry);
+    assert!(!worker.metadata_due());
+    // A new explicit read obtains its own current response on the same stream.
     let next: Value = worker
         .read(
             Operation::ServiceInspect,

@@ -499,12 +499,12 @@ impl Worker {
             self.publish();
         } else if self.metadata_due() {
             if let Err(error) = self.refresh_turn() {
-                self.error(error);
+                self.view_error(error);
             }
             self.publish();
         } else if self.selected_catchup.is_some() {
             if let Err(error) = self.catchup_turn() {
-                self.error(error);
+                self.view_error(error);
             }
             self.publish();
         }
@@ -602,7 +602,7 @@ impl Worker {
         if let Err(error) = result {
             let request = self.request.take();
             self.stale();
-            self.error(error);
+            self.view_error(error);
             if let Some(status) = &mut self.snapshot.status {
                 status.detail = format!("View refresh failed: {}: {}", status.code, status.detail);
                 status.code = "ViewRefreshFailed".into();
@@ -682,6 +682,29 @@ impl Worker {
         // Reserved disconnect can leave an idle worker with no later command or
         // poll to publish the closed connection and invalidated live state.
         self.publish();
+    }
+    fn view_error(&mut self, error: Error) {
+        if matches!(error, Error::ReadDeadlineExpired)
+            && self.snapshot.connection == ConnectionState::Online
+            && self.client.session().is_ok()
+        {
+            // This expiry is before dispatch or after a fully verified reply.
+            // Retry the view on the normal cadence without suspending fresh effects
+            // or replaying resolved work on an already synchronized connection.
+            self.clear_pending_room();
+            self.refresh_cycle = None;
+            self.stale();
+            self.snapshot.notifications.clear();
+            self.snapshot.search = None;
+            self.poll = Instant::now();
+            self.snapshot.status = Some(Status {
+                request_id: self.request,
+                code: error.code().into(),
+                detail: error.to_string(),
+            });
+        } else {
+            self.error(error);
+        }
     }
     fn error(&mut self, e: Error) {
         self.clear_pending_room();
