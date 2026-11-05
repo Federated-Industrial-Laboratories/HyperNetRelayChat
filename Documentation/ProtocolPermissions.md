@@ -175,6 +175,19 @@ The following stream allocation is accepted as the initial qualification target.
 
 Per-queue limits are subordinate to the global byte ceiling; they are not preallocated independently. At most sixteen 512-KiB output queues account for 8 MiB of that ceiling. Crypto buffers, parsers, indexes, storage caches and process overhead also need explicit accounting against the measured RSS target. Service-wide cost rejection happens before fan-out/model work. E2EE recipient work needs its own endpoint budgets; a bounded server alone cannot protect clients from malicious MLS state growth.
 
+The service serialises Home access through one FIFO with at most 32 tickets,
+including its single holder. Each acquisition waits at most 1,000 ms. For local
+and federated operations after a fresh transport check, the original enclosing
+deadline and receipt lifetime can only shorten this wait. Release wakes the next
+waiter. Wait intervals are capped at 25 ms between shutdown, cancellation, stream
+validity and current-authority checks; these checks repeat before effects. The signed clock is
+sampled after acquisition. Existing domain checks and final commit guards remain
+authoritative; waiting neither refreshes authority nor repeats an operation.
+Handshake and other blocking Home users join the same bounded queue. Nonblocking
+screening and maintenance cannot overtake queued work. Saturation or wait-budget
+exhaustion returns `OperationBusy`; poison and expired or invalid authority fail
+closed. Queued tickets contain no additional action payload copies.
+
 Message exchange latency starts when an already encoded message is written to an established authenticated stream and ends at complete committed-acknowledgement payload receipt. The sample is accepted only after exact response verification. Connection setup, client queueing, local persistence, encoding/decoding and UI time are separate measurements. Scheduled-offer-to-observed-commit delay remains usability evidence, not this latency metric. Throughput, missing acknowledgements and recovery remain explicit gates; a fast subset cannot qualify the offered workload.
 
 Saturation returns bounded `RateLimited` or `Overloaded`, or closes only the affected stream. Never send automatic replies to errors/replies. No model call belongs in the admission path. Pre-HRC connection attacks and link saturation still require HyperNet/host controls. Qualification must include malformed frames, Unicode extremes, churn, joins, slow readers, costly searches, federation replay, agent loops and notification storms. Failed targets require smaller published limits or design changes, not relabelling a pass.

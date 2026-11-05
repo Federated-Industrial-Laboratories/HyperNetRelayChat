@@ -24,6 +24,8 @@ mod federation_gateway;
 mod federation_origin;
 #[path = "Handshake.rs"]
 mod handshake;
+#[path = "HomeAccess.rs"]
+mod home_access;
 #[path = "MessageTiming.rs"]
 mod message_timing;
 
@@ -98,7 +100,7 @@ const CAPABILITIES: &[&str] = &[
 struct Shared {
     config: Config,
     signer: SigningKey,
-    home: Mutex<Home>,
+    home: home_access::HomeAccess,
     companion: Companion,
     boot: Id,
     handshakes: AtomicUsize,
@@ -110,6 +112,46 @@ struct Shared {
     stop: Arc<AtomicBool>,
 }
 impl Shared {
+    fn operation_current(
+        &self,
+        stream: &Stream,
+        check: &crate::hypernet::AuthorityCheck,
+        end: Option<u64>,
+        cancel: &Cancellation,
+    ) -> bool {
+        !self.stop.load(Ordering::Acquire)
+            && !cancel.is_cancelled()
+            && stream.check_authority_supported()
+            && current(check, end)
+    }
+    fn operation_home(
+        &self,
+        stream: &Stream,
+        check: &crate::hypernet::AuthorityCheck,
+        end: Option<u64>,
+        cancel: &Cancellation,
+    ) -> std::result::Result<(home_access::Guard<'_>, clock::TimeBounds), Outcome> {
+        let end = check
+            .attestation()
+            .map(|evidence| evidence.not_after_boot_ms())
+            .map_or(end, |receipt_end| {
+                Some(end.map_or(receipt_end, |outer| outer.min(receipt_end)))
+            });
+        let home = self
+            .home
+            .acquire(end, || self.operation_current(stream, check, end, cancel))
+            .map_err(home_access::Error::refusal)?;
+        // Time captured before queueing is not the operation's current clock sample.
+        let now = self.config.clock.sample().map_err(|_| Outcome::Refused {
+            code: ErrorCode::Unavailable,
+            detail: "Clock".into(),
+            retry_after_ms: Some(1000),
+        })?;
+        if !self.operation_current(stream, check, end, cancel) {
+            return Err(home_access::Error::Invalidated.refusal());
+        }
+        Ok((home, now))
+    }
     fn budget_exhausted(
         &self,
         stream: &Stream,
@@ -342,7 +384,7 @@ fn load_shared(directory: &Path, stop: Arc<AtomicBool>, diagnostics: bool) -> Re
     let shared = Shared {
         config,
         signer,
-        home: Mutex::new(home),
+        home: home_access::HomeAccess::new(home, Arc::clone(&stop)),
         companion,
         boot,
         handshakes: AtomicUsize::new(0),
@@ -556,19 +598,29 @@ fn serve(shared: &Shared, stream: &Stream) -> Result<()> {
         challenge.expires_ms,
         "SessionAuthority",
     )?;
-    let now = shared.config.clock.sample().map_err(|_| Error::Clock)?;
-    if now.upper_ms >= challenge.expires_ms || clock::boot_ms().map_err(|_| Error::Clock)? >= end {
-        return Err(Error::HandshakeExpired);
-    }
-    if !check.current(shared) {
-        return Err(Error::Authority);
-    }
-    let window = shared
-        .home
-        .lock()
-        .map_err(|_| Error::State)?
-        .open_window(&endpoint, now, &|| check.current(shared))
-        .map_err(|_| Error::RetryWindow)?;
+    let window = {
+        let mut home = shared
+            .home
+            .acquire(Some(end), || {
+                check.current(shared) && stream.check_authority_supported()
+            })
+            .map_err(|_| Error::State)?;
+        let now = shared.config.clock.sample().map_err(|_| Error::Clock)?;
+        if now.upper_ms >= challenge.expires_ms
+            || clock::boot_ms().map_err(|_| Error::Clock)? >= end
+        {
+            return Err(Error::HandshakeExpired);
+        }
+        if !check.current(shared) {
+            return Err(Error::Authority);
+        }
+        home.open_window(&endpoint, now, &|| {
+            !shared.stop.load(Ordering::Acquire)
+                && stream.check_authority_supported()
+                && check.current(shared)
+        })
+        .map_err(|_| Error::RetryWindow)?
+    };
     let session = AuthenticatedSession::new(
         &endpoint,
         principal,
@@ -747,13 +799,17 @@ fn execute(
         shared.report_check(action.action().operation.name(), detail, Some(&check));
         return refused(code, detail);
     }
-    let Ok(now) = shared.config.clock.sample() else {
-        return refused(ErrorCode::Unavailable, "Clock");
+    let (mut home, now) = match shared.operation_home(stream, &check, end, cancel) {
+        Ok(value) => value,
+        Err(outcome) => return base(outcome),
     };
-    let Ok(mut home) = shared.home.try_lock() else {
-        return refused(ErrorCode::Overloaded, "OperationBusy");
-    };
-    match home.execute_cancellable(action, session, now, &|| current(&check, end), cancel) {
+    match home.execute_cancellable(
+        action,
+        session,
+        now,
+        &|| shared.operation_current(stream, &check, end, cancel),
+        cancel,
+    ) {
         Ok(response) => response,
         Err(_) => base(Outcome::Unknown),
     }

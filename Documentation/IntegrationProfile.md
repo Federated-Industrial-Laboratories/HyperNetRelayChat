@@ -57,6 +57,12 @@ readiness/lifecycle mutation occurs while that round is pending. A deferred
 queue head retains its original permit, and lifecycle work receives a fair turn
 after drain. The [contract map](HyperNetContract.md) gives the complete bounds.
 
+Established-stream background renewal can start a finite cohort and share the
+same four immutable exchange slots with already-current checks. Its completion
+must still match the exact open stream and current authority before the actor
+installs stream permission. It produces no action receipt. Endpoint renewal,
+unestablished-stream renewal and authority-changing cleanup remain exclusive.
+
 The channel consumes no application connection slot. HRC admits four concurrent
 exchanges within its existing 32-caller queue and charges work to its service and
 actor budgets. Original deadlines, current gates and final authority checks still

@@ -120,6 +120,16 @@ it. Completion closes admission, all workers drain, then lifecycle work retains
 its fair turn. Every result still passes current clock, gate, cancellation,
 control-generation, floor and history checks.
 
+A background renewal for an established stream can start the same finite round.
+It counts against the four-exchange ceiling; already-current action checks can
+use remaining slots before the first completion. Only the immutable renewal
+exchange runs outside the actor. Installation requires the exact open stream,
+forwarding identity, current endpoint profile and original end, with both ordinary
+and retirement-fence exclusion. It installs no action receipt or endpoint renewal.
+Unestablished-stream renewal, endpoint renewal and authority-changing cleanup
+retain exclusive turns. A paused open stream may regain permission; a closed,
+replaced, finished or cancelled stream cannot revive.
+
 The control channel consumes none of the sixteen application connection slots.
 HRC admits up to four exchanges within its bounded 32-caller queue. These are
 implementation bounds; the accepted pilot's latency, resource and fairness gates
