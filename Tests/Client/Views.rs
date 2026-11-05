@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Partial grouped reads cannot admit history, filters or a new authority lease.
+#[path = "Scheduled.rs"]
+mod scheduled;
 use super::super::completion_tests::worker;
 use super::*;
 use std::{io::Write, os::unix::net::UnixStream};

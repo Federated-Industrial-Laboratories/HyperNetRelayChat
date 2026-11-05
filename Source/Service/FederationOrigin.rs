@@ -583,7 +583,8 @@ fn export_proofs(
                     prepared.subject.digest(),
                     Some(end),
                     &Cancellation::default(),
-                    "FederationIdentityExport",
+                    admission::Request::account(session.acting.account, admission::Class::Read)
+                        .named("FederationIdentityExport"),
                     None,
                 )
                 .map_err(|error| {
@@ -825,6 +826,17 @@ fn forward(
                 shared.config.clock.sample().map_err(|_| Error::Clock)?,
             )
             .map_err(domain_error)?;
+        let authority_request = match &subject {
+            SourceSubject::Action(bytes) => {
+                let action = verify_action(&bytes.0, &key(session.signer)?)
+                    .map_err(|_| Error::Authentication)?;
+                shared.admission_request(&action, session, Some(end))
+            }
+            SourceSubject::Session(_) => {
+                admission::Request::account(session.acting.account, admission::Class::Interactive)
+            }
+        }
+        .named("FederationOriginAuthority");
         export_proofs(
             shared,
             source,
@@ -906,7 +918,7 @@ fn forward(
                     prepared.subject.digest(),
                     Some(end),
                     &Cancellation::default(),
-                    "FederationOriginAuthority",
+                    authority_request,
                     None,
                 )
                 .map_err(|error| {

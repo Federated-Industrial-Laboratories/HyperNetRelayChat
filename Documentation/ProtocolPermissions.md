@@ -182,6 +182,36 @@ completion remain separate measurements, with complete cohort coverage shown.
 
 Per-queue limits are subordinate to the global byte ceiling; they are not preallocated independently. At most sixteen 512-KiB output queues account for 8 MiB of that ceiling. Crypto buffers, parsers, indexes, storage caches and process overhead also need explicit accounting against the measured RSS target. Service-wide cost rejection happens before fan-out/model work. E2EE recipient work needs its own endpoint budgets; a bounded server alone cannot protect clients from malicious MLS state growth.
 
+Fresh HyperNet checks share one admission scheduler with at most four active
+exchanges and 32 tickets including active work. The service classifies verified
+operations: messages and mutations, cancellation, outcome resolution and session
+controls use the interactive class; view/history/search reads use the read class.
+Each class has at most three active exchanges and 24 total tickets, reserving one
+active slot and eight ticket places for the other class. A homogeneous workload
+therefore uses at most three exchanges, even when the fourth slot is idle.
+Eligible accounts alternate classes and take round-robin turns; one account's
+own requests retain FIFO order. An account has at most one active exchange and
+four tickets. New accounts join the back of the turn order rather than overtaking
+existing waiters.
+
+Identity comes from the authenticated account, not a nickname, endpoint, relay IP
+or caller-supplied priority. Delegated requests also share their verified owner's
+active and ticket limits. A nonblocking Home acquisition and at most 25 ms of
+read-only lookup may establish that binding through the existing current identity
+and grant checks. Unknown, invalid or unavailable owner evidence stays grouped
+under the authenticated actor; it never charges a claimed owner's queue. This
+lookup grants no permission and reserves no business budget. Gateway requests
+before full remote actor verification are conservatively grouped by the verified
+transport principal; unclassified foreign actions use the read class. The source
+service still accounts for its authenticated initiating account.
+
+Admission waits at most 1,000 ms, clipped by the original enclosing deadline.
+Release wakes eligible waiters; shutdown, cancellation and stream availability
+are checked at least every 25 ms and again before the exchange. Every admitted
+operation still obtains its own fresh action-bound authority check and passes the
+existing current identity, grant, room, clock and final-effect guards. Neither
+queue position nor a successful owner lookup is an authority lease.
+
 The service serialises Home access through one FIFO with at most 32 tickets,
 including its single holder. Each acquisition waits at most 1,000 ms. For local
 and federated operations after a fresh transport check, the original enclosing

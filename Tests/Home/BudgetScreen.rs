@@ -410,3 +410,102 @@ fn a_passing_screen_does_not_survive_a_current_membership_revocation() {
             && event.kind == Operation::MessageSend
     ));
 }
+
+#[test]
+fn admission_owner_is_a_bound_read_only_identity_not_a_permission() {
+    let fixture = Fixture::new();
+    let mut home = fixture.create();
+    let owner = enrol(&mut home, 10, AccountClass::Human);
+    let victim = enrol(&mut home, 30, AccountClass::Human);
+    let agent = enrol(
+        &mut home,
+        20,
+        AccountClass::Agent {
+            operator: owner.record.acting.account,
+        },
+    );
+    let room = room(&mut home, &owner, "admission bindings");
+    let grant = grant(
+        &mut home,
+        &owner,
+        &agent,
+        room,
+        delegation::Mode::Autonomous,
+    );
+    let valid = delegated(
+        send(&agent, room, "requires current authority"),
+        &owner,
+        grant,
+    );
+    let lookup = |home: &mut Home, action: &Action| {
+        home.admission_owner(
+            &verified(&agent, action),
+            &agent.session,
+            TimeBounds::test_now(),
+            Duration::from_secs(1),
+        )
+    };
+    let before = snapshot(&mut home);
+    assert_eq!(lookup(&mut home, &valid), Some(owner.record.acting.account));
+    let mut forged_owner = valid.clone();
+    if let Actor::Delegated { represented, .. } = &mut forged_owner.actor {
+        *represented = victim.record.acting.account;
+    }
+    let mut unknown_grant = valid.clone();
+    if let Actor::Delegated { grant, .. } = &mut unknown_grant.actor {
+        grant.id = id(99);
+    }
+    let mut forged_actor = valid.clone();
+    if let Actor::Delegated { acting, .. } = &mut forged_actor.actor {
+        *acting = victim.record.acting.clone();
+    }
+    for action in [&forged_owner, &unknown_grant, &forged_actor] {
+        assert_eq!(lookup(&mut home, action), None);
+    }
+    assert_eq!(
+        home.admission_owner(
+            &verified(&agent, &valid),
+            &agent.session,
+            TimeBounds::test_now(),
+            Duration::ZERO
+        ),
+        None
+    );
+    assert_eq!(snapshot(&mut home), before);
+    let response = home
+        .execute(
+            &verified(&agent, &valid),
+            &agent.session,
+            TimeBounds::test_now(),
+            &|| false,
+        )
+        .unwrap();
+    assert!(matches!(
+        response.outcome,
+        Outcome::Refused {
+            code: ErrorCode::Unavailable,
+            ..
+        }
+    ));
+    assert_eq!(
+        snapshot(&mut home),
+        before,
+        "queue identity cannot authorize or charge work"
+    );
+    assert!(matches!(
+        run(
+            &mut home,
+            &owner,
+            &action(
+                &owner,
+                Operation::DelegationPause,
+                Target::Delegation(grant),
+                &Empty {}
+            )
+        ),
+        Outcome::Committed { .. }
+    ));
+    let before = snapshot(&mut home);
+    assert_eq!(lookup(&mut home, &valid), None);
+    assert_eq!(snapshot(&mut home), before);
+}

@@ -354,6 +354,7 @@ struct PendingRoomRefresh {
     room: RoomId,
     oldest: Instant,
     committed: u8,
+    assembly: Option<views::CommunityAssembly>,
 }
 struct Worker {
     client: Client,
@@ -388,20 +389,21 @@ impl Worker {
             if self.shared.disconnect.swap(false, Ordering::AcqRel) {
                 self.offline();
             }
-            // A finite send burst cannot keep its first room update waiting by
-            // replacing the age with each newer commit. Network work already in
-            // flight retains its own original deadline and cancellation.
-            if self.pending_room_due(Instant::now()) {
-                self.flush_pending_room();
-                continue;
-            }
-            // Preserve the bounded local lane before servicing due metadata, even
-            // with a busy command queue. Recheck controls and original admission
-            // deadlines after the potentially slow reads.
-            if self.view_turn_due() && !self.refresh_yield {
-                self.tick();
-                self.refresh_yield = true;
-                continue;
+            // Each background turn consumes at most one complete response per
+            // view. Retry timers yield to queued commands on the same stream.
+            if !self.refresh_yield {
+                let room_due = self.pending_room_due(Instant::now());
+                let view_due = self.view_turn_due();
+                if room_due {
+                    self.flush_pending_room();
+                }
+                if view_due {
+                    self.tick();
+                }
+                if room_due || view_due {
+                    self.refresh_yield = true;
+                    continue;
+                }
             }
             if let Some(queued) = &held {
                 let online = self.snapshot.connection == ConnectionState::Online
@@ -421,10 +423,12 @@ impl Worker {
                     Admission::Run => {}
                 }
                 if !self.pending_room_allows(&queued.command) {
-                    self.flush_pending_room();
-                    // A failed view can change connection state; this held command
-                    // must pass admission again before its effect begins.
-                    continue;
+                    // A different operation supersedes unfinished background
+                    // context. It cannot publish that partial view after its own
+                    // current operation; committed effects remain untouched.
+                    self.clear_pending_room();
+                    self.refresh_cycle = None;
+                    self.selected_catchup = None;
                 }
                 // A reconnect can finish after admission expiry; the check above is
                 // repeated before this one consumption, never after an effect begins.
@@ -652,7 +656,9 @@ impl Worker {
         // Public progress includes a deferred room update. Keep the worker's
         // own flag reserved for update_view nesting and active read lifetime.
         let mut published = self.snapshot.clone();
-        published.updating |= self.pending_room.is_some() || self.selected_catchup.is_some();
+        published.updating |= self.pending_room.is_some()
+            || self.selected_catchup.is_some()
+            || self.refresh_cycle.is_some();
         *self
             .shared
             .snapshot
@@ -997,60 +1003,65 @@ impl Worker {
         if !home::is_read_operation(op) {
             return Err(Error::Input);
         }
-        let view_expired = || -> Result<bool> {
-            match view_end {
-                Some(end) => Ok(crate::clock::boot_ms().map_err(|_| Error::Clock)? >= end),
-                None => Ok(false),
-            }
-        };
-        if view_expired()? {
-            return Err(Error::ReadDeadlineExpired);
-        }
+        Self::check_view_end(view_end)?;
         let action = self.client.prepare(
             op,
             target,
             Value::serialized(body).map_err(|_| Error::Input)?,
         )?;
         let signed = self.client.sign(&action)?;
-        let key =
-            VerifyingKey::from_bytes(self.client.profile.registration.endpoint_key.as_bytes())
-                .map_err(|_| Error::Input)?;
         let shared = Arc::clone(&self.shared);
         let r = retry_read(
             read_end,
             || shared.stop.load(Ordering::Acquire) || shared.disconnect.load(Ordering::Acquire),
-            |end| {
-                if view_expired()? {
-                    return Err(Error::ReadDeadlineExpired);
-                }
-                let response = self
-                    .client
-                    .session()?
-                    .submit_read_until(&signed, &key, end)
-                    .map(|response| response.value().clone())
-                    .map_err(Error::from)?;
-                if view_expired()? {
-                    // Consume and authenticate the complete reply, but never
-                    // install late content or replace a terminal denial with expiry.
-                    if matches!(
-                        response.outcome,
-                        Outcome::Rejected { .. } | Outcome::Refused { .. }
-                    ) {
-                        let error = Error::from_outcome(response.outcome);
-                        if error.retry_delay_ms().is_none() {
-                            return Err(error);
-                        }
-                    }
-                    return Err(Error::ReadDeadlineExpired);
-                }
-                self.observe_read(action.operation, &action.target, &response);
-                Ok(response)
-            },
+            |end| self.submit_view_read(&action, &signed, end, view_end),
         )?;
         match r.outcome {
             Outcome::Result { body } => body.deserialized().map_err(|_| Error::Input),
             outcome => Err(Error::from_outcome(outcome)),
         }
+    }
+    fn check_view_end(end: Option<u64>) -> Result<()> {
+        if let Some(end) = end
+            && crate::clock::boot_ms().map_err(|_| Error::Clock)? >= end
+        {
+            return Err(Error::ReadDeadlineExpired);
+        }
+        Ok(())
+    }
+    fn submit_view_read(
+        &mut self,
+        action: &Action,
+        signed: &[u8],
+        read_end: u64,
+        view_end: Option<u64>,
+    ) -> Result<Response> {
+        Self::check_view_end(view_end)?;
+        let key =
+            VerifyingKey::from_bytes(self.client.profile.registration.endpoint_key.as_bytes())
+                .map_err(|_| Error::Input)?;
+        let response = self
+            .client
+            .session()?
+            .submit_read_until(signed, &key, read_end)?
+            .value()
+            .clone();
+        if let Err(expired) = Self::check_view_end(view_end) {
+            // Consume and authenticate the complete reply. Late content cannot
+            // become current, and terminal denials keep their authority meaning.
+            if matches!(
+                response.outcome,
+                Outcome::Rejected { .. } | Outcome::Refused { .. }
+            ) {
+                let error = Error::from_outcome(response.outcome);
+                if error.retry_delay_ms().is_none() {
+                    return Err(error);
+                }
+            }
+            return Err(expired);
+        }
+        self.observe_read(action.operation, &action.target, &response);
+        Ok(response)
     }
     fn observe_read(&mut self, operation: Operation, target: &Target, response: &Response) {
         if matches!(

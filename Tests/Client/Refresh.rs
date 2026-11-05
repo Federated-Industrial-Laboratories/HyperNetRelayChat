@@ -676,8 +676,9 @@ fn idle_worker_flushes_one_committed_send_without_waiting_for_another_command() 
 }
 
 #[test]
-fn worker_finishes_pending_room_work_before_changing_selection() {
-    let (_fixture, mut worker, room) = coalescing_worker();
+fn changing_selection_discards_pending_work_and_reports_its_own_current_read() {
+    let (fixture, mut worker, room) = coalescing_worker();
+    let _clock = worker.client.start_view_test_clock(&fixture.root);
     retain_committed_send(&mut worker, room, 120);
     worker.complete(77, Ok(()));
     worker.request = None;
@@ -694,10 +695,9 @@ fn worker_finishes_pending_room_work_before_changing_selection() {
     drop(sender);
     drop(local_sender);
     worker.run(receiver, local_receiver);
-    // The old room's failed pull closed the fixture session before selection.
-    // Selection can therefore complete from cache instead of attributing that
-    // prior view failure to this new command or issuing a new room effect.
-    assert!(
+    // The old background work is discarded. Selection performs its own current
+    // read against the closed fixture peer and reports that failure on itself.
+    assert_eq!(
         worker
             .snapshot
             .completions
@@ -705,7 +705,10 @@ fn worker_finishes_pending_room_work_before_changing_selection() {
             .find(|c| c.request_id == 89)
             .unwrap()
             .error
-            .is_none()
+            .as_ref()
+            .unwrap()
+            .code,
+        "TransportUnavailable",
     );
     assert_eq!(
         worker.snapshot.selected.as_ref().unwrap().summary.room,

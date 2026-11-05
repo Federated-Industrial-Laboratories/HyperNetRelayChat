@@ -153,7 +153,8 @@ pub(super) fn serve(
         proof.digest(),
         end,
         *expires_ms,
-        "GatewayAuthority",
+        admission::Request::transport(transport.network, principal, admission::Class::Interactive)
+            .named("GatewayAuthority"),
     )?;
     let context = GatewayContext::verify(
         &accepted,
@@ -242,7 +243,12 @@ fn exchange(
         action_digest,
         None,
         &Cancellation::default(),
-        "FederationExchange",
+        admission::Request::transport(
+            gateway.transport.network,
+            gateway.principal(),
+            admission::Class::Read,
+        )
+        .named("FederationExchange"),
         None,
     )?;
     let mut response = Response {
@@ -429,7 +435,12 @@ fn control(
         verified.digest(),
         None,
         &Cancellation::default(),
-        operation.name(),
+        admission::Request::transport(
+            gateway.transport.network,
+            gateway.principal(),
+            admission::Class::operation(*operation),
+        )
+        .named(operation.name()),
         None,
     )?;
     let outcome = if check.permitted() {

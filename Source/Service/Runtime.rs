@@ -185,15 +185,37 @@ impl Shared {
             .is_ok_and(|mut home| home.budget_exhausted(action, session, now, timeout));
         exhausted && active()
     }
+    fn admission_request(
+        &self,
+        action: &VerifiedAction,
+        session: &AuthenticatedSession,
+        end: Option<u64>,
+    ) -> admission::Request {
+        let owner = if matches!(action.action().actor, Actor::Delegated { .. }) {
+            let timeout = end.map_or(Ok(Duration::from_millis(25)), |end| {
+                remaining(end).map(|left| left.min(Duration::from_millis(25)))
+            });
+            match (timeout, self.config.clock.sample(), self.home.try_lock()) {
+                (Ok(timeout), Ok(clock), Ok(mut home)) => {
+                    home.admission_owner(action, session, clock, timeout)
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+        admission::Request::action(session, action, owner)
+    }
     fn check_authority(
         &self,
         stream: &Stream,
         digest: Id,
         end: Option<u64>,
         cancel: &Cancellation,
-        operation: &'static str,
+        request: admission::Request,
         timing: Option<&mut message_timing::Sample>,
     ) -> Result<crate::hypernet::AuthorityCheck> {
+        let operation = request.operation;
         let map = |error| match error {
             admission::Error::Busy => Error::AuthorityAdmissionBusy,
             admission::Error::Stopped => Error::AuthorityAdmissionStopped,
@@ -202,7 +224,7 @@ impl Shared {
         };
         let permit = self
             .authority_admission
-            .acquire(end, || {
+            .acquire(request, end, || {
                 self.stop.load(Ordering::Acquire)
                     || cancel.is_cancelled()
                     || !stream.check_authority_supported()
@@ -596,7 +618,8 @@ fn serve(shared: &Shared, stream: &Stream) -> Result<()> {
         proof.digest(),
         end,
         challenge.expires_ms,
-        "SessionAuthority",
+        admission::Request::account(endpoint.acting.account, admission::Class::Interactive)
+            .named("SessionAuthority"),
     )?;
     let window = {
         let mut home = shared
@@ -766,7 +789,7 @@ fn execute(
         action.digest(),
         end,
         cancel,
-        action.action().operation.name(),
+        shared.admission_request(action, session, end),
         timing.as_deref_mut(),
     );
     if let Some(timing) = timing {
@@ -905,7 +928,7 @@ fn search(
                     verified.digest(),
                     Some(end),
                     &Cancellation::default(),
-                    "SearchCancel",
+                    shared.admission_request(&verified, session, Some(end)),
                     None,
                 )?;
                 if !current(&authority, Some(end)) {

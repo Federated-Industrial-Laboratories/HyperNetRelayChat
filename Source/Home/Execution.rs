@@ -315,6 +315,37 @@ impl Home {
                     | Operation::SearchQuery
             )
     }
+    /// A queue owner is a verified binding, never an operation permission or reservation.
+    pub(crate) fn admission_owner(
+        &mut self,
+        verified: &VerifiedAction,
+        session: &AuthenticatedSession,
+        clock: TimeBounds,
+        timeout: std::time::Duration,
+    ) -> Option<AccountId> {
+        if verified.action().home != self.home
+            || !matches!(verified.action().actor, Actor::Delegated { .. })
+        {
+            return None;
+        }
+        self.store
+            .read(timeout, |db| {
+                let Some(now) = checked_clock(db, clock).ok() else {
+                    return Ok(None);
+                };
+                if crate::identity::authenticate_source(db, verified, session).is_err() {
+                    return Ok(None);
+                }
+                Ok(
+                    crate::delegation::current_grant(db, &verified.action().actor, self.home, now)
+                        .ok()
+                        .flatten()
+                        .map(|grant| grant.owner),
+                )
+            })
+            .ok()
+            .flatten()
+    }
     /// Reject demonstrably exhausted local work without granting permission or charging it.
     pub(crate) fn budget_exhausted(
         &mut self,

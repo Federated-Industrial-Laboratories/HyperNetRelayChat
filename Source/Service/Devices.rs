@@ -42,7 +42,12 @@ pub(super) fn serve(
         digest(&incoming.payload),
         end,
         challenge.value().expires_ms,
-        "DeviceAuthority",
+        admission::Request::transport(
+            shared.config.descriptor.home.network,
+            principal,
+            admission::Class::Interactive,
+        )
+        .named("DeviceAuthority"),
     )?;
     let now = shared.config.clock.sample().map_err(|_| Error::Clock)?;
     let receipt = shared

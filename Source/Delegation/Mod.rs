@@ -123,7 +123,7 @@ fn state_number(state: State) -> u8 {
         State::Revoked => 2,
     }
 }
-fn current_grant(
+pub(crate) fn current_grant(
     db: &Connection,
     actor: &Actor,
     home_id: ServiceId,

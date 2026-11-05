@@ -96,12 +96,12 @@ impl Worker {
                         room,
                         oldest: Instant::now(),
                         committed: 1,
+                        assembly: None,
                     });
                 }
-                // The command loop drains an incompatible target before admission.
-                // Keep direct internal callers safe too, without losing old work.
+                // A changed target supersedes only its unfinished view work.
                 Some(_) => {
-                    self.flush_pending_room();
+                    self.clear_pending_room();
                     let view = self.refresh_after_send(room);
                     self.finish_view(view);
                 }
@@ -121,7 +121,8 @@ impl Worker {
     }
     pub(super) fn pending_room_due(&self, now: Instant) -> bool {
         self.pending_room.as_ref().is_some_and(|pending| {
-            pending.committed >= 2
+            pending.assembly.is_some()
+                || pending.committed >= 2
                 || now.saturating_duration_since(pending.oldest) >= Duration::from_secs(1)
         })
     }
@@ -147,11 +148,15 @@ impl Worker {
         }
     }
     pub(super) fn flush_pending_room(&mut self) {
-        let Some(pending) = self.pending_room.take() else {
+        let Some(mut pending) = self.pending_room.take() else {
             return;
         };
-        let view = self.refresh_after_send(pending.room);
-        self.finish_view(view);
+        let view = self.update_view(|worker| worker.room_refresh_turn(&mut pending));
+        match view {
+            Ok(false) => self.pending_room = Some(pending),
+            Ok(true) => {}
+            Err(error) => self.finish_view(Err(error)),
+        }
         self.publish();
     }
     pub(super) fn refresh_after_send(&mut self, room: RoomId) -> Result<()> {

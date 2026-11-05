@@ -136,6 +136,14 @@ shutdown interrupt retry waiting; synchronous direct reads retain the same fixed
 budget. This read path cannot submit mutations or recreate a
 pending message. Room lists stop when the final partial page is received.
 
+Periodic metadata, community catch-up and coalesced post-send reads retain their
+exact signed request and original deadlines while waiting for retry guidance.
+The worker can start queued commands between complete authenticated responses.
+A scheduled read does not hold the worker during its retry timer, consume another
+pagination allowance, or obtain an extra connection. An incomplete response
+still owns the stream until completion or transport failure. Synchronous initial
+readiness, explicit reads and unsupported view paths retain the same retry policy.
+
 A read or logical view budget that ends before dispatch or after a complete verified response
 reports `ReadDeadlineExpired`. Late content cannot make a view current. The
 Controller retains the synchronized session and marks affected views stale.
@@ -177,12 +185,14 @@ durable delivery is published before follow-up view reads start. A normal send
 refreshes recipient filters, the affected room and the companion privacy
 observation. Direct committed sends to the selected, unfocused local community
 room may share this work when bounded views are negotiated and no history gap is
-present. At most two committed sends share one pull. The first pending update's
-one-second age is never reset by newer sends; the next worker turn flushes at
-that age or after the second commit. An in-flight operation keeps its existing
-deadline and cancellation checks. Idle time and an incompatible room or context
-command flush sooner. Reserved disconnect and shutdown can discard pending view
-work and leave the room stale; they never replay a committed effect.
+present. The first pending update's one-second age is never reset by newer sends;
+the next background turn starts at that age or after the second commit. Idle time
+starts it sooner. Each turn reads at most one complete page response. Further
+commits share the pending work and request one later pull if they arrived after
+its assembly began. They never extend that assembly's deadline. A different
+operation or room context discards unfinished background work and leaves the
+old view stale before performing its own current operation. Disconnect and
+shutdown also discard pending work; none of these paths replays committed effects.
 Delegated and approval sends, confidential conversations, focused history,
 background-room sends and unsupported view paths retain their immediate refresh.
 The existing finite metadata turns and five-second cadence continue between
