@@ -51,6 +51,7 @@ fn sample_at(
         received,
         dispatch,
         authority_start: dispatch,
+        authority_admitted: None,
         authority_end: dispatch,
         execute_end: dispatch,
         encoded: dispatch,
@@ -64,6 +65,7 @@ pub(super) struct Sample {
     received: Instant,
     dispatch: Instant,
     authority_start: Instant,
+    authority_admitted: Option<Instant>,
     authority_end: Instant,
     execute_end: Instant,
     encoded: Instant,
@@ -72,6 +74,9 @@ pub(super) struct Sample {
 impl Sample {
     pub(super) fn authority_started(&mut self) {
         self.authority_start = Instant::now();
+    }
+    pub(super) fn authority_admitted(&mut self) {
+        self.authority_admitted = Some(Instant::now());
     }
     pub(super) fn authority_complete(&mut self) {
         self.authority_end = Instant::now();
@@ -88,11 +93,18 @@ impl Sample {
         let authority_ns = ns(self
             .authority_end
             .saturating_duration_since(self.authority_start));
+        let authority_admission_ns = ns(self
+            .authority_admitted
+            .unwrap_or(self.authority_end)
+            .saturating_duration_since(self.authority_start))
+        .min(authority_ns);
         Record {
             sample: self.sample,
             boot_ms: self.boot_ms,
             frame_to_dispatch_ns: ns(self.dispatch.saturating_duration_since(self.received)),
             authority_ns,
+            authority_admission_ns,
+            authority_check_ns: authority_ns.saturating_sub(authority_admission_ns),
             execute_ns: ns(self.execute_end.saturating_duration_since(self.dispatch))
                 .saturating_sub(authority_ns),
             encode_ns: ns(self.encoded.saturating_duration_since(self.execute_end)),
@@ -124,6 +136,8 @@ struct Record {
     boot_ms: u64,
     frame_to_dispatch_ns: u64,
     authority_ns: u64,
+    authority_admission_ns: u64,
+    authority_check_ns: u64,
     execute_ns: u64,
     encode_ns: u64,
     write_ns: u64,
@@ -135,11 +149,13 @@ impl Record {
     fn line(&self) -> String {
         let write = if self.written { "Complete" } else { "Failed" };
         format!(
-            "{{\"event\":\"MessageTiming\",\"sample\":{},\"bootMs\":{},\"frameToDispatchNs\":{},\"authorityNs\":{},\"executeNs\":{},\"encodeNs\":{},\"writeNs\":{},\"totalNs\":{},\"outcome\":\"{}\",\"write\":\"{}\"}}",
+            "{{\"event\":\"MessageTiming\",\"sample\":{},\"bootMs\":{},\"frameToDispatchNs\":{},\"authorityNs\":{},\"authorityAdmissionNs\":{},\"authorityCheckNs\":{},\"executeNs\":{},\"encodeNs\":{},\"writeNs\":{},\"totalNs\":{},\"outcome\":\"{}\",\"write\":\"{}\"}}",
             self.sample,
             self.boot_ms,
             self.frame_to_dispatch_ns,
             self.authority_ns,
+            self.authority_admission_ns,
+            self.authority_check_ns,
             self.execute_ns,
             self.encode_ns,
             self.write_ns,

@@ -150,6 +150,7 @@ impl Shared {
         end: Option<u64>,
         cancel: &Cancellation,
         operation: &'static str,
+        timing: Option<&mut message_timing::Sample>,
     ) -> Result<crate::hypernet::AuthorityCheck> {
         let map = |error| match error {
             admission::Error::Busy => Error::AuthorityAdmissionBusy,
@@ -166,6 +167,9 @@ impl Shared {
             })
             .map_err(map)?;
         let check_end = permit.check_deadline().map_err(map)?;
+        if let Some(timing) = timing {
+            timing.authority_admitted();
+        }
         let result = self
             .companion
             .check_authority_until(stream, *digest.as_bytes(), check_end)
@@ -711,6 +715,7 @@ fn execute(
         end,
         cancel,
         action.action().operation.name(),
+        timing.as_deref_mut(),
     );
     if let Some(timing) = timing {
         timing.authority_complete();
@@ -845,6 +850,7 @@ fn search(
                     Some(end),
                     &Cancellation::default(),
                     "SearchCancel",
+                    None,
                 )?;
                 if !current(&authority, Some(end)) {
                     return Err(Error::Authority);

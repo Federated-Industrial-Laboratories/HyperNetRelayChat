@@ -41,7 +41,7 @@ pub(super) fn authority(
                 || cancel.is_cancelled()
                 || !stream.check_authority_supported()
         },
-        |end| shared.check_authority(stream, digest, Some(end), &cancel, operation),
+        |end| shared.check_authority(stream, digest, Some(end), &cancel, operation, None),
         thread::sleep,
     )
 }

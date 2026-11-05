@@ -81,7 +81,10 @@ not an audit transcript or a substitute for attributable moderation history.
 The flag also permits a separate best-effort sample of verified local message
 sends: two per second, burst four, at most 512 records per process. Fixed
 `MessageTiming` spans distinguish authority admission and checking from remaining
-execution, signing/encoding and response write. Outcome labels contain no
+execution, signing/encoding and response write. `authorityAdmissionNs` and
+`authorityCheckNs` partition the combined `authorityNs` span. Admission includes
+the bounded HRC queue; checking includes companion IPC and its fresh authority
+exchange. Refused admission has no check span. Outcome labels contain no
 details. These service spans are not client exchange latency or delivery
 receipts; missing records do not imply success. See
 [conversation setup](ConversationSetup.md) for the precise boundaries and bounds.

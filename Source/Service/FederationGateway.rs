@@ -243,6 +243,7 @@ fn exchange(
         None,
         &Cancellation::default(),
         "FederationExchange",
+        None,
     )?;
     let mut response = Response {
         home: shared.config.descriptor.home,
@@ -428,6 +429,7 @@ fn control(
         None,
         &Cancellation::default(),
         operation.name(),
+        None,
     )?;
     let outcome = if check.permitted() {
         let privacy = privacy(&check)?;

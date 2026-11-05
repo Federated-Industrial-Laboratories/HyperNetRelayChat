@@ -49,6 +49,7 @@ fn service_spans_partition_received_frame_through_write_without_post_write_work(
     let sampler = Mutex::new(Sampler::new());
     let mut sample = sample_at(&sampler, received, at(7), 1000).unwrap();
     sample.authority_start = at(11);
+    sample.authority_admitted = Some(at(19));
     sample.authority_end = at(31);
     sample.execute_end = at(50);
     sample.encoded = at(61);
@@ -56,6 +57,12 @@ fn service_spans_partition_received_frame_through_write_without_post_write_work(
     let record = sample.record(at(80), true);
     assert_eq!(record.frame_to_dispatch_ns, 7);
     assert_eq!(record.authority_ns, 20);
+    assert_eq!(record.authority_admission_ns, 8);
+    assert_eq!(record.authority_check_ns, 12);
+    assert_eq!(
+        record.authority_admission_ns + record.authority_check_ns,
+        record.authority_ns
+    );
     assert_eq!(record.execute_ns, 23);
     assert_eq!(record.encode_ns, 11);
     assert_eq!(record.write_ns, 19);
@@ -73,6 +80,22 @@ fn service_spans_partition_received_frame_through_write_without_post_write_work(
     assert_eq!(parsed["totalNs"], 80);
     assert_eq!(parsed["outcome"], "Committed");
     assert_eq!(parsed["write"], "Complete");
+}
+
+#[test]
+fn refused_admission_has_no_companion_check_span() {
+    let start = Instant::now();
+    let sampler = Mutex::new(Sampler::new());
+    let mut sample = sample_at(&sampler, start, start, 1000).unwrap();
+    sample.authority_end = start + Duration::from_millis(1000);
+    sample.execute_end = sample.authority_end;
+    sample.encoded = sample.authority_end;
+    sample.outcome = "Refused";
+    let completed = sample.authority_end;
+    let record = sample.record(completed, true);
+    assert_eq!(record.authority_admission_ns, 1_000_000_000);
+    assert_eq!(record.authority_check_ns, 0);
+    assert_eq!(record.authority_ns, record.authority_admission_ns);
 }
 
 #[test]
@@ -117,6 +140,8 @@ fn message_records_are_fixed_bounded_and_do_not_expose_response_contents() {
             boot_ms: u64::MAX,
             frame_to_dispatch_ns: u64::MAX,
             authority_ns: u64::MAX,
+            authority_admission_ns: u64::MAX,
+            authority_check_ns: u64::MAX,
             execute_ns: u64::MAX,
             encode_ns: u64::MAX,
             write_ns: u64::MAX,
@@ -125,12 +150,12 @@ fn message_records_are_fixed_bounded_and_do_not_expose_response_contents() {
             written: false,
         };
         let line = record.line();
-        assert!(line.len() < 384);
+        assert!(line.len() < 512);
         assert!(!line.contains(secret));
         let parsed: serde_json::Value = serde_json::from_str(&line).unwrap();
         assert_eq!(parsed["outcome"], label);
         assert_eq!(parsed["write"], "Failed");
-        assert_eq!(parsed.as_object().unwrap().len(), 11);
+        assert_eq!(parsed.as_object().unwrap().len(), 13);
         assert!(parsed.get("operationId").is_none());
         assert!(parsed.get("detail").is_none());
         assert!(parsed.get("body").is_none());

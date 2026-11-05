@@ -584,6 +584,7 @@ fn export_proofs(
                     Some(end),
                     &Cancellation::default(),
                     "FederationIdentityExport",
+                    None,
                 )
                 .map_err(|error| {
                     if matches!(error, Error::Authority) {
@@ -906,6 +907,7 @@ fn forward(
                     Some(end),
                     &Cancellation::default(),
                     "FederationOriginAuthority",
+                    None,
                 )
                 .map_err(|error| {
                     if matches!(error, Error::Authority) {
