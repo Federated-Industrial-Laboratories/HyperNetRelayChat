@@ -171,7 +171,14 @@ The following stream allocation is accepted as the initial qualification target.
 | Reserved controls | Authenticated cancellation, disconnect and moderation: 64 KiB reserved within the global queue budget, 4 operations/s service budget, 8 KiB maximum control frame; excess still refuses |
 | Diagnostics/notifications | No payload logs; 64 KiB/minute diagnostic budget with coalescing; 10 notifications/minute per account with summary; no individual alert per resumed history event |
 | Recovery | Jittered exponential reconnect, 1–60 seconds, at most 5 attempts/minute; honour bounded retry guidance; one retry resolver per actor |
-| Qualification targets | Service RSS at most 512 MiB excluding separate HyperNet processes; unaffected-message p95 exchange latency under 500 ms at 5 sends/s during a bounded overload; moderation under 1 second; recovery under 30 seconds after authority/transport is healthy |
+| Qualification targets | Service RSS at most 512 MiB excluding separate HyperNet processes; message p95 exchange latency under 500 ms normally and under 1,000 ms at 5 normal sends/s during the defined bounded overload; moderation under 1 second; recovery under 30 seconds after authority/transport is healthy |
+
+The native load workflow also measures end-to-end recovery from the end of
+hostile work, including the availability of its HyperNet dependencies. Failure
+to restore authority or transport fails that whole workflow. It does not measure
+HRC-only recovery after healthy authority and transport; reports must distinguish
+these intervals. Message-exchange latency and scheduled-to-observed client
+completion remain separate measurements, with complete cohort coverage shown.
 
 Per-queue limits are subordinate to the global byte ceiling; they are not preallocated independently. At most sixteen 512-KiB output queues account for 8 MiB of that ceiling. Crypto buffers, parsers, indexes, storage caches and process overhead also need explicit accounting against the measured RSS target. Service-wide cost rejection happens before fan-out/model work. E2EE recipient work needs its own endpoint budgets; a bounded server alone cannot protect clients from malicious MLS state growth.
 

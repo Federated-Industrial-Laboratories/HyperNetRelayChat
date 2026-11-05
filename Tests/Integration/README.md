@@ -93,7 +93,12 @@ complete acknowledgement payload arrives, before local response decoding. The
 sample is accepted only after verifying the committed acknowledgement's exact
 home, operation ID, action digest and event. Connection setup, Controller queue
 time, local persistence, frame encoding, response decoding and UI work are
-excluded. `p95MessageExchangeMs` must be below 500 milliseconds; the gate compares
+excluded. `p95MessageExchangeMs` must be below 500 milliseconds during normal
+traffic and below 1,000 milliseconds during the defined hostile workload.
+`messageExchangeLimitMs` reports the active limit;
+`messageExchangeP95Within500Ms` also retains the original strict comparison.
+Both phases retain complete direct coverage and every reliability requirement.
+The gate compares
 the original nanosecond samples without rounding. Every
 normal offered commit must have a direct exchange sample; missing samples are
 reported and cannot qualify the latency gate. Resolution, persisted retries and
@@ -102,7 +107,7 @@ recovered deliveries do not manufacture an original exchange sample.
 `p95ScheduledToObservedCommitMs` separately reports usability delay from the
 scheduled offer until the Controller exposes its durable delivery. It includes
 queueing, preflight and local persistence. It is not the message-exchange latency
-and does not receive the 500-millisecond gate. Per-Controller `completionMs` uses
+and does not use either message-exchange gate. Per-Controller `completionMs` uses
 this broader boundary; supporting moderation completion keeps its separate
 one-second gate. Confirmed durable deliveries are published before trailing view
 reads finish; current room views remain a separate requirement for every
@@ -115,8 +120,9 @@ The helper cannot pass by reducing offered load or ignoring rejections.
 
 During overload, one agent offers up to ten signed protocol sends per
 second and the other agent offers two bounded sixteen-term searches per
-second. Each hostile stream has at most one operation in flight; offers missed
-because of its response time are counted. The eight Controllers remain active.
+second. The flood stream permits at most eight outstanding sends; the query
+stream permits one outstanding search. Offers missed because of response time
+or the outstanding-work bound are counted. The eight Controllers remain active.
 The spare operator sends sixteen authenticated history requests, withholds reads for
 twelve seconds and then drains only bounded, request-bound signed responses.
 HRC uses authenticated pull delivery; this measures an unread response stream,

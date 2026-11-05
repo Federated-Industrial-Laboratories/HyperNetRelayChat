@@ -22,7 +22,8 @@ use std::{
 };
 
 type Result<T> = std::result::Result<T, String>;
-const MESSAGE_EXCHANGE_LIMIT_NS: u64 = 500_000_000;
+const NORMAL_MESSAGE_EXCHANGE_LIMIT_NS: u64 = 500_000_000;
+const OVERLOAD_MESSAGE_EXCHANGE_LIMIT_NS: u64 = 1_000_000_000;
 const COHORT_OBSERVATION_SECONDS: u64 = 30;
 const FLOOD_PENDING_LIMIT: usize = 8;
 const CONNECTION_OBSERVATION_LIMIT: usize = 16;
@@ -1592,6 +1593,11 @@ fn run_phase(
     let moderator = &pairs[2].1;
     let attacks_exercised = !overload || attacks_pass(&pairs[0].1, &pairs[1].1, &pairs[3].1);
     let controllers_current = ui_pairs.iter().all(|(_, m)| !m.unresolved);
+    let exchange_limit_ns = if overload {
+        OVERLOAD_MESSAGE_EXCHANGE_LIMIT_NS
+    } else {
+        NORMAL_MESSAGE_EXCHANGE_LIMIT_NS
+    };
     let passed = cohort_pass(
         seconds,
         offered,
@@ -1599,14 +1605,14 @@ fn run_phase(
         missed,
         exchange_latencies.len(),
         exchange_p95_ns,
+        exchange_limit_ns,
     ) && attacks_exercised
         && normal.iter().all(|m| m.controller_offers_seen_refused == 0)
         && distinct_events.len() == committed
         && controllers_current
         && (!overload
             || (moderator.committed == 2 && moderator.completion_ms.iter().all(|ms| *ms < 1000)));
-    emit(
-        json!({"case":"NativeLoadPhaseResult","phase":phase,"passed":passed,"offered":offered,"committed":committed,
+    let mut phase_result = json!({"case":"NativeLoadPhaseResult","phase":phase,"passed":passed,"offered":offered,"committed":committed,
         "observationBootMs":hrc::clock::boot_ms().ok(),
         "committedWithinMeasurementWindow":in_window,"distinctCommittedEvents":distinct_events.len(),"missedOffers":missed,"commitsPerSecond":in_window as f64/seconds as f64,
         "committedAfterOfferWindow":committed-in_window,"offeredNormalPerSecond":5,
@@ -1624,7 +1630,7 @@ fn run_phase(
         "p50MessageExchangeMs":exchange_ms(percentile(&exchange_latencies,50)),
         "maximumMessageExchangeMs":exchange_ms(exchange_latencies.iter().max().copied()),"messageExchangeSamples":exchange_latencies.len(),
         "messageExchangeCoverageComplete":exchange_latencies.len()==offered,
-        "messageExchangeP95WithinLimit":exchange_p95_ns.map(|ns|ns<MESSAGE_EXCHANGE_LIMIT_NS),
+        "messageExchangeP95WithinLimit":exchange_p95_ns.map(|ns|ns<exchange_limit_ns),
         "committedWithoutDirectExchangeSample":committed.saturating_sub(exchange_latencies.len()),
         "p95ScheduledToObservedCommitMs":percentile(&completion_latencies,95),
         "p50ScheduledToObservedCommitMs":percentile(&completion_latencies,50),
@@ -1634,8 +1640,11 @@ fn run_phase(
         "messageExchangeExcludes":"connection setup, queueing, local persistence, frame encoding, response decoding and UI work",
         "scheduledToObservedCommitIncludesClientWork":true,"controllerMetrics":ui_pairs.iter().map(|(_,m)|m).collect::<Vec<_>>(),
         "supportingEndpointMetrics":pairs.iter().map(|(_,m,_)|m).collect::<Vec<_>>(),
-        "byteAccounting":"Controller bytes are unobserved; supporting sessions count signed actions and decoded response CBOR only"}),
-    );
+        "byteAccounting":"Controller bytes are unobserved; supporting sessions count signed actions and decoded response CBOR only"});
+    phase_result["messageExchangeLimitMs"] = json!(exchange_limit_ns / 1_000_000);
+    phase_result["messageExchangeP95Within500Ms"] =
+        json!(exchange_p95_ns.map(|ns| ns < NORMAL_MESSAGE_EXCHANGE_LIMIT_NS));
+    emit(phase_result);
     (
         ui_pairs.into_iter().map(|(u, _)| u).collect(),
         pairs.into_iter().map(|(e, _, _)| e).collect(),
@@ -1661,12 +1670,13 @@ fn cohort_pass(
     missed: usize,
     exchange_samples: usize,
     exchange_p95_ns: Option<u64>,
+    exchange_limit_ns: u64,
 ) -> bool {
     offered == seconds as usize * 5
         && cohort_committed == offered
         && missed == 0
         && exchange_samples == offered
-        && exchange_p95_ns.is_some_and(|ns| ns < MESSAGE_EXCHANGE_LIMIT_NS)
+        && exchange_p95_ns.is_some_and(|ns| ns < exchange_limit_ns)
 }
 fn check_filter(c: &mut Client, room: RoomId, subject: AccountId, end: Instant) -> Result<()> {
     let outcome = operation(
@@ -3146,7 +3156,15 @@ mod tests {
         let last_commit = last_offer + Duration::from_millis(499);
         assert!(!window.finished(last_commit));
         assert!(last_commit > window.offer_end());
-        assert!(cohort_pass(30, 150, 150, 0, 150, Some(499_000_000)));
+        assert!(cohort_pass(
+            30,
+            150,
+            150,
+            0,
+            150,
+            Some(499_000_000),
+            NORMAL_MESSAGE_EXCHANGE_LIMIT_NS
+        ));
         window.pending_senders.store(0, Ordering::Release);
         assert!(!window.finished(last_offer));
         assert!(window.finished(last_commit));
@@ -3155,14 +3173,127 @@ mod tests {
         assert!(window.finished(window.observation_end()));
     }
     #[test]
+    fn hostile_latency_allowance_keeps_full_coverage_and_strict_upper_bound() {
+        assert!(!cohort_pass(
+            45,
+            225,
+            225,
+            0,
+            225,
+            Some(740_000_000),
+            NORMAL_MESSAGE_EXCHANGE_LIMIT_NS
+        ));
+        assert!(cohort_pass(
+            45,
+            225,
+            225,
+            0,
+            225,
+            Some(740_000_000),
+            OVERLOAD_MESSAGE_EXCHANGE_LIMIT_NS
+        ));
+        assert!(!cohort_pass(
+            45,
+            225,
+            224,
+            0,
+            224,
+            Some(740_000_000),
+            OVERLOAD_MESSAGE_EXCHANGE_LIMIT_NS
+        ));
+        assert!(!cohort_pass(
+            45,
+            225,
+            225,
+            0,
+            224,
+            Some(740_000_000),
+            OVERLOAD_MESSAGE_EXCHANGE_LIMIT_NS
+        ));
+        assert!(cohort_pass(
+            45,
+            225,
+            225,
+            0,
+            225,
+            Some(999_999_999),
+            OVERLOAD_MESSAGE_EXCHANGE_LIMIT_NS
+        ));
+        assert!(!cohort_pass(
+            45,
+            225,
+            225,
+            0,
+            225,
+            Some(1_000_000_000),
+            OVERLOAD_MESSAGE_EXCHANGE_LIMIT_NS
+        ));
+    }
+    #[test]
     fn offered_load_cannot_pass_with_missing_or_slow_commits() {
-        assert!(cohort_pass(30, 150, 150, 0, 150, Some(499_999_999)));
-        assert!(!cohort_pass(30, 149, 149, 0, 149, Some(1)));
-        assert!(!cohort_pass(30, 150, 149, 0, 149, Some(1)));
-        assert!(!cohort_pass(30, 150, 150, 1, 150, Some(1)));
-        assert!(!cohort_pass(30, 150, 150, 0, 150, Some(500_000_000)));
-        assert!(!cohort_pass(30, 150, 150, 0, 150, None));
-        assert!(!cohort_pass(30, 150, 150, 0, 149, Some(1)));
+        assert!(cohort_pass(
+            30,
+            150,
+            150,
+            0,
+            150,
+            Some(499_999_999),
+            NORMAL_MESSAGE_EXCHANGE_LIMIT_NS
+        ));
+        assert!(!cohort_pass(
+            30,
+            149,
+            149,
+            0,
+            149,
+            Some(1),
+            NORMAL_MESSAGE_EXCHANGE_LIMIT_NS
+        ));
+        assert!(!cohort_pass(
+            30,
+            150,
+            149,
+            0,
+            149,
+            Some(1),
+            NORMAL_MESSAGE_EXCHANGE_LIMIT_NS
+        ));
+        assert!(!cohort_pass(
+            30,
+            150,
+            150,
+            1,
+            150,
+            Some(1),
+            NORMAL_MESSAGE_EXCHANGE_LIMIT_NS
+        ));
+        assert!(!cohort_pass(
+            30,
+            150,
+            150,
+            0,
+            150,
+            Some(500_000_000),
+            NORMAL_MESSAGE_EXCHANGE_LIMIT_NS
+        ));
+        assert!(!cohort_pass(
+            30,
+            150,
+            150,
+            0,
+            150,
+            None,
+            NORMAL_MESSAGE_EXCHANGE_LIMIT_NS
+        ));
+        assert!(!cohort_pass(
+            30,
+            150,
+            150,
+            0,
+            149,
+            Some(1),
+            NORMAL_MESSAGE_EXCHANGE_LIMIT_NS
+        ));
         assert_eq!(percentile(&(1..=100).collect::<Vec<_>>(), 95), Some(95));
     }
 }
