@@ -76,6 +76,7 @@ struct Metrics {
     decoded_response_bytes: usize,
     unresolved: bool,
     controller_offers_seen_refused: usize,
+    controller_first_refusal_categories: BTreeMap<String, usize>,
     tail_offered: usize,
     tail_missed: usize,
     pressure_cost_refusals: usize,
@@ -402,6 +403,7 @@ struct Offer {
     exchange_ns: Option<u64>,
     terminal: bool,
     seen_refused: bool,
+    first_refusal: Option<(ErrorCode, String)>,
     status: String,
 }
 struct Interactive {
@@ -451,11 +453,23 @@ fn apply_delivery(offer: &mut Offer, d: &client::Delivery, room: RoomId) -> bool
         }
         Some(Outcome::Refused { code, detail, .. }) => {
             offer.seen_refused = true;
+            offer
+                .first_refusal
+                .get_or_insert_with(|| (*code, bounded_reason(detail)));
             offer.status = format!("Refused:{code:?}:{detail}")
         }
         _ => offer.status = "OutcomeUnknown".into(),
     }
     true
+}
+fn record_offer_refusal(metrics: &mut Metrics, offer: &Offer) {
+    metrics.controller_offers_seen_refused += usize::from(offer.seen_refused);
+    if let Some((code, reason)) = &offer.first_refusal {
+        *metrics
+            .controller_first_refusal_categories
+            .entry(format!("Refused:{code:?}:{reason}"))
+            .or_default() += 1;
+    }
 }
 fn observe(ui: &mut Interactive, room: RoomId) -> Arc<Snapshot> {
     let view = ui.controller.snapshot();
@@ -506,6 +520,7 @@ fn dispatch_offer(
         exchange_ns: None,
         terminal: false,
         seen_refused: false,
+        first_refusal: None,
         status: "Queued".into(),
     });
     Ok(())
@@ -939,7 +954,7 @@ fn interactive(
     for offer in &ui.offers[first_offer..] {
         *m.results.entry(offer.status.clone()).or_default() += 1;
         m.unresolved |= !offer.terminal;
-        m.controller_offers_seen_refused += usize::from(offer.seen_refused);
+        record_offer_refusal(&mut m, offer);
         if let Some(at) = offer.committed_at {
             m.committed += 1;
             m.committed_in_window += usize::from(at <= end);
@@ -2662,6 +2677,7 @@ mod tests {
             exchange_ns: None,
             terminal: false,
             seen_refused: false,
+            first_refusal: None,
             status: "Queued".into(),
         };
         let mut delivery = client::Delivery {
@@ -2878,6 +2894,65 @@ mod tests {
         assert!(clipped.expired(joined));
     }
     #[test]
+    fn first_refusal_survives_recovered_commit_and_counts_once() {
+        for (detail, expected) in [
+            (
+                "AuthorityAdmissionBusy\n\u{1b}".into(),
+                "AuthorityAdmissionBusy".into(),
+            ),
+            ("A".repeat(100), "A".repeat(80)),
+        ] {
+            let (_, mut delivery, _) = setup_fixture();
+            let room = delivery.room.unwrap();
+            delivery.operation = Operation::MessageSend;
+            delivery.outcome = Some(Outcome::Refused {
+                code: ErrorCode::Overloaded,
+                detail,
+                retry_after_ms: Some(1000),
+            });
+            let mut offer = Offer {
+                request: 7,
+                scheduled: Instant::now(),
+                identity: None,
+                event: None,
+                committed_at: None,
+                exchange_ns: None,
+                terminal: false,
+                seen_refused: false,
+                first_refusal: None,
+                status: "Queued".into(),
+            };
+            for _ in 0..3 {
+                assert!(apply_delivery(&mut offer, &delivery, room));
+                assert!(!offer.terminal);
+            }
+            delivery.outcome = Some(Outcome::Refused {
+                code: ErrorCode::Unavailable,
+                detail: "TransportAuthority".into(),
+                retry_after_ms: Some(1000),
+            });
+            assert!(apply_delivery(&mut offer, &delivery, room));
+            delivery.outcome = Some(Outcome::Committed {
+                event: Some(Id::from_bytes([8; 32])),
+                position: 1,
+                body: Value::Null,
+            });
+            assert!(apply_delivery(&mut offer, &delivery, room));
+            assert!(offer.terminal && offer.committed_at.is_some());
+            assert_eq!(offer.status, "Committed");
+            assert_eq!(offer.exchange_ns, None);
+            let mut metrics = Metrics::default();
+            record_offer_refusal(&mut metrics, &offer);
+            assert_eq!(metrics.controller_offers_seen_refused, 1);
+            let categories = BTreeMap::from([(format!("Refused:Overloaded:{expected}"), 1)]);
+            assert_eq!(metrics.controller_first_refusal_categories, categories);
+            assert_eq!(
+                serde_json::to_value(&metrics).unwrap()["controllerFirstRefusalCategories"],
+                json!(categories)
+            );
+        }
+    }
+    #[test]
     fn message_exchange_samples_exclude_controller_wait_and_recovery() {
         let (_, mut delivery, _) = setup_fixture();
         let room = delivery.room.unwrap();
@@ -2897,6 +2972,7 @@ mod tests {
             exchange_ns: None,
             terminal: false,
             seen_refused: false,
+            first_refusal: None,
             status: "Queued".into(),
         };
         let mut direct = offer();
