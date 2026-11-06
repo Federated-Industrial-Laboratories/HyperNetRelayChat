@@ -142,6 +142,31 @@ impl Context {
     pub(super) fn reset(&mut self) {
         self.memory.reset(self.fingerprint, self.head);
     }
+    pub(super) fn reset_head(
+        &mut self,
+        client: &mut Client,
+        room: RoomId,
+        grant: Option<&delegation::Grant>,
+    ) -> Result<()> {
+        let page = client.history_tail(room, 1, grant)?;
+        let key = VerifyingKey::from_bytes(client.profile.active_server().signing_key.as_bytes())
+            .map_err(|_| Error::State)?;
+        let cursor = verify_cursor(&page.cursor.0, &key).map_err(|_| Error::State)?;
+        if cursor.value().room != room
+            || page.room_revision != self.guard.room_revision
+            || cursor.value().filter_revision != self.guard.filter_revision
+        {
+            return Err(client::Error::Rejected {
+                code: ErrorCode::Conflict,
+                detail: "ExpectedRevision".into(),
+            }
+            .into());
+        }
+        // A reply to an earlier command may commit after the reset command's event.
+        // Discard through the current head, so that reply cannot restore the old summary.
+        self.head = self.head.max(cursor.value().sequence);
+        Ok(())
+    }
     pub(super) fn generate(
         &mut self,
         config: &Config,
@@ -170,6 +195,9 @@ impl Context {
                 Ok(Some(self.memory.status(&self.policy, show, self.encrypted)))
             }
             Reply::Forget => {
+                if !self.enabled {
+                    return Ok(Some("Conversation memory is disabled.".into()));
+                }
                 if !self.control_allowed(event) {
                     return Ok(Some(
                         "Only the bot operator or a room moderator can clear shared memory.".into(),

@@ -162,3 +162,27 @@ fn generation_cannot_publish_after_its_oldest_source_expiry() {
     context.generated_until_ms = Some(now.upper_ms + 1);
     assert!(!context.generation_expired(now));
 }
+
+#[test]
+fn reset_discards_prior_answers_committed_after_its_command() {
+    let (mut context, config) = fixture();
+    let command = event(20); // sequence 10
+    context.head = 11; // A summary-view answer to an earlier command has since committed.
+    context
+        .generate(&config, &command, Reply::Forget, &AtomicBool::new(false))
+        .unwrap();
+    context.memory.ingest(
+        [Entry {
+            event: id(77),
+            sequence: 11,
+            timestamp_ms: 100,
+            speaker: "Bot".into(),
+            assistant: true,
+            text: "An older shared fact.".into(),
+        }],
+        11,
+    );
+    assert_eq!(context.memory.floor, 11);
+    assert!(context.memory.entries.is_empty());
+    assert!(context.memory.summary.is_empty());
+}

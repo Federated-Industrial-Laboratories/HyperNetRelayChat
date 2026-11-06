@@ -548,6 +548,18 @@ fn pull(
     };
     let window = client.session()?.ready.window.clone();
     if let Some((event, reply)) = selected {
+        if matches!(reply, Reply::Forget)
+            && let Some(context) = context.as_mut()
+            && context.enabled
+            && context.control_allowed(event)
+            && let Err(error) = context.reset_head(client, room, grant)
+        {
+            if matches!(&error, Error::Client(error) if context::client_conflict(error)) {
+                state::restart_room(&mut client.store, room)?;
+                return Ok(false);
+            }
+            return Err(error);
+        }
         let generated = if let Some(context) = context.as_mut() {
             context.generate(config, event, reply, stop)
         } else {
