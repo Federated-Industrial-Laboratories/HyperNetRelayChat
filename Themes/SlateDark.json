@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "name": "Slate Dark",
+  "mode": "dark",
+  "colors": {
+    "panel": "#1B1D21",
+    "surface": "#272A30",
+    "window": "#24272C",
+    "input": "#131519",
+    "faint": "#2B2E34",
+    "text": "#E9EBF0",
+    "muted": "#B4BBC6",
+    "accent": "#B6C7E0",
+    "selection": "#394454",
+    "selectionText": "#ECF2FC",
+    "border": "#4E5560",
+    "button": "#343941",
+    "hover": "#404751",
+    "pressed": "#394454"
+  },
+  "display": {
+    "cornerCut": 5,
+    "outlineWidth": 1
+  }
+}

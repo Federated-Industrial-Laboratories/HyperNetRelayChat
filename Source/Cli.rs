@@ -475,10 +475,16 @@ pub fn profile(command: Profile) -> Result<Json, &'static str> {
             )
         }
         Profile::Session { profile } => {
-            let c = open(&profile)?;
-            Ok(
-                json!({"status":"Authenticated","session":c.session().map_err(|_| "SessionUnavailable")?.ready,"privacy":c.session().map_err(|_| "SessionUnavailable")?.privacy(),"federationAdmission":c.session().map_err(|_| "SessionUnavailable")?.remote}),
-            )
+            // A connection check must also work while the GUI owns the history store.
+            let endpoint = client::Profile::load(&profile).map_err(|_| "InvalidProfile")?;
+            let key =
+                service::files::key(&profile.join("Endpoint.key")).map_err(|_| "InvalidProfile")?;
+            let session =
+                client::network::Session::open(&endpoint, &key).map_err(|error| error.code())?;
+            let result = json!({"status":"Authenticated","session":session.ready,
+                "privacy":session.privacy(),"federationAdmission":session.remote});
+            session.close();
+            Ok(result)
         }
     }
 }

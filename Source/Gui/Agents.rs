@@ -51,11 +51,7 @@ impl App {
             }
         });
         if snapshot.inspection.stale {
-            components::badge(
-                ui,
-                "Retained · refresh required",
-                egui::Color32::from_rgb(211, 170, 91),
-            );
+            components::badge(ui, "Retained · refresh required", theme::warning(ui));
         }
         egui::ScrollArea::vertical().show(ui, |ui| {
             components::frame(ui).show(ui, |ui| {
@@ -137,13 +133,13 @@ impl App {
                             if let Some(hrc::client::MessageContent::Decrypted(body)) = snapshot.inspection.proposed_content.get(&pending.action_digest) {
                                 ui.add(egui::Label::new(&body.text).wrap().selectable(true));
                             } else if action.body.deserialized::<hrc::crypto::EncryptedBody>().is_ok() {
-                                components::badge(ui, "Plaintext not verified · approval blocked", egui::Color32::from_rgb(211, 170, 91));
+                                components::badge(ui, "Plaintext not verified · approval blocked", theme::warning(ui));
                             } else if let Ok(body) = action.body.deserialized::<hrc::messaging::Send>() {
                                 ui.add(egui::Label::new(body.text).wrap().selectable(true));
                             } else if let Ok(json) = serde_json::to_string_pretty(&action.body) {
                                 ui.add(egui::Label::new(egui::RichText::new(json).monospace()).wrap().selectable(true));
                             }
-                        } else { ui.colored_label(egui::Color32::from_rgb(211, 170, 91), "Candidate verification unavailable"); }
+                        } else { ui.colored_label(theme::warning(ui), "Candidate verification unavailable"); }
                         ui.weak(format!("Expires {} · state {}", display::timestamp(pending.expires_ms), pending.state));
                         ui.collapsing("Identity and action digest", |ui| {
                             if let Some(action) = action { ui.add(egui::Label::new(format!("{:?}", action.actor)).wrap().selectable(true)); }

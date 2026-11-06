@@ -62,7 +62,7 @@ pub enum Error {
 }
 pub type Result<T> = std::result::Result<T, Error>;
 impl Config {
-    fn validate(&self) -> Result<()> {
+    pub fn validate(&self) -> Result<()> {
         if !self.profile.is_absolute()
             || self.rooms.is_empty()
             || self.rooms.len() > 8

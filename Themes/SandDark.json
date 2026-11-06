@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "name": "Sand Dark",
+  "mode": "dark",
+  "colors": {
+    "panel": "#242219",
+    "surface": "#312F23",
+    "window": "#2D2B20",
+    "input": "#1A1912",
+    "faint": "#353225",
+    "text": "#F1EEDD",
+    "muted": "#C8C3A9",
+    "accent": "#D8CA8B",
+    "selection": "#514B2C",
+    "selectionText": "#F7EDBE",
+    "border": "#5E593F",
+    "button": "#403C2B",
+    "hover": "#4D4831",
+    "pressed": "#514B2C"
+  },
+  "display": {
+    "cornerCut": 5,
+    "outlineWidth": 1
+  }
+}

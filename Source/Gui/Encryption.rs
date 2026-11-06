@@ -59,11 +59,7 @@ impl App {
             return;
         };
         if room.stale {
-            components::badge(
-                ui,
-                "Retained · authority unconfirmed",
-                egui::Color32::from_rgb(211, 170, 91),
-            );
+            components::badge(ui, "Retained · authority unconfirmed", theme::warning(ui));
         }
         ui.horizontal_wrapped(|ui| {
             components::readout(ui, "EPOCH", &view.remote.epoch.to_string());
@@ -118,7 +114,7 @@ impl App {
                         }
                     }
                     TrustState::Trusted => { components::accent_badge(ui, "Signed continuity matches"); }
-                    TrustState::Changed => { components::badge(ui, "Identity changed · admission blocked", egui::Color32::from_rgb(211, 170, 91)); }
+                    TrustState::Changed => { components::badge(ui, "Identity changed · admission blocked", theme::warning(ui)); }
                 }
             });
         });
@@ -148,11 +144,7 @@ impl App {
                     .selectable(true),
                 );
                 if view.remote.required_removals.contains(&endpoint) {
-                    components::badge(
-                        ui,
-                        "Removal required before sending",
-                        egui::Color32::from_rgb(211, 170, 91),
-                    );
+                    components::badge(ui, "Removal required before sending", theme::warning(ui));
                 }
                 if moderator && components::button(ui, "Remove device").clicked() {
                     self.model.dispatch(Command::CryptoCommit {

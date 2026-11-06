@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "name": "Ember Light",
+  "mode": "light",
+  "colors": {
+    "panel": "#F6EEE6",
+    "surface": "#FFFAF4",
+    "window": "#FFFDF8",
+    "input": "#FFFFFF",
+    "faint": "#FBF3EA",
+    "text": "#493022",
+    "muted": "#785945",
+    "accent": "#965018",
+    "selection": "#F2DCC5",
+    "selectionText": "#713910",
+    "border": "#CBB09A",
+    "button": "#EFE2D4",
+    "hover": "#E8D5C0",
+    "pressed": "#DEC4A7"
+  },
+  "display": {
+    "cornerCut": 5,
+    "outlineWidth": 1
+  }
+}

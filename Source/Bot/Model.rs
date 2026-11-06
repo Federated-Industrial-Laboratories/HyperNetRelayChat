@@ -67,7 +67,7 @@ pub struct LocalModel {
     pub output_tokens: u32,
 }
 impl LocalModel {
-    pub(super) fn validate(&self) -> Result<()> {
+    pub fn validate(&self) -> Result<()> {
         if !self.curl.is_absolute()
             || !self.curl.is_file()
             || !self.endpoint.ip().is_loopback()
@@ -92,6 +92,25 @@ impl LocalModel {
             return Err(Error::Configuration);
         }
         Ok(())
+    }
+    /// Test the configured local backend without disclosing conversation content.
+    pub fn probe(&self, stop: &AtomicBool) -> Result<bool> {
+        self.generate(
+            &[
+                ChatMessage {
+                    role: Role::System,
+                    content:
+                        "This is a local inference availability check. Reply briefly in plain text."
+                            .into(),
+                },
+                ChatMessage {
+                    role: Role::User,
+                    content: "Reply with Ready.".into(),
+                },
+            ],
+            stop,
+        )
+        .map(|reply| reply.is_some())
     }
     pub(super) fn prompt<'a>(&self, text: &'a str) -> Option<&'a str> {
         let text = text.trim();

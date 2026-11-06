@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "name": "Ocean Dark",
+  "mode": "dark",
+  "colors": {
+    "panel": "#101D2B",
+    "surface": "#182A3B",
+    "window": "#162535",
+    "input": "#0B1622",
+    "faint": "#1B2E40",
+    "text": "#E5F0FA",
+    "muted": "#A7BECE",
+    "accent": "#7ECDE7",
+    "selection": "#24495D",
+    "selectionText": "#D3F3FF",
+    "border": "#395166",
+    "button": "#22394C",
+    "hover": "#2B485D",
+    "pressed": "#24495D"
+  },
+  "display": {
+    "cornerCut": 5,
+    "outlineWidth": 1
+  }
+}

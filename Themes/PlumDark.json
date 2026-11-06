@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "name": "Plum Dark",
+  "mode": "dark",
+  "colors": {
+    "panel": "#211B2C",
+    "surface": "#2D253B",
+    "window": "#2A2236",
+    "input": "#181320",
+    "faint": "#302740",
+    "text": "#EEE8F8",
+    "muted": "#C1B1D4",
+    "accent": "#C8A4EC",
+    "selection": "#4B355F",
+    "selectionText": "#F0DCFF",
+    "border": "#574566",
+    "button": "#3B2F4C",
+    "hover": "#49395D",
+    "pressed": "#4B355F"
+  },
+  "display": {
+    "cornerCut": 5,
+    "outlineWidth": 1
+  }
+}

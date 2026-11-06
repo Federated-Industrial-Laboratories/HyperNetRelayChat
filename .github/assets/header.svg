@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="360" viewBox="0 0 1440 360" role="img" aria-labelledby="title description">
+  <title id="title">HyperNet Relay Chat</title>
+  <desc id="description">HRC's cut-corner conversation mark and graphite wordmark on a silver engineering grid.</desc>
+  <defs>
+    <linearGradient id="surface" x2="1" y2="1">
+      <stop stop-color="#f6f7f8"/><stop offset=".55" stop-color="#e4e7ea"/><stop offset="1" stop-color="#f4f5f6"/>
+    </linearGradient>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M40 0H0V40" fill="none" stroke="#c4cbd0" stroke-opacity=".36"/>
+    </pattern>
+  </defs>
+  <path fill="url(#surface)" d="M0 0h1440v360H0z"/>
+  <path fill="url(#grid)" d="M0 0h1440v360H0z"/>
+  <path d="M40 74V40h34m1292 0h34v34M40 286v34h34m1292 0h34v-34" fill="none" stroke="#8e999f" stroke-width="2"/>
+  <g transform="translate(110 94) scale(1.35)">
+    <path fill="#151c23" d="M22 4h84l18 18v84l-18 18H22L4 106V22z"/>
+    <path fill="none" stroke="#65c5b7" stroke-width="5" d="M32 26h64l12 12v44L96 94H66l-20 16V94H32L20 82V38z"/>
+    <path fill="none" stroke="#e3edf0" stroke-width="7" d="M49 40l-6 40m30-40-6 40M32 53h55M29 68h55"/>
+  </g>
+  <text x="338" y="173" font-family="DejaVu Sans, Arial, sans-serif" font-size="66" font-weight="600" letter-spacing="-2" fill="#282c30">HyperNet Relay Chat</text>
+  <path d="M341 203h56" stroke="#3e998d" stroke-width="4"/>
+  <text x="421" y="211" font-family="DejaVu Sans, Arial, sans-serif" font-size="21" letter-spacing="3.1" fill="#59656c">NATIVE CONVERSATION OVER HYPERNET</text>
+  <text x="341" y="253" font-family="DejaVu Sans, Arial, sans-serif" font-size="17" letter-spacing="1.2" fill="#68747c">DESKTOP  /  TERMINAL  /  SCOPED AGENTS</text>
+</svg>

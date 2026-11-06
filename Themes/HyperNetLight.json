@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "name": "HyperNet Light",
+  "mode": "light",
+  "colors": {
+    "panel": "#EBF0F2",
+    "surface": "#F8FAFB",
+    "window": "#F8FAFB",
+    "input": "#FFFFFF",
+    "faint": "#F4F7F8",
+    "text": "#202D37",
+    "muted": "#53646E",
+    "accent": "#236874",
+    "selection": "#CAE2E6",
+    "selectionText": "#236874",
+    "border": "#BEBEBE",
+    "button": "#E6E6E6",
+    "hover": "#DCDCDC",
+    "pressed": "#A5A5A5"
+  },
+  "display": {
+    "cornerCut": 5,
+    "outlineWidth": 1
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "name": "Sand Light",
+  "mode": "light",
+  "colors": {
+    "panel": "#F3F0DF",
+    "surface": "#FCFAEF",
+    "window": "#FFFEF7",
+    "input": "#FFFFFC",
+    "faint": "#F7F4E7",
+    "text": "#3E3A25",
+    "muted": "#6C6544",
+    "accent": "#74601C",
+    "selection": "#E9DFB9",
+    "selectionText": "#5C4C19",
+    "border": "#C4BB95",
+    "button": "#EBE6D0",
+    "hover": "#E1D9B9",
+    "pressed": "#D7CC9E"
+  },
+  "display": {
+    "cornerCut": 5,
+    "outlineWidth": 1
+  }
+}

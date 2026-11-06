@@ -4,8 +4,9 @@ HRC packages contain the GUI, TUI, CLI and deterministic bot in one `Bin/hrc`
 executable. HyperNet Core and Suite are separate prerequisites. Installing HRC
 does not create a network, grant application access or start a service.
 
-HRC 0.1.0 is qualified for the [bounded Linux pilot](IntegrationProfile.md#8-linux-pilot-qualification).
-Use its measured platform, topology and workload limits when planning deployment.
+HRC 0.2.0 adds desktop setup and operations. The earlier
+[bounded Linux pilot](IntegrationProfile.md#8-linux-pilot-qualification) retains
+its original measured versions. Use its topology and workload limits when planning deployment.
 
 ## Requirements
 
@@ -21,7 +22,7 @@ use Ubuntu 24.04 with GNU libc 2.39; the current binary requires GNU libc 2.39 o
 later. Those offline checks do not establish full native-load qualification on
 Ubuntu 24.04. Other platforms are not qualified.
 
-The required upstream pair is Core 0.10.2 and Suite 0.10.1. Use independently
+The supported hosting pair is Core 0.10.3 and Suite 0.10.2. Use independently
 verified binaries matching the [contract map](HyperNetContract.md), with the version-2 application
 companion and `checkAuthority-v2`. Each service and caller needs its own current
 application admission and approved stream configuration. See
@@ -32,7 +33,7 @@ private directory permissions. There is no direct Internet fallback.
 
 Obtain the selected binary archive, source archive, `SHA256SUMS`, its
 `SHA256SUMS.sig` OpenSSH signature, and `PublisherKey.txt` from the
-[private v0.1.0 release](https://github.com/Federated-Industrial-Laboratories/HyperNetRelayChat/releases/tag/v0.1.0)
+[private v0.2.0 release](https://github.com/Federated-Industrial-Laboratories/HyperNetRelayChat/releases/tag/v0.2.0).
 Access requires an authorized repository account. Repository and
 package distribution remain private; published manuals do not provide public
 download access.
@@ -67,7 +68,7 @@ Run `gui --profile PROFILE`, `tui --profile PROFILE` or the documented CLI comma
 using that binary. Add its `Bin` directory to the user's chosen PATH if desired.
 No privileged installer or automatic desktop/service registration is required.
 
-## Desktop setup in source builds
+## Desktop setup
 
 The desktop update adds `hrc install`, or `Tools/Install.sh` in a package, to
 install the current executable and an application-menu launcher for this user.
@@ -75,6 +76,19 @@ The setup window also has an **Install launcher** button. No root access is used
 Open **HyperNet Relay Chat** from the application menu. The launcher remembers
 the last profile; its **Profiles and setup** and **Open offline** actions remain
 available. Reopening HRC activates its existing window.
+
+The **Operations** button is available in the setup window and the conversation
+toolbar. It opens network hosting, HRC service, local model, bot and external
+assistant controls while keeping an existing chat session open. See
+[desktop hosting](DesktopHosting.md) and [desktop model and bot controls](DesktopBots.md).
+
+**Operations > Native packages** imports the supported Core or Suite release.
+Choose the folder containing its `.tar`, `.tar.sig`, `.target.json`,
+`.target.json.sig` and `Publisher.pub` files. Review the verified package, then
+select **Install package**. Installation retains the publisher key and update
+trust, uses a private per-user destination and fills the corresponding network
+setup field. Existing installations are verified before reuse. Distribution
+packages, kernel support and clock policy remain explicit host prerequisites.
 
 The setup wizard can open an existing profile or guide a new endpoint through
 network admission, invitation import, registration export and activation.
@@ -87,9 +101,10 @@ network access and enrol the signed HRC registration before online chat is avail
 `OnboardingRuntime.json` records only explicitly selected local tools, paths and
 clock identity. A configured private chrony observer uses `-U -x` and cannot adjust
 the system clock. HRC can restart its configured user services; it does not install
-system packages, alter AppArmor, create authority or renew consent automatically.
+system packages, alter AppArmor or renew consent automatically. New-network
+creation requires an explicit review in **Operations > HyperNets**.
 Use **Profile > Switch or set up** to return to setup after saving the draft.
-These desktop additions are not included in the published 0.1.0 archive.
+These desktop controls require HRC 0.2.0 or later.
 
 `Documentation/DependencyNotices.txt` contains the dependency and font notices.
 `Documentation/Dependencies.json`, `Cargo.lock` and the accompanying source archive

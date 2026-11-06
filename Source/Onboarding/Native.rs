@@ -18,7 +18,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-pub(super) fn public_file(path: &Path, maximum: usize) -> Result<Vec<u8>> {
+pub(crate) fn public_file(path: &Path, maximum: usize) -> Result<Vec<u8>> {
     if !path.is_absolute() || path.canonicalize().map_err(|_| Error::LocalConfiguration)? != path {
         return Err(Error::LocalConfiguration);
     }
@@ -44,7 +44,7 @@ pub(super) fn public_file(path: &Path, maximum: usize) -> Result<Vec<u8>> {
     }
     Ok(bytes)
 }
-pub(super) fn executable(path: &Path) -> Result<()> {
+pub(crate) fn executable(path: &Path) -> Result<()> {
     if !path.is_absolute() || path.canonicalize().map_err(|_| Error::RuntimeMissing)? != path {
         return Err(Error::RuntimeMissing);
     }
@@ -67,7 +67,7 @@ pub(super) fn executable(path: &Path) -> Result<()> {
     }
     Ok(())
 }
-pub(super) fn discover(name: &str) -> PathBuf {
+pub(crate) fn discover(name: &str) -> PathBuf {
     std::env::var_os("PATH")
         .and_then(|paths| {
             std::env::split_paths(&paths)
@@ -77,12 +77,12 @@ pub(super) fn discover(name: &str) -> PathBuf {
         })
         .unwrap_or_default()
 }
-pub(super) fn directory(path: &Path) -> Result<()> {
+pub(crate) fn directory(path: &Path) -> Result<()> {
     files::directory(path, !path.exists())
         .map(|_| ())
         .map_err(|_| Error::LocalConfiguration)
 }
-pub(super) fn exact_file(path: &Path, bytes: &[u8]) -> Result<()> {
+pub(crate) fn exact_file(path: &Path, bytes: &[u8]) -> Result<()> {
     if path.exists() {
         if files::read(path, bytes.len()).map_err(|_| Error::LocalConfiguration)? != bytes {
             return Err(Error::BundleBinding);
@@ -91,7 +91,7 @@ pub(super) fn exact_file(path: &Path, bytes: &[u8]) -> Result<()> {
     }
     files::create(path, bytes).map_err(|_| Error::LocalConfiguration)
 }
-pub(super) fn replace_file(path: &Path, bytes: &[u8]) -> Result<()> {
+pub(crate) fn replace_file(path: &Path, bytes: &[u8]) -> Result<()> {
     let parent = path.parent().ok_or(Error::LocalConfiguration)?;
     files::directory(parent, false).map_err(|_| Error::LocalConfiguration)?;
     if path.exists() {
@@ -108,7 +108,7 @@ pub(super) fn replace_file(path: &Path, bytes: &[u8]) -> Result<()> {
     }
     outcome.map_err(|_| Error::LocalConfiguration)
 }
-pub(super) fn check(cancel: &AtomicBool, end: Instant) -> Result<()> {
+pub(crate) fn check(cancel: &AtomicBool, end: Instant) -> Result<()> {
     if cancel.load(Ordering::Acquire) {
         return Err(Error::Cancelled);
     }
@@ -155,15 +155,42 @@ fn drain(pipe: &mut impl Read, bytes: &mut Vec<u8>, maximum: usize) -> Result<bo
         }
     }
 }
-pub(super) fn run(
+pub(crate) fn run(
     program: &Path,
     args: &[String],
     cancel: &AtomicBool,
     end: Instant,
 ) -> Result<Vec<u8>> {
+    run_diagnostic(program, args, cancel, end).map_err(|failure| failure.category)
+}
+
+#[derive(Debug)]
+pub(crate) struct Failure {
+    pub category: Error,
+    pub detail: Option<String>,
+}
+impl From<Error> for Failure {
+    fn from(category: Error) -> Self {
+        Self {
+            category,
+            detail: None,
+        }
+    }
+}
+
+/// Only explicit operator callers may display a bounded nonzero-exit diagnostic.
+pub(crate) fn run_diagnostic(
+    program: &Path,
+    args: &[String],
+    cancel: &AtomicBool,
+    end: Instant,
+) -> std::result::Result<Vec<u8>, Failure> {
     check(cancel, end)?;
     executable(program)?;
     let mut command = Command::new(program);
+    if program == Path::new("/usr/bin/podman") {
+        podman_environment(&mut command);
+    }
     command
         .args(args)
         .stdin(Stdio::null())
@@ -189,13 +216,175 @@ pub(super) fn run(
             return if status.success() {
                 Ok(out)
             } else {
-                Err(Error::NativeRefused)
+                Err(Failure {
+                    category: Error::NativeRefused,
+                    detail: diagnostic(&err, args),
+                })
             };
         }
         std::thread::sleep(Duration::from_millis(10));
     }
 }
-pub(super) fn json(
+
+pub(super) fn podman_environment(command: &mut Command) {
+    // Match Core's rootless storage context even when HRC uses a separate data directory.
+    command
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("LANG", "C.UTF-8");
+    for name in ["HOME", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"] {
+        if let Some(value) = std::env::var_os(name) {
+            command.env(name, value);
+        }
+    }
+}
+
+fn diagnostic(bytes: &[u8], args: &[String]) -> Option<String> {
+    const LIMIT: usize = 2048;
+    // Drop terminal sequences, including OSC hyperlinks and control strings,
+    // before redaction. Keep no command line, stdout or key-file contents.
+    let mut plain = String::new();
+    let mut escape = 0;
+    for c in String::from_utf8_lossy(bytes).chars() {
+        match escape {
+            1 => {
+                escape = match c {
+                    '[' => 2,
+                    ']' | 'P' | 'X' | '^' | '_' => 3,
+                    _ => 0,
+                };
+                continue;
+            }
+            2 => {
+                if ('\u{40}'..='\u{7e}').contains(&c) {
+                    escape = 0;
+                }
+                continue;
+            }
+            3 => {
+                if matches!(c, '\u{7}' | '\u{9c}') {
+                    escape = 0;
+                } else if c == '\u{1b}' {
+                    escape = 4;
+                }
+                continue;
+            }
+            4 => {
+                escape = if c == '\\' { 0 } else { 3 };
+                continue;
+            }
+            _ => {}
+        }
+        escape = match c {
+            '\u{1b}' => 1,
+            '\u{9b}' => 2,
+            '\u{90}' | '\u{98}' | '\u{9d}' | '\u{9e}' | '\u{9f}' => 3,
+            _ => 0,
+        };
+        if escape != 0 || hrc::text::sensitive(c) || matches!(c, '\u{200c}' | '\u{200d}') {
+            continue;
+        }
+        if c == '\n' {
+            plain.push('\n');
+        } else if c.is_whitespace() {
+            plain.push(' ');
+        } else if !c.is_control() {
+            plain.push(c);
+        }
+    }
+    // Native parsers can quote argument values on failure. Never add them to
+    // the operator report, including values supplied with --option=value.
+    let mut values = args
+        .iter()
+        .enumerate()
+        .filter_map(|(index, argument)| {
+            argument
+                .strip_prefix('-')
+                .and_then(|v| v.split_once('='))
+                .map(|(_, v)| v)
+                .or_else(|| {
+                    (index > 0 && args[index - 1].starts_with('-') && !argument.starts_with('-'))
+                        .then_some(argument.as_str())
+                })
+                .filter(|v| !v.is_empty())
+        })
+        .collect::<Vec<_>>();
+    values.sort_by_key(|v| std::cmp::Reverse(v.len()));
+    let mut remaining = plain.as_str();
+    let mut redacted = String::new();
+    while !remaining.is_empty() && redacted.len() < 65536 {
+        if let Some(value) = values.iter().find(|v| remaining.starts_with(**v)) {
+            redacted.push_str("[argument]");
+            remaining = &remaining[value.len()..];
+        } else {
+            let c = remaining.chars().next().expect("nonempty diagnostic");
+            redacted.push(c);
+            remaining = &remaining[c.len_utf8()..];
+        }
+    }
+    if !remaining.is_empty() {
+        redacted.push_str(" [truncated]");
+    }
+    let mut lines = Vec::new();
+    let mut private_block = false;
+    for line in redacted.lines() {
+        if line.contains("-----BEGIN ") {
+            private_block = true;
+            lines.push("[private material omitted]".to_owned());
+        }
+        if private_block {
+            if line.contains("-----END ") {
+                private_block = false;
+            }
+            continue;
+        }
+        let lower = line.to_ascii_lowercase();
+        if [
+            "password",
+            "passphrase",
+            "secret",
+            "token",
+            "authorization:",
+            "private key",
+        ]
+        .iter()
+        .any(|word| lower.contains(word))
+        {
+            lines.push("[private detail omitted]".to_owned());
+            continue;
+        }
+        let line = line
+            .split_whitespace()
+            .map(|word| {
+                if word
+                    .split(|c: char| {
+                        !c.is_ascii_alphanumeric() && !matches!(c, '+' | '/' | '=' | '_' | '-')
+                    })
+                    .any(|part| part.len() >= 32)
+                {
+                    "[opaque value]"
+                } else {
+                    word
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        if !line.is_empty() {
+            lines.push(line);
+        }
+    }
+    let mut result = lines.join(" ");
+    if result.len() > LIMIT {
+        let mut boundary = LIMIT - " [truncated]".len();
+        while !result.is_char_boundary(boundary) {
+            boundary -= 1;
+        }
+        result.truncate(boundary);
+        result.push_str(" [truncated]");
+    }
+    (!result.is_empty()).then_some(result)
+}
+pub(crate) fn json(
     program: &Path,
     args: &[String],
     cancel: &AtomicBool,
@@ -203,10 +392,10 @@ pub(super) fn json(
 ) -> Result<serde_json::Value> {
     serde_json::from_slice(&run(program, args, cancel, end)?).map_err(|_| Error::NativeRefused)
 }
-pub(super) fn strings(values: &[&str]) -> Vec<String> {
+pub(crate) fn strings(values: &[&str]) -> Vec<String> {
     values.iter().map(|v| (*v).into()).collect()
 }
-pub(super) fn current_user() -> Result<String> {
+pub(crate) fn current_user() -> Result<String> {
     let mut entry: libc::passwd = unsafe { std::mem::zeroed() };
     let mut result = std::ptr::null_mut();
     let mut buffer = vec![0u8; 16384];
@@ -230,13 +419,13 @@ pub(super) fn current_user() -> Result<String> {
     }
     Ok(name.to_owned())
 }
-pub(super) fn path(path: &Path) -> Result<String> {
+pub(crate) fn path(path: &Path) -> Result<String> {
     path.to_str()
         .map(str::to_owned)
         .filter(|v| !v.chars().any(char::is_control))
         .ok_or(Error::LocalConfiguration)
 }
-pub(super) fn private_socket(path: &Path) -> Result<()> {
+pub(crate) fn private_socket(path: &Path) -> Result<()> {
     use std::os::unix::fs::FileTypeExt;
     let m = fs::symlink_metadata(path).map_err(|_| Error::ClockPrerequisite)?;
     if !m.file_type().is_socket()
@@ -249,7 +438,7 @@ pub(super) fn private_socket(path: &Path) -> Result<()> {
 }
 
 /// Probe local IPC without blocking on a full listener backlog or deleting stale state.
-pub(super) fn socket_live(path: &Path) -> Result<bool> {
+pub(crate) fn socket_live(path: &Path) -> Result<bool> {
     use std::os::{
         fd::{FromRawFd, OwnedFd},
         unix::ffi::OsStrExt,

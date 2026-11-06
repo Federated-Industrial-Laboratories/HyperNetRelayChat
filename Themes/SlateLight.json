@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "name": "Slate Light",
+  "mode": "light",
+  "colors": {
+    "panel": "#ECEEF2",
+    "surface": "#F9FAFC",
+    "window": "#FDFDFE",
+    "input": "#FFFFFF",
+    "faint": "#F2F4F7",
+    "text": "#2A303B",
+    "muted": "#5B6474",
+    "accent": "#435F86",
+    "selection": "#D6DFEB",
+    "selectionText": "#314B70",
+    "border": "#B2BAC7",
+    "button": "#E3E7ED",
+    "hover": "#D7DDE6",
+    "pressed": "#C9D2DF"
+  },
+  "display": {
+    "cornerCut": 5,
+    "outlineWidth": 1
+  }
+}

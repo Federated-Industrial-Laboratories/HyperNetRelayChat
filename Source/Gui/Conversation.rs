@@ -76,13 +76,12 @@ impl App {
                     components::badge(
                         ui,
                         "Retained history · access unconfirmed",
-                        egui::Color32::from_rgb(211, 170, 91),
+                        theme::warning(ui),
                     );
                 }
                 if let Some(gap) = &room.gap {
                     ui.horizontal_wrapped(|ui| {
-                        components::badge(ui, "History gap", egui::Color32::from_rgb(211, 170, 91))
-                            .on_hover_text(gap);
+                        components::badge(ui, "History gap", theme::warning(ui)).on_hover_text(gap);
                         if components::button(ui, "Resynchronise").clicked() {
                             self.model.dispatch(Command::Resynchronise);
                         }
@@ -291,12 +290,7 @@ impl App {
             }
         }
         let text = self.event_text(event);
-        let text = if event.kind == Operation::MessageAction {
-            egui::RichText::new(text).italics()
-        } else {
-            egui::RichText::new(text)
-        };
-        ui.add(egui::Label::new(text).wrap().selectable(true))
+        self.page_text(ui, &text, event.kind == Operation::MessageAction)
             .context_menu(|ui| {
                 if ui.button("Reply").clicked() {
                     self.model.reply = Some(event.event);
@@ -305,6 +299,10 @@ impl App {
                 }
                 if ui.button("Copy message ID").clicked() {
                     ui.ctx().copy_text(event.event.to_string());
+                    ui.close();
+                }
+                if ui.button("Copy message").clicked() {
+                    ui.ctx().copy_text(text.clone());
                     ui.close();
                 }
                 ui.separator();

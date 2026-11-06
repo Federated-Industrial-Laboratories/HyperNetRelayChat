@@ -6,19 +6,11 @@ pub const ACTION_WIDTH: f32 = 128.0;
 pub const CONTROL_HEIGHT: f32 = 32.0;
 
 pub fn accent(ui: &Ui) -> Color32 {
-    if ui.visuals().dark_mode {
-        Color32::from_rgb(139, 194, 201)
-    } else {
-        Color32::from_rgb(35, 104, 116)
-    }
+    ui.visuals().hyperlink_color
 }
 
 pub fn surface(ui: &Ui) -> Color32 {
-    if ui.visuals().dark_mode {
-        Color32::from_rgb(32, 37, 42)
-    } else {
-        Color32::from_rgb(248, 250, 251)
-    }
+    super::theme::surface(ui)
 }
 
 pub fn frame(ui: &Ui) -> egui::Frame {
@@ -50,6 +42,7 @@ pub fn choice(ui: &mut Ui, selected: bool, label: &str) -> Response {
         [ACTION_WIDTH.min(ui.available_width()), CONTROL_HEIGHT],
         egui::Button::new(label).selected(selected).truncate(),
     )
+    .on_hover_text(label)
 }
 
 pub fn row(ui: &mut Ui, selected: bool, label: &str) -> Response {
