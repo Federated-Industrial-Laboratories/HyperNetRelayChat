@@ -3,6 +3,7 @@
 use super::*;
 use hrc::delegation::{self, Mode};
 use std::time::{SystemTime, UNIX_EPOCH};
+
 pub(super) struct GrantForm {
     agent: Option<EndpointActor>,
     mode: Mode,
@@ -33,116 +34,211 @@ impl Default for GrantForm {
         }
     }
 }
+fn mode_name(mode: Mode) -> &'static str {
+    match mode {
+        Mode::Draft => "Draft only",
+        Mode::Approve => "Exact approval",
+        Mode::Autonomous => "Autonomous",
+    }
+}
 impl App {
     pub(super) fn agents(&mut self, ui: &mut egui::Ui) {
         let snapshot = self.model.snapshot.clone();
-        ui.heading("Agents and delegation");
-        ui.label("Purpose describes intent. The exact room, operations, history, time and rate define the enforced permission.");
-        if ui.button("Refresh agents and grants").clicked() {
-            self.model.dispatch(Command::Inspect);
-        }
+        ui.horizontal(|ui| {
+            ui.heading("Agents");
+            if components::button(ui, "Refresh").clicked() {
+                self.model.dispatch(Command::Inspect);
+            }
+        });
         if snapshot.inspection.stale {
-            ui.colored_label(
-                egui::Color32::YELLOW,
-                "Retained inspection; reconnect and refresh before acting",
+            components::badge(
+                ui,
+                "Retained · refresh required",
+                egui::Color32::from_rgb(211, 170, 91),
             );
         }
         egui::ScrollArea::vertical().show(ui, |ui| {
-            ui.collapsing("Create a grant for the selected room", |ui| self.grant_form(ui));
+            components::frame(ui).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.collapsing("New room grant", |ui| self.grant_form(ui));
+            });
+            ui.add_space(10.0);
+            if snapshot.inspection.grants.is_empty() {
+                components::section(ui, "Grants", |ui| { ui.weak("No grants in this inspection"); });
+            }
             for grant in &snapshot.inspection.grants {
-                ui.group(|ui| {
-                    ui.strong(format!("{} · {:?} · {:?}",display::short_account(grant.scope.agent.account),grant.scope.mode,grant.state));
-                    ui.label(&grant.scope.purpose);
-                    ui.label(format!("Expires UTC {} · {} operations/minute",display::timestamp(grant.scope.expires_ms),grant.scope.max_operations_per_minute));
+                let name = snapshot.inspection.agents.iter().find(|agent| agent.actor == grant.scope.agent)
+                    .map(|agent| hrc::text::identity_display(&agent.nickname))
+                    .unwrap_or_else(|| display::short_account(grant.scope.agent.account));
+                components::section(ui, &name, |ui| {
                     ui.horizontal_wrapped(|ui| {
-                        if ui.button("Inspect scope and approvals").clicked() { self.model.dispatch(Command::InspectGrant(grant.reference)); }
-                        for (label,change) in [("Pause",hrc::client::GrantChange::Pause),("Resume",hrc::client::GrantChange::Resume),("Revoke permanently",hrc::client::GrantChange::Revoke)] {
-                            if ui.button(label).clicked() { self.model.dispatch(Command::ChangeGrant { grant:grant.reference,change }); }
+                        components::accent_badge(ui, mode_name(grant.scope.mode));
+                        components::muted_badge(ui, &format!("{:?}", grant.state));
+                        components::readout(ui, "LIMIT", &format!("{}/min", grant.scope.max_operations_per_minute));
+                    });
+                    if !grant.scope.purpose.is_empty() { ui.add(egui::Label::new(&grant.scope.purpose).wrap()); }
+                    ui.weak(format!("Expires {}", display::timestamp(grant.scope.expires_ms)));
+                    ui.horizontal_wrapped(|ui| {
+                        if components::button(ui, "Inspect").clicked() { self.model.dispatch(Command::InspectGrant(grant.reference)); }
+                        let change = match grant.state {
+                            delegation::State::Active => Some(("Pause", hrc::client::GrantChange::Pause)),
+                            delegation::State::Paused => Some(("Resume", hrc::client::GrantChange::Resume)),
+                            delegation::State::Revoked => None,
+                        };
+                        if let Some((label, change)) = change {
+                            if components::button(ui, label).on_hover_text("Pause stops subsequent delegated effects. Resume keeps the original scope and expiry.").clicked() {
+                                self.model.dispatch(Command::ChangeGrant { grant: grant.reference, change });
+                            }
+                            let revoke = components::button(ui, "Revoke…");
+                            egui::Popup::menu(&revoke).show(|ui| {
+                                ui.label("Permanently revoke this grant?");
+                                ui.label("Restoring access requires a new grant. Received content remains received.");
+                                if components::button(ui, "Revoke grant").clicked() {
+                                    self.model.dispatch(Command::ChangeGrant { grant: grant.reference, change: hrc::client::GrantChange::Revoke });
+                                    ui.close();
+                                }
+                            });
                         }
                     });
                 });
             }
             if let Some(inspection) = &snapshot.inspection.grant {
-                ui.separator(); ui.heading("Selected grant");
                 let grant = &inspection.grant;
-                ui.label(format!("Grant {} generation {}",grant.reference.id,grant.reference.generation));
-                ui.label(format!("Owner {} · Agent {}",grant.owner,grant.scope.agent.account));
-                ui.label(format!("Target service {}",grant.home));
-                ui.label(format!("Rooms: {}",grant.scope.rooms.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ")));
-                ui.label(format!("Operations: {:?}",grant.scope.operations));
-                ui.label(format!("Valid UTC {}..{}; history UTC {}..{}",display::timestamp(grant.scope.not_before_ms),display::timestamp(grant.scope.expires_ms),display::timestamp(grant.scope.history_from_ms),display::timestamp(grant.scope.history_until_ms)));
-                ui.label("Pause stops later delegated effects. Revocation requires a new grant to restore access. Already received content remains received.");
+                components::section(ui, "Selected grant", |ui| {
+                    egui::Grid::new("grant-scope").spacing([20.0, 9.0]).show(ui, |ui| {
+                        for (label, value) in [
+                            ("Mode", mode_name(grant.scope.mode).to_owned()),
+                            ("Operations", format!("{:?}", grant.scope.operations)),
+                            ("Valid from", display::timestamp(grant.scope.not_before_ms)),
+                            ("Expires", display::timestamp(grant.scope.expires_ms)),
+                            ("History from", display::timestamp(grant.scope.history_from_ms)),
+                            ("History until", display::timestamp(grant.scope.history_until_ms)),
+                        ] { ui.weak(label); ui.add(egui::Label::new(value).wrap()); ui.end_row(); }
+                    });
+                    ui.collapsing("Identity and scope", |ui| {
+                        for (label, value) in [
+                            ("Grant", format!("{} · generation {}", grant.reference.id, grant.reference.generation)),
+                            ("Owner", grant.owner.to_string()), ("Agent", grant.scope.agent.account.to_string()),
+                            ("Service", grant.home.to_string()),
+                            ("Rooms", grant.scope.rooms.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ")),
+                        ] { ui.weak(label); ui.add(egui::Label::new(value).wrap().selectable(true)); }
+                    });
+                });
                 for pending in &inspection.pending {
-                    ui.group(|ui| {
-                        ui.strong("Exact proposed action");
-                        let action = snapshot.inspection.proposed.iter().find(|action|hrc::protocol::action_digest(action).is_ok_and(|digest|digest == pending.action_digest));
+                    components::section(ui, "Proposed action", |ui| {
+                        let action = snapshot.inspection.proposed.iter()
+                            .find(|action| hrc::protocol::action_digest(action).is_ok_and(|digest| digest == pending.action_digest));
                         if let Some(action) = action {
-                            ui.label(format!("{:?} · {:?}",action.operation,action.target));
-                            ui.label(format!("Attribution: {:?}",action.actor));
-                            if let Some(hrc::client::MessageContent::Decrypted(body))=snapshot.inspection.proposed_content.get(&pending.action_digest) {ui.add(egui::Label::new(&body.text).wrap().selectable(true));}
-                            else if action.body.deserialized::<hrc::crypto::EncryptedBody>().is_ok() {ui.label("Encrypted proposal cannot be approved until this endpoint verifies its plaintext.");}
-                            else if let Ok(body) = action.body.deserialized::<hrc::messaging::Send>() { ui.add(egui::Label::new(body.text).wrap().selectable(true)); }
-                            else if let Ok(json) = serde_json::to_string_pretty(&action.body) { ui.monospace(json); }
-                        } else { ui.label("Candidate could not be verified for display"); }
-                        ui.label(format!("Digest {} · expires UTC {} · state {}",pending.action_digest,display::timestamp(pending.expires_ms),pending.state));
-                        ui.horizontal(|ui| {
-                            if ui.add_enabled(action.is_some_and(|a|a.body.deserialized::<hrc::crypto::EncryptedBody>().is_err() || matches!(snapshot.inspection.proposed_content.get(&pending.action_digest),Some(hrc::client::MessageContent::Decrypted(_)))) && pending.state == 0,egui::Button::new("Approve this exact action")).clicked() { self.model.dispatch(Command::DecideApproval { grant:grant.reference, decision:delegation::Decision {approval:pending.approval,action_digest:pending.action_digest}, approve:true }); }
-                            if ui.button("Reject").clicked() { self.model.dispatch(Command::DecideApproval { grant:grant.reference, decision:delegation::Decision {approval:pending.approval,action_digest:pending.action_digest}, approve:false }); }
+                            ui.horizontal_wrapped(|ui| {
+                                components::accent_badge(ui, &format!("{:?}", action.operation));
+                                ui.label(display::actor(&action.actor, snapshot.selected.as_ref().map_or(&[][..], |room| room.members.as_slice())));
+                            });
+                            ui.add(egui::Label::new(format!("{:?}", action.target)).wrap().selectable(true));
+                            if let Some(hrc::client::MessageContent::Decrypted(body)) = snapshot.inspection.proposed_content.get(&pending.action_digest) {
+                                ui.add(egui::Label::new(&body.text).wrap().selectable(true));
+                            } else if action.body.deserialized::<hrc::crypto::EncryptedBody>().is_ok() {
+                                components::badge(ui, "Plaintext not verified · approval blocked", egui::Color32::from_rgb(211, 170, 91));
+                            } else if let Ok(body) = action.body.deserialized::<hrc::messaging::Send>() {
+                                ui.add(egui::Label::new(body.text).wrap().selectable(true));
+                            } else if let Ok(json) = serde_json::to_string_pretty(&action.body) {
+                                ui.add(egui::Label::new(egui::RichText::new(json).monospace()).wrap().selectable(true));
+                            }
+                        } else { ui.colored_label(egui::Color32::from_rgb(211, 170, 91), "Candidate verification unavailable"); }
+                        ui.weak(format!("Expires {} · state {}", display::timestamp(pending.expires_ms), pending.state));
+                        ui.collapsing("Identity and action digest", |ui| {
+                            if let Some(action) = action { ui.add(egui::Label::new(format!("{:?}", action.actor)).wrap().selectable(true)); }
+                            ui.add(egui::Label::new(pending.action_digest.to_string()).wrap().selectable(true));
+                        });
+                        ui.horizontal_wrapped(|ui| {
+                            let verified = action.is_some_and(|a| a.body.deserialized::<hrc::crypto::EncryptedBody>().is_err()
+                                || matches!(snapshot.inspection.proposed_content.get(&pending.action_digest), Some(hrc::client::MessageContent::Decrypted(_)))) && pending.state == 0;
+                            if ui.add_enabled_ui(verified, |ui| components::primary(ui, "Approve exact")).inner.clicked() {
+                                self.model.dispatch(Command::DecideApproval { grant: grant.reference,
+                                    decision: delegation::Decision { approval: pending.approval, action_digest: pending.action_digest }, approve: true });
+                            }
+                            if components::button(ui, "Reject").clicked() {
+                                self.model.dispatch(Command::DecideApproval { grant: grant.reference,
+                                    decision: delegation::Decision { approval: pending.approval, action_digest: pending.action_digest }, approve: false });
+                            }
                         });
                     });
                 }
             }
         });
     }
+
     fn grant_form(&mut self, ui: &mut egui::Ui) {
         let snapshot = self.model.snapshot.clone();
         let Some(room) = &snapshot.selected else {
-            ui.label("Select the room to grant access to");
+            ui.weak("Select a room first");
             return;
         };
-        ui.label(format!(
-            "Only room {} ({})",
-            hrc::text::identity_display(&room.summary.name),
-            room.summary.room
-        ));
-        for agent in &snapshot.inspection.agents {
-            ui.radio_value(
-                &mut self.grant.agent,
-                Some(agent.actor.clone()),
-                format!(
+        components::field(ui, "Room", |ui| {
+            ui.label(format!(
+                "# {}",
+                hrc::text::identity_display(&room.summary.name)
+            ))
+            .on_hover_text(room.summary.room.to_string());
+        });
+        components::field(ui, "Agent", |ui| {
+            if snapshot.inspection.agents.is_empty() {
+                ui.weak("No agent endpoints in this inspection");
+            }
+            for agent in &snapshot.inspection.agents {
+                let label = format!(
                     "{} · {}",
                     hrc::text::identity_display(&agent.nickname),
                     display::short_account(agent.actor.account)
-                ),
-            );
-        }
-        for (mode, label) in [
-            (Mode::Draft, "Draft only"),
-            (Mode::Approve, "Approve each exact action"),
-            (Mode::Autonomous, "Act within the scope below"),
-        ] {
-            ui.radio_value(&mut self.grant.mode, mode, label);
-        }
-        ui.horizontal_wrapped(|ui| {
-            ui.checkbox(&mut self.grant.read, "Read history and search");
-            ui.checkbox(&mut self.grant.reply, "Reply");
-            ui.checkbox(&mut self.grant.initiate, "Send new messages");
-            ui.checkbox(&mut self.grant.mark_read, "Mark handled/read");
-            ui.checkbox(&mut self.grant.moderate, "Moderate");
+                );
+                if components::row(ui, self.grant.agent.as_ref() == Some(&agent.actor), &label)
+                    .clicked()
+                {
+                    self.grant.agent = Some(agent.actor.clone());
+                }
+            }
         });
-        ui.add(egui::Slider::new(&mut self.grant.hours, 1..=168).text("Validity hours"));
-        ui.add(
-            egui::Slider::new(&mut self.grant.history_hours, 0..=720)
-                .text("Previous history hours (0 = future only)"),
-        );
-        ui.add(egui::Slider::new(&mut self.grant.rate, 1..=60).text("Operations per minute"));
-        ui.add(
-            egui::TextEdit::multiline(&mut self.grant.purpose)
-                .hint_text("Purpose")
-                .char_limit(512)
-                .desired_rows(2),
-        );
-        if ui.button("Create this explicit grant").clicked() {
+        components::field(ui, "Mode", |ui| {
+            ui.horizontal_wrapped(|ui| {
+                for mode in [Mode::Draft, Mode::Approve, Mode::Autonomous] {
+                    if components::choice(ui, self.grant.mode == mode, mode_name(mode)).clicked() {
+                        self.grant.mode = mode;
+                    }
+                }
+            });
+        });
+        components::field(ui, "Operations", |ui| {
+            egui::Grid::new("grant-operations")
+                .min_col_width(180.0)
+                .show(ui, |ui| {
+                    ui.checkbox(&mut self.grant.read, "Read and search");
+                    ui.checkbox(&mut self.grant.reply, "Reply");
+                    ui.end_row();
+                    ui.checkbox(&mut self.grant.initiate, "New messages");
+                    ui.checkbox(&mut self.grant.mark_read, "Mark handled/read");
+                    ui.end_row();
+                    ui.checkbox(&mut self.grant.moderate, "Moderate");
+                    ui.end_row();
+                });
+        });
+        components::field(ui, "Validity", |ui| {
+            ui.add(egui::Slider::new(&mut self.grant.hours, 1..=168).suffix(" h"));
+        });
+        components::field(ui, "Past history", |ui| {
+            ui.add(egui::Slider::new(&mut self.grant.history_hours, 0..=720).suffix(" h"))
+                .on_hover_text("0 grants future history only");
+        });
+        components::field(ui, "Rate limit", |ui| {
+            ui.add(egui::Slider::new(&mut self.grant.rate, 1..=60).suffix(" / min"));
+        });
+        components::field(ui, "Purpose", |ui| {
+            ui.add(
+                egui::TextEdit::multiline(&mut self.grant.purpose)
+                    .char_limit(512)
+                    .desired_rows(2)
+                    .desired_width(ui.available_width()),
+            );
+        });
+        if components::primary(ui, "Create grant").clicked() {
             let Some(agent) = self.grant.agent.clone() else {
                 self.model.error = Some("Select an agent endpoint".into());
                 return;

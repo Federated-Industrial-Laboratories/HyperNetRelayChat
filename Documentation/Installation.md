@@ -67,6 +67,30 @@ Run `gui --profile PROFILE`, `tui --profile PROFILE` or the documented CLI comma
 using that binary. Add its `Bin` directory to the user's chosen PATH if desired.
 No privileged installer or automatic desktop/service registration is required.
 
+## Desktop setup in source builds
+
+The desktop update adds `hrc install`, or `Tools/Install.sh` in a package, to
+install the current executable and an application-menu launcher for this user.
+The setup window also has an **Install launcher** button. No root access is used.
+Open **HyperNet Relay Chat** from the application menu. The launcher remembers
+the last profile; its **Profiles and setup** and **Open offline** actions remain
+available. Reopening HRC activates its existing window.
+
+The setup wizard can open an existing profile or guide a new endpoint through
+network admission, invitation import, registration export and activation.
+Core, Suite, user systemd and an authenticated local chrony source are prerequisites.
+The operator supplies the bootstrap and an independently confirmed fingerprint,
+then an HRC setup bundle and its separately confirmed SHA-256. `hrc setup-bundle
+--help` lists the operator inputs. Keys stay local. The operator must still approve
+network access and enrol the signed HRC registration before online chat is available.
+
+`OnboardingRuntime.json` records only explicitly selected local tools, paths and
+clock identity. A configured private chrony observer uses `-U -x` and cannot adjust
+the system clock. HRC can restart its configured user services; it does not install
+system packages, alter AppArmor, create authority or renew consent automatically.
+Use **Profile > Switch or set up** to return to setup after saving the draft.
+These desktop additions are not included in the published 0.1.0 archive.
+
 `Documentation/DependencyNotices.txt` contains the dependency and font notices.
 `Documentation/Dependencies.json`, `Cargo.lock` and the accompanying source archive
 identify the build inputs. `Package.json` lists file digests and source provenance;

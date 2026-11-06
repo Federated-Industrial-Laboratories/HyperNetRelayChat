@@ -139,7 +139,7 @@ def main():
             for name in sorted(files.keys() | generated.keys()):
                 data = generated.get(name)
                 info = tarfile.TarInfo(prefix + "/" + name)
-                info.mode = 0o755 if name == "Bin/hrc" else 0o644
+                info.mode = 0o755 if name in ("Bin/hrc", "Tools/Install.sh") else 0o644
                 info.mtime = timestamp
                 info.size = len(data) if data is not None else files[name].stat().st_size
                 if data is not None:

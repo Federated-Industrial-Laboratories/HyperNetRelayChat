@@ -133,7 +133,8 @@ pub fn show(ui: &mut egui::Ui, id: egui::Id, editor: &mut Editor) -> Output {
     let mut output = egui::TextEdit::multiline(&mut buffer)
         .id(id)
         .interactive(ui.is_enabled())
-        .hint_text("Write a message or /help")
+        .hint_text("Message")
+        .margin(egui::vec2(10.0, 9.0))
         .desired_rows(3)
         .desired_width(f32::INFINITY)
         .show(ui);

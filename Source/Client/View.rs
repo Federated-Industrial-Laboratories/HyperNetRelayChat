@@ -16,6 +16,12 @@ pub enum Density {
     Comfortable,
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ChatLayout {
+    #[default]
+    Classic,
+    Bubbles,
+}
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NotificationMode {
     #[default]
     All,
@@ -27,6 +33,8 @@ pub enum NotificationMode {
 pub struct Preferences {
     pub theme: Theme,
     pub density: Density,
+    #[serde(default)]
+    pub chat_layout: ChatLayout,
     pub text_scale: f32,
     pub quiet: bool,
     pub sound: bool,
@@ -37,6 +45,7 @@ impl Default for Preferences {
         Self {
             theme: Theme::Dark,
             density: Density::Comfortable,
+            chat_layout: ChatLayout::Classic,
             text_scale: 1.0,
             quiet: false,
             sound: false,

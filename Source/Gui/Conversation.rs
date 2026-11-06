@@ -1,57 +1,102 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Bounded history, search, replies and the shared Unicode composer.
 use super::*;
-use hrc::{messaging, text};
+use hrc::{client::ChatLayout, messaging, text};
+use unicode_segmentation::UnicodeSegmentation;
+
 impl App {
     pub(super) fn conversation(&mut self, ui: &mut egui::Ui) {
         let snapshot = self.model.snapshot.clone();
         let Some(room) = &snapshot.selected else {
-            ui.heading("Welcome to HyperNet Relay Chat");
-            ui.label("Select a joined room or create one. Your drafts are retained when the connection is unavailable.");
+            ui.vertical_centered(|ui| {
+                ui.add_space((ui.available_height() * 0.3).max(20.0));
+                ui.heading("Conversations");
+                ui.add_space(12.0);
+                components::accent_badge(ui, "No room selected");
+            });
             return;
         };
-        egui::Panel::bottom("composer").show(ui, |ui| self.composer(ui));
-        let controls_height = (ui.available_height() * 0.55).clamp(0.0, 320.0);
+        egui::Panel::bottom("composer")
+            .frame(
+                egui::Frame::new()
+                    .fill(components::surface(ui))
+                    .inner_margin(12),
+            )
+            .show(ui, |ui| self.composer(ui));
         egui::ScrollArea::vertical()
             .id_salt(("room-controls", room.summary.room))
-            .max_height(controls_height)
+            .max_height((ui.available_height() * 0.45).min(230.0))
             .show(ui, |ui| {
-                ui.heading(format!("# {}", text::identity_display(&room.summary.name)));
-                ui.label(&room.summary.topic);
                 ui.horizontal_wrapped(|ui| {
-                    ui.label(display::confidentiality(room.summary.confidentiality));
-                    if room.stale {
-                        ui.label("Retained copy; current access is not confirmed");
-                    }
-                    if ui.button("Leave").clicked() {
-                        self.model.dispatch(Command::Leave(room.summary.room));
-                    }
-                    if ui.button("Mark read").clicked() {
-                        self.model.dispatch(Command::MarkRead {
-                            room: room.summary.room,
-                            sequence: room
-                                .events
-                                .last()
-                                .map_or(room.read_sequence, |e| e.sequence),
+                    ui.heading(format!("# {}", text::identity_display(&room.summary.name)));
+                    let (label, colour) = match room.summary.confidentiality {
+                        RoomConfidentiality::Community => {
+                            ("Community", ui.visuals().weak_text_color())
+                        }
+                        RoomConfidentiality::ConfidentialDirect => {
+                            ("Confidential", components::accent(ui))
+                        }
+                        RoomConfidentiality::PrivateGroup => {
+                            ("Private group", components::accent(ui))
+                        }
+                    };
+                    components::badge(ui, label, colour)
+                        .on_hover_text(display::confidentiality(room.summary.confidentiality));
+                    ui.menu_button("Room", |ui| {
+                        ui.menu_button(format!("Members ({})", room.members.len()), |ui| {
+                            ui.set_min_width(210.0);
+                            ui.push_id("member-menu", |ui| self.member_list(ui));
                         });
-                    }
+                        if ui.button("Mark read").clicked() {
+                            self.model.dispatch(Command::MarkRead {
+                                room: room.summary.room,
+                                sequence: room
+                                    .events
+                                    .last()
+                                    .map_or(room.read_sequence, |e| e.sequence),
+                            });
+                            ui.close();
+                        }
+                        if ui.button("Leave room").clicked() {
+                            self.model.dispatch(Command::Leave(room.summary.room));
+                            ui.close();
+                        }
+                        ui.separator();
+                        ui.monospace(room.summary.room.to_string());
+                    });
                 });
+                if !room.summary.topic.is_empty() {
+                    ui.add(
+                        egui::Label::new(&room.summary.topic)
+                            .wrap()
+                            .selectable(true),
+                    );
+                }
+                if room.stale {
+                    components::badge(
+                        ui,
+                        "Retained history · access unconfirmed",
+                        egui::Color32::from_rgb(211, 170, 91),
+                    );
+                }
                 if let Some(gap) = &room.gap {
                     ui.horizontal_wrapped(|ui| {
-                        ui.colored_label(egui::Color32::YELLOW, format!("History gap: {gap}"));
-                        if ui.button("Resynchronise").clicked() {
+                        components::badge(ui, "History gap", egui::Color32::from_rgb(211, 170, 91))
+                            .on_hover_text(gap);
+                        if components::button(ui, "Resynchronise").clicked() {
                             self.model.dispatch(Command::Resynchronise);
                         }
                     });
                 }
                 self.encryption(ui);
                 self.search_controls(ui);
-                if room.focus.is_some() && ui.button("Return to live conversation").clicked() {
+                if room.focus.is_some() && components::button(ui, "Back to live").clicked() {
                     self.model.select(room.summary.room);
                 }
             });
+        ui.separator();
         if let Some(search) = &snapshot.search {
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.strong(if search.running {
                     "Searching…"
                 } else if search.cancelled {
@@ -59,13 +104,16 @@ impl App {
                 } else {
                     "Search results"
                 });
-                if search.running && ui.button("Cancel search").clicked() {
+                if search.running && components::button(ui, "Cancel").clicked() {
                     self.model.dispatch(Command::CancelSearch);
                 }
-                if ui.button("Close search").clicked() {
+                if components::button(ui, "Close search").clicked() {
                     self.model.dispatch(Command::CloseSearch);
                 }
-                if search.has_more && !search.running && ui.button("Next page").clicked() {
+                if search.has_more
+                    && !search.running
+                    && components::button(ui, "Next page").clicked()
+                {
                     self.model.dispatch(Command::NextSearchPage);
                 }
             });
@@ -76,7 +124,8 @@ impl App {
                         self.event(ui, event, &room.members, true);
                     }
                     if search.events.is_empty() && !search.running {
-                        ui.label("No matching retained messages");
+                        ui.add_space(20.0);
+                        ui.weak("No matching retained messages");
                     }
                 });
         } else {
@@ -84,15 +133,33 @@ impl App {
                 .id_salt(("history", room.summary.room))
                 .stick_to_bottom(true)
                 .show(ui, |ui| {
-                    if room.has_more && ui.button("Load more retained history").clicked() {
+                    ui.set_width(ui.available_width());
+                    if room.has_more && components::button(ui, "Earlier messages").clicked() {
                         self.model.dispatch(Command::LoadMore);
                     }
+                    let mut day = None;
                     for event in &room.events {
+                        let event_day = event.timestamp_ms / 86_400_000;
+                        if day != Some(event_day) {
+                            ui.add_space(10.0);
+                            ui.horizontal(|ui| {
+                                ui.weak(
+                                    display::timestamp(event.timestamp_ms)
+                                        .split('T')
+                                        .next()
+                                        .unwrap_or("Date unavailable"),
+                                );
+                                ui.separator();
+                            });
+                            ui.add_space(6.0);
+                            day = Some(event_day);
+                        }
                         self.event(ui, event, &room.members, false);
                     }
                 });
         }
     }
+
     fn event(
         &mut self,
         ui: &mut egui::Ui,
@@ -100,75 +167,160 @@ impl App {
         members: &[hrc::conversations::Member],
         search: bool,
     ) {
-        let response = ui
-            .push_id(event.event, |ui| {
+        let message = matches!(
+            event.kind,
+            Operation::MessageSend | Operation::MessageReply | Operation::MessageAction
+        );
+        let compact = self.model.snapshot.preferences.density == Density::Compact;
+        let response = ui.push_id(event.event, |ui| {
+            if !message {
                 ui.horizontal_wrapped(|ui| {
                     ui.weak(display::time(event.timestamp_ms));
-                    ui.strong(display::actor(&event.actor, members));
-                    if event.kind == Operation::MessageAction {
-                        ui.weak("action");
-                    }
-                    if search && ui.small_button("Open context").clicked() {
-                        self.model.open_event(event.room, event.event);
-                        self.scroll_event = Some(event.event);
-                        self.model.dispatch(Command::CloseSearch);
-                    }
+                    ui.weak(format!("{} {}", display::actor(&event.actor, members), self.event_text(event)));
                 });
-                ui.add(
-                    egui::Label::new(display::event_text_with_content(
-                        event,
-                        self.model
-                            .snapshot
-                            .search
-                            .as_ref()
-                            .and_then(|s| s.content.get(&event.event))
-                            .or_else(|| {
-                                self.model
-                                    .snapshot
-                                    .selected
-                                    .as_ref()
-                                    .and_then(|r| r.content.get(&event.event))
-                            }),
-                    ))
-                    .wrap()
-                    .selectable(true),
-                )
-                .context_menu(|ui| {
-                    if ui.button("Reply").clicked() {
-                        self.model.reply = Some(event.event);
-                        self.focus_composer = true;
-                        ui.close();
-                    }
-                    if ui.button("Copy message ID").clicked() {
-                        ui.ctx().copy_text(event.event.to_string());
-                        ui.close();
-                    }
-                    ui.label(format!(
-                        "Sequence {} · UTC {}",
-                        event.sequence,
-                        display::timestamp(event.timestamp_ms)
-                    ));
-                    ui.label(event.event.to_string());
+                ui.add_space(if compact { 2.0 } else { 5.0 });
+                return;
+            }
+            if self.model.snapshot.preferences.chat_layout == ChatLayout::Classic {
+                ui.horizontal_top(|ui| {
+                    ui.allocate_ui_with_layout(egui::vec2(65.0, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
+                        ui.add(egui::Label::new(egui::RichText::new(display::time(event.timestamp_ms)).monospace().weak()).truncate())
+                            .on_hover_text(display::timestamp(event.timestamp_ms));
+                    });
+                    let author_width = (ui.available_width() * 0.27).clamp(85.0, 155.0);
+                    ui.allocate_ui_with_layout(egui::vec2(author_width, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
+                        ui.add(egui::Label::new(egui::RichText::new(display::actor(&event.actor, members)).strong().color(components::accent(ui))).wrap());
+                    });
+                    ui.vertical(|ui| self.message_body(ui, event, search));
                 });
-                if let Ok(body) = event.body.deserialized::<messaging::Send>()
-                    && let Some(parent) = body.parent
-                {
-                    ui.weak(format!("Reply to {}", &parent.as_hex()[..12]));
-                }
-                ui.add_space(
-                    if self.model.snapshot.preferences.density == Density::Compact {
-                        3.0
-                    } else {
-                        9.0
-                    },
-                );
-            })
-            .response;
+                ui.add_space(if compact { 2.0 } else { 6.0 });
+                ui.separator();
+            } else {
+                let own = matches!(&event.actor, Actor::Direct { acting } if acting.account == self.model.snapshot.account);
+                let room_width = ui.available_width();
+                let bubble_width = (room_width * 0.86).max(180.0).min(room_width);
+                ui.horizontal_top(|ui| {
+                    if own { ui.add_space((room_width - bubble_width - ui.spacing().item_spacing.x).max(0.0)); }
+                    let fill = if own { ui.visuals().selection.bg_fill.gamma_multiply(0.65) } else { components::surface(ui) };
+                    egui::Frame::new().fill(fill).stroke(ui.visuals().widgets.noninteractive.bg_stroke).inner_margin(if compact { 8 } else { 12 }).show(ui, |ui| {
+                        ui.vertical(|ui| {
+                        ui.set_width((bubble_width - 24.0).max(80.0));
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(egui::RichText::new(display::actor(&event.actor, members)).strong().color(components::accent(ui)));
+                            ui.weak(display::time(event.timestamp_ms)).on_hover_text(display::timestamp(event.timestamp_ms));
+                        });
+                        self.message_body(ui, event, search);
+                        });
+                    });
+                });
+                ui.add_space(if compact { 4.0 } else { 9.0 });
+            }
+        }).response;
         if self.scroll_event == Some(event.event) {
             response.scroll_to_me(Some(egui::Align::Center));
             self.scroll_event = None;
         }
     }
+
+    fn event_text(&self, event: &Event) -> String {
+        display::event_text_with_content(
+            event,
+            self.model
+                .snapshot
+                .search
+                .as_ref()
+                .and_then(|s| s.content.get(&event.event))
+                .or_else(|| {
+                    self.model
+                        .snapshot
+                        .selected
+                        .as_ref()
+                        .and_then(|r| r.content.get(&event.event))
+                }),
+        )
+    }
+
+    fn reply_preview(&self, id: Id) -> String {
+        self.model
+            .snapshot
+            .selected
+            .as_ref()
+            .and_then(|room| {
+                room.events.iter().find(|e| e.event == id).map(|event| {
+                    let text = self.event_text(event);
+                    let snippet = text
+                        .graphemes(true)
+                        .take(96)
+                        .collect::<String>()
+                        .replace('\n', " ");
+                    format!(
+                        "{}: {}",
+                        display::actor(&event.actor, &room.members),
+                        snippet
+                    )
+                })
+            })
+            .unwrap_or_else(|| format!("Message {}", &id.as_hex()[..12]))
+    }
+
+    fn message_body(&mut self, ui: &mut egui::Ui, event: &Event, search: bool) {
+        let parent = event
+            .body
+            .deserialized::<messaging::Send>()
+            .ok()
+            .and_then(|body| body.parent)
+            .or_else(|| {
+                event
+                    .body
+                    .deserialized::<hrc::crypto::EncryptedEvent>()
+                    .ok()
+                    .and_then(|body| body.context.parent)
+            });
+        if let Some(parent) = parent {
+            let preview = format!("↳ {}", self.reply_preview(parent));
+            if ui
+                .add(
+                    egui::Label::new(egui::RichText::new(preview).small().weak())
+                        .wrap()
+                        .sense(egui::Sense::click()),
+                )
+                .clicked()
+            {
+                self.model.open_event(event.room, parent);
+                self.scroll_event = Some(parent);
+            }
+        }
+        let text = self.event_text(event);
+        let text = if event.kind == Operation::MessageAction {
+            egui::RichText::new(text).italics()
+        } else {
+            egui::RichText::new(text)
+        };
+        ui.add(egui::Label::new(text).wrap().selectable(true))
+            .context_menu(|ui| {
+                if ui.button("Reply").clicked() {
+                    self.model.reply = Some(event.event);
+                    self.focus_composer = true;
+                    ui.close();
+                }
+                if ui.button("Copy message ID").clicked() {
+                    ui.ctx().copy_text(event.event.to_string());
+                    ui.close();
+                }
+                ui.separator();
+                ui.weak(format!(
+                    "Sequence {} · UTC {}",
+                    event.sequence,
+                    display::timestamp(event.timestamp_ms)
+                ));
+            });
+        if search && components::button(ui, "Open context").clicked() {
+            self.model.open_event(event.room, event.event);
+            self.scroll_event = Some(event.event);
+            self.model.dispatch(Command::CloseSearch);
+        }
+    }
+
     fn search_controls(&mut self, ui: &mut egui::Ui) {
         let (input, search) = egui::Sides::new().shrink_left().show(
             ui,
@@ -176,33 +328,35 @@ impl App {
                 ui.add(
                     egui::TextEdit::singleline(&mut self.query)
                         .id(egui::Id::unique("search"))
-                        .hint_text("Search this room")
+                        .hint_text("Search this conversation")
                         .desired_width(ui.available_width())
                         .char_limit(256),
                 )
             },
-            |ui| ui.button("Search"),
+            |ui| components::button(ui, "Search"),
         );
         let enter = input.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
         if search.clicked() || enter {
             self.start_search();
         }
-        ui.collapsing("Search filters", |ui| {
+        ui.collapsing("Filters", |ui| {
             for (label, value) in [
-                ("Acting sender name or ID", &mut self.find_sender),
-                ("Represented name or ID", &mut self.find_represented),
-                ("From date (UTC or ISO 8601)", &mut self.find_from),
-                ("Before date (UTC or ISO 8601)", &mut self.find_until),
+                ("Acting sender", &mut self.find_sender),
+                ("Represented", &mut self.find_represented),
+                ("From (UTC)", &mut self.find_from),
+                ("Before (UTC)", &mut self.find_until),
             ] {
-                ui.label(label);
-                ui.add(
-                    egui::TextEdit::singleline(value)
-                        .desired_width(ui.available_width())
-                        .char_limit(300),
-                );
+                components::field(ui, label, |ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(value)
+                            .desired_width(ui.available_width())
+                            .char_limit(300),
+                    );
+                });
             }
         });
     }
+
     fn start_search(&mut self) {
         let result = (|| {
             let account = |value: &str| {
@@ -233,6 +387,7 @@ impl App {
             Err(error) => self.model.error = Some(error.into()),
         }
     }
+
     fn composer(&mut self, ui: &mut egui::Ui) {
         let room = self
             .model
@@ -246,9 +401,12 @@ impl App {
             egui::text_edit::TextEditState::default().store(ui.ctx(), id);
         }
         if let Some(reply) = self.model.reply {
-            ui.horizontal(|ui| {
-                ui.label(format!("Reply to {}", &reply.as_hex()[..12]));
-                if ui.small_button("Cancel reply").clicked() {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(
+                    egui::RichText::new(format!("↳ {}", self.reply_preview(reply)))
+                        .color(components::accent(ui)),
+                );
+                if components::button(ui, "Cancel reply").clicked() {
                     self.model.reply = None;
                 }
             });
@@ -257,7 +415,7 @@ impl App {
         let mentions_before = self.model.editor.mentions().to_vec();
         let enabled = self.model.composer_enabled();
         if !enabled {
-            ui.weak("Composer paused while the room changes or the client closes");
+            components::muted_badge(ui, "Composer paused");
         }
         let output = ui
             .add_enabled_ui(enabled, |ui| editor::show(ui, id, &mut self.model.editor))
@@ -278,35 +436,43 @@ impl App {
         let send = ui.input_mut(|input| input.consume_key(egui::Modifiers::CTRL, egui::Key::Enter));
         ui.add_enabled_ui(enabled, |ui| {
             self.completion(ui);
-            ui.horizontal_wrapped(|ui| {
-                if ui.button("Send · Ctrl+Enter").clicked() || send {
+            ui.horizontal(|ui| {
+                if components::primary(ui, "Send")
+                    .on_hover_text("Ctrl+Enter · Enter inserts a line break")
+                    .clicked()
+                    || send
+                {
                     self.model.submit();
                 }
-                ui.weak("Enter inserts a line break · /help lists commands");
+                ui.weak("Ctrl+Enter");
                 if !self.model.editor.mentions().is_empty() {
-                    ui.weak(format!(
-                        "{} bound mentions",
-                        self.model.editor.mentions().len()
-                    ));
+                    components::accent_badge(
+                        ui,
+                        &format!("{} mentions", self.model.editor.mentions().len()),
+                    );
+                }
+                if !self.model.draft_saved() {
+                    ui.weak("Saving…");
                 }
             });
         });
-        for delivery in self
+        if let Some(delivery) = self
             .model
             .snapshot
             .deliveries
             .iter()
             .rev()
-            .filter(|d| d.room == room)
-            .take(3)
+            .find(|d| d.room == room)
         {
-            ui.weak(format!(
-                "{}: {}",
-                &crate::display::operation(delivery.operation_id)[..12],
-                crate::display::delivery(delivery)
-            ));
+            let state = display::delivery(delivery);
+            ui.add(egui::Label::new(egui::RichText::new(state).small().weak()).wrap())
+                .on_hover_text(format!(
+                    "Operation {}",
+                    display::operation(delivery.operation_id)
+                ));
         }
     }
+
     fn completion(&mut self, ui: &mut egui::Ui) {
         let range = self.model.editor.completion_range();
         let (start, cursor) = (range.start, range.end);
@@ -336,7 +502,7 @@ impl App {
                         text::identity_display(&member.nickname),
                         display::short_account(member.account)
                     );
-                    if ui.small_button(label).clicked() {
+                    if ui.button(label).clicked() {
                         if let Err(error) = self.model.editor.complete_mention(
                             start..cursor,
                             member.account,
