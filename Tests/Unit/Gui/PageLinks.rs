@@ -92,7 +92,7 @@ fn page_link_fits_narrow_column_and_never_opens_system_browser() {
                 },
             ];
         }
-        let output = context.run_ui(input, |ui| {
+        let mut output = context.run_ui(input, |ui| {
             ui.set_max_width(84.0);
             ui.horizontal_wrapped(|ui| {
                 let response = link(ui, &uri, &address);
@@ -109,6 +109,8 @@ fn page_link_fits_narrow_column_and_never_opens_system_browser() {
                 .iter()
                 .any(|command| matches!(command, egui::OutputCommand::OpenUrl(_)))
         );
+        // This geometry/input check has no renderer to consume font textures.
+        output.textures_delta.clear();
     }
     assert!(clicked);
     assert_eq!(Address::parse(&uri).unwrap().namespace.len(), 32);
