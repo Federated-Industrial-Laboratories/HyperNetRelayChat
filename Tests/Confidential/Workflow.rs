@@ -454,7 +454,7 @@ fn private_group_requires_invitation_orders_mls_and_blocks_stale_recipient_keys(
     home.store
         .write(|db| {
             db.execute(
-                "DELETE FROM hrc_budgets WHERE key=?1",
+                "DELETE FROM hrc_budgets WHERE key=?1 OR key IN('service:crypto','service:crypto-bytes')",
                 [format!("operation:{}", bob.record.acting.account)],
             )?;
             Ok(Commit::new((), b"encrypted tail read phase".to_vec()))

@@ -200,6 +200,11 @@ pub(super) fn retry_delay(error: &Error) -> Option<u64> {
     match error {
         Error::Client(client::Error::Clock) => Some(0),
         Error::Client(client::Error::Network(error)) if error.retryable_session() => Some(0),
+        Error::Client(client::Error::Refused {
+            code: ErrorCode::Unavailable | ErrorCode::RateLimited | ErrorCode::Overloaded,
+            retry_after_ms,
+            ..
+        }) => Some(retry_after_ms.unwrap_or(1000).min(60000)),
         Error::RetryLater { delay_ms } => Some((*delay_ms).min(60000)),
         _ => None,
     }

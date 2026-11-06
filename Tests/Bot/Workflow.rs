@@ -745,6 +745,28 @@ fn permanent_identity_failures_do_not_enter_reconnect_backoff() {
     );
     assert_eq!(runtime::retry_delay(&Error::Denied), None);
     assert_eq!(runtime::retry_delay(&Error::PendingOutcome), None);
+    for code in [
+        ErrorCode::RateLimited,
+        ErrorCode::Overloaded,
+        ErrorCode::Unavailable,
+    ] {
+        assert_eq!(
+            runtime::retry_delay(&Error::Client(Client::Refused {
+                code,
+                detail: "ReadBudget".into(),
+                retry_after_ms: Some(1200),
+            })),
+            Some(1200)
+        );
+    }
+    assert_eq!(
+        runtime::retry_delay(&Error::Client(Client::Refused {
+            code: ErrorCode::Denied,
+            detail: "GrantRevoked".into(),
+            retry_after_ms: Some(1000),
+        })),
+        None
+    );
 }
 
 #[test]
