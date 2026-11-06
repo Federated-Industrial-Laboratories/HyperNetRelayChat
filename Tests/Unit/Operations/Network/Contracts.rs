@@ -4,6 +4,18 @@ use super::*;
 use std::{net::Ipv4Addr, path::PathBuf};
 
 #[test]
+fn native_grant_start_allows_clock_uncertainty_without_preceding_host_creation() {
+    let created = 1_000_000;
+    for remainder in 0..1000 {
+        let now = created + 60_000 + remainder;
+        let start = clients::grant_start(created, now);
+        assert!(start >= created && start <= now - 1250);
+        assert_eq!(start % 1000, 0);
+    }
+    assert_eq!(clients::grant_start(created, created + 500), created);
+}
+
+#[test]
 fn native_failure_keeps_phase_and_category_with_bounded_operator_detail() {
     use std::{
         path::Path,

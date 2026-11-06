@@ -23,7 +23,7 @@ pub use configuration::{
 };
 pub use engine::{apply, preview, progress};
 pub use lifecycle::{start, status, stop};
-pub use renewal::{renew, renewal_preview};
+pub use renewal::{pending_renewal, renew, renewal_preview};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -43,6 +43,10 @@ pub enum Error {
         "The native operation was refused at {0}. Existing keys and pending requests were preserved."
     )]
     Native(String),
+    #[error(
+        "{0} The previously running chat service could not restart. Check its status and start it again."
+    )]
+    ServiceRestore(String),
     #[error("Hosting setup was cancelled. Resume the same configuration to continue.")]
     Cancelled,
     #[error("Hosting setup reached its deadline. Resume the same configuration to continue.")]

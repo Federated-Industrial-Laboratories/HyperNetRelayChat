@@ -1,5 +1,31 @@
 // SPDX-License-Identifier: Apache-2.0
 use super::{Error, bundle, native};
+
+#[test]
+fn podman_uses_the_core_storage_environment() {
+    let mut command = std::process::Command::new("/usr/bin/env");
+    command.env("XDG_DATA_HOME", "/isolated-hrc");
+    command.env("CONTAINERS_STORAGE_CONF", "/untrusted-storage.conf");
+    native::podman_environment(&mut command);
+    let output = command.output().unwrap();
+    assert!(output.status.success());
+    let environment = String::from_utf8(output.stdout).unwrap();
+    for line in environment.lines() {
+        let name = line.split_once('=').unwrap().0;
+        assert!(
+            [
+                "PATH",
+                "LANG",
+                "HOME",
+                "XDG_RUNTIME_DIR",
+                "DBUS_SESSION_BUS_ADDRESS"
+            ]
+            .contains(&name)
+        );
+    }
+    assert!(environment.lines().any(|line| line == "PATH=/usr/bin:/bin"));
+    assert!(environment.lines().any(|line| line == "LANG=C.UTF-8"));
+}
 use ciborium::Value as Cbor;
 use serde_json::json;
 use std::{

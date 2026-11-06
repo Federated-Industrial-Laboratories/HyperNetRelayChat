@@ -75,6 +75,11 @@ pub enum Network {
         #[arg(long)]
         valid_until_ms: u64,
     },
+    /// Load the exact review of an unfinished renewal without issuing new consent.
+    RenewalResume {
+        #[arg(long)]
+        config: PathBuf,
+    },
     Renew {
         #[arg(long)]
         config: PathBuf,
@@ -143,6 +148,10 @@ pub fn network_run(command: Network, cancel: &AtomicBool) -> Result<Value> {
                 .map_err(failure)?,
         )
         .map_err(failure),
+        Network::RenewalResume { config } => serde_json::to_value(
+            network::pending_renewal(&read_json(&config)?, cancel).map_err(failure)?,
+        )
+        .map_err(failure),
         Network::Invite {
             config,
             request,
@@ -180,7 +189,7 @@ pub fn run(command: Command) -> Result<Value> {
         Command::Model { command } => super::models::run(command, &cancel),
         Command::Package { command } => super::packages::run(command, &cancel),
         Command::Capabilities => Ok(
-            json!({"schema":1,"operations":["network","service","model","bot"],"transport":"HyperNetOnly","nativePackages":{"core":"0.10.2","suite":"0.10.1"},"hostChanges":"NoAutomaticPackagesFirewallOrSudo","modelEndpoints":"LoopbackOnly","consentRenewal":"ExplicitPreviewRequired","assistantAuthority":"InheritedFromInvokingUser"}),
+            json!({"schema":1,"operations":["network","service","model","bot"],"transport":"HyperNetOnly","nativePackages":{"core":super::packages::Product::Core.version(),"suite":super::packages::Product::Suite.version()},"hostChanges":"NoAutomaticPackagesFirewallOrSudo","modelEndpoints":"LoopbackOnly","consentRenewal":"ExplicitPreviewRequired","assistantAuthority":"InheritedFromInvokingUser"}),
         ),
     };
     signal_hook::low_level::unregister(interrupt);

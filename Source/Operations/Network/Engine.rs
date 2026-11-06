@@ -100,7 +100,7 @@ pub(super) fn raw(
     result.map_err(|failure| {
         let context = match failure.detail {
             Some(detail) => format!("{phase}: {detail}"),
-            None => phase.into(),
+            None => format!("{phase}: {}", failure.category),
         };
         Error::Native(context)
     })
@@ -433,12 +433,22 @@ impl<'a> Host<'a> {
         )
     }
     pub fn unit(&self, purpose: &str, executable: &Path, args: &[String]) -> Result<()> {
+        self.unit_with_context(purpose, executable, args, self.cancel, self.end)
+    }
+    pub fn unit_with_context(
+        &self,
+        purpose: &str,
+        executable: &Path,
+        args: &[String],
+        cancel: &AtomicBool,
+        end: Instant,
+    ) -> Result<()> {
         let name = self.unit_name(purpose);
         let active = raw(
             Path::new("/usr/bin/systemctl"),
             &bytes(&["--user", "is-active", &name]),
-            self.cancel,
-            self.end,
+            cancel,
+            end,
             purpose,
         );
         if active.as_ref().is_ok_and(|v| v == b"active\n") {
@@ -465,8 +475,8 @@ impl<'a> Host<'a> {
         raw(
             Path::new("/usr/bin/systemd-run"),
             &command,
-            self.cancel,
-            self.end,
+            cancel,
+            end,
             purpose,
         )?;
         Ok(())
@@ -483,10 +493,17 @@ impl<'a> Host<'a> {
     }
     pub fn wait(&self, mut probe: impl FnMut() -> Result<()>, seconds: u64) -> Result<()> {
         let end = self.end.min(Instant::now() + Duration::from_secs(seconds));
+        let mut failure = None;
         loop {
-            check(self.cancel, end)?;
-            if probe().is_ok() {
-                return Ok(());
+            match check(self.cancel, end) {
+                Err(Error::Deadline) => return Err(failure.unwrap_or(Error::Deadline)),
+                other => other?,
+            }
+            match probe() {
+                Ok(()) => return Ok(()),
+                Err(Error::Cancelled) => return Err(Error::Cancelled),
+                Err(error @ Error::Native(_)) => failure = Some(error),
+                Err(_) => {}
             }
             std::thread::sleep(Duration::from_millis(100));
         }

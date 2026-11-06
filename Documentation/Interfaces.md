@@ -34,7 +34,7 @@ prove who personally typed a message.
 
 The GUI uses Ctrl+Enter to send and Enter for a new line. Ctrl+L focuses its composer,
 Ctrl+F focuses search, Ctrl+Q closes, and F1 opens help. Tab moves between controls.
-Right-click a message to reply or copy its stable event identifier. The member menu
+Right-click a message to reply, copy its full text or copy its stable event identifier. The member menu
 offers bound mentions, recipient filtering and applicable moderation operations.
 
 The TUI uses Enter to send, Ctrl+J for a new line, Tab for unambiguous completion,
@@ -63,6 +63,34 @@ Choose a member completion to create a bound mention. The stored account identit
 and selected spelling are checked when sending. Plain `@name` text alone does not
 notify someone. Editing a selected spelling removes its binding, and a nickname
 change cannot silently redirect an earlier mention.
+
+## HyperNet Page links
+
+Canonical `hypernet://NETWORK/AUTHOR/Namespace/PAGE` addresses appear as compact
+Page links in desktop messages and search results. Hover to inspect the complete
+network, author, namespace and Page identity. Right-click the link to copy its
+original address; **Copy message** preserves the complete original message.
+Hovering does not fetch Page content or contact a publisher.
+
+Click a link to open the existing HyperNetSuite graphical browser. HRC uses the
+Suite executable and joined network profile explicitly retained by this chat
+profile's setup. A profile without that configuration reports the missing setup;
+it does not select another account or an operating-system browser.
+
+The selected network needs its existing Page route and reader permission. The
+browser verifies the publication and refuses another network without an approved
+route. A chat link does not grant access. A link can be opened while chat is offline;
+that explicit action starts a separate browser connection.
+
+Each new browser window receives the currently selected HRC colour palette and
+outline settings. Existing windows keep their launch palette. Browser text size
+and other browser preferences remain independent. See [desktop themes](Themes.md).
+
+Only canonical addresses become links: network and author identities contain
+64 lowercase hexadecimal digits; Page identities contain 32. A namespace starts
+with a letter and contains up to 32 ASCII letters and digits. Each message displays
+at most 16 active Page links. Other text, including HTTPS references and malformed
+addresses, remains selectable text.
 
 ## Commands and search
 

@@ -96,6 +96,11 @@ grant are limited to their existing HRC service and the reviewed deadline.
 There is no unattended renewal. Interrupted work resumes its retained native
 operations; direct edits to installed Config files are unsupported.
 
+After reopening HRC, choose **Resume renewal review** to load the exact unfinished
+review and its original deadline. Review it and approve that retained operation.
+The command-line equivalent is `hrc manage network renewal-resume --config FILE`.
+This does not generate new consent or replace pending native operations.
+
 The separate governance horizon, initially 365 days, bounds the administrator
 policy and stable member/read identities. Hosting and service-operation consent
 are reviewed for at most seven days. Client route vouchers last less than

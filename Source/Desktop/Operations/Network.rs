@@ -10,7 +10,7 @@ pub(super) struct Form {
     pub status: Option<Status>,
     pub renewal: Option<Value>,
     renew_hours: u16,
-    renew_until: u64,
+    pub renew_until: u64,
     request: PathBuf,
     registration: PathBuf,
     agent: bool,
@@ -446,6 +446,12 @@ impl Workspace {
     fn network_renewal(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         ui.collapsing("Renew hosting consent", |ui| {
+            if c::button(ui, "Resume renewal review").clicked() {
+                let config = self.network.config.clone();
+                self.start(&ctx, "Load retained renewal", Completion::RenewalPreview, move |cancel| {
+                    value(ops::network::pending_renewal(&config, cancel).map_err(ops::failure)?)
+                });
+            }
             ui.horizontal(|ui| {
                 ui.label("Requested hours from now");
                 if ui

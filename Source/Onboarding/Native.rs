@@ -188,6 +188,9 @@ pub(crate) fn run_diagnostic(
     check(cancel, end)?;
     executable(program)?;
     let mut command = Command::new(program);
+    if program == Path::new("/usr/bin/podman") {
+        podman_environment(&mut command);
+    }
     command
         .args(args)
         .stdin(Stdio::null())
@@ -220,6 +223,19 @@ pub(crate) fn run_diagnostic(
             };
         }
         std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+pub(super) fn podman_environment(command: &mut Command) {
+    // Match Core's rootless storage context even when HRC uses a separate data directory.
+    command
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("LANG", "C.UTF-8");
+    for name in ["HOME", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"] {
+        if let Some(value) = std::env::var_os(name) {
+            command.env(name, value);
+        }
     }
 }
 

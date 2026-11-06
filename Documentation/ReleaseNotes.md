@@ -23,6 +23,12 @@ original HyperNet defaults. Local JSON themes have preview, import and removal
 controls, bounded storage and contrast validation. Themes contain no executable
 code or external assets.
 
+Canonical HyperNet Page addresses now appear as compact desktop links with
+width-bounded labels, full-address hover details and copy controls. Opening a link
+uses the chat profile's configured Suite browser and joined network profile,
+with the current HRC palette shared through a private JSON snapshot. Existing
+Page routes and reader permissions still apply. See [Page links](Interfaces.md#hypernet-page-links).
+
 The external assistant harness exports reviewed setup and operations skills for
 Codex, Claude Code, Gemini CLI, GitHub Copilot CLI and Cursor. Desktop controls
 work independently. Provider exports follow their documented formats; live

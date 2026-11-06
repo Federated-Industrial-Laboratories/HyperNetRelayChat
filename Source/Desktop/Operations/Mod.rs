@@ -159,7 +159,15 @@ impl Workspace {
                                     ops::home::Configuration::at(status.service_directory.clone());
                             }
                         }
-                        Completion::RenewalPreview => self.network.renewal = Some(value.clone()),
+                        Completion::RenewalPreview => {
+                            if let Some(until) = value["validUntilMs"].as_u64() {
+                                self.network.renew_until = until;
+                                self.network.renewal = Some(value.clone());
+                            } else {
+                                self.network.renewal = None;
+                                self.error = Some("The retained renewal review is invalid.".into());
+                            }
+                        }
                         Completion::AssistantPreview => {
                             self.assistant.preview = Some(value.clone())
                         }

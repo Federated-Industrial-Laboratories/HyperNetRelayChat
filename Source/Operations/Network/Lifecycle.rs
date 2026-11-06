@@ -19,7 +19,17 @@ pub(super) fn unit_active(host: &Host<'_>, purpose: &str) -> bool {
     .is_ok_and(|v| v == b"active\n")
 }
 pub(super) fn start_hrc(host: &Host<'_>) -> Result<()> {
-    host.unit(
+    start_hrc_with(host, host.cancel, host.end)
+}
+pub(super) fn restore_hrc(host: &Host<'_>) -> Result<()> {
+    start_hrc_with(
+        host,
+        &AtomicBool::new(false),
+        Instant::now() + Duration::from_secs(30),
+    )
+}
+fn start_hrc_with(host: &Host<'_>, cancel: &AtomicBool, end: Instant) -> Result<()> {
+    host.unit_with_context(
         "hrc",
         &std::env::current_exe().map_err(|_| Error::State)?,
         &bytes(&[
@@ -28,6 +38,8 @@ pub(super) fn start_hrc(host: &Host<'_>) -> Result<()> {
             "--directory",
             &text(&host.c.service_directory())?,
         ]),
+        cancel,
+        end,
     )
 }
 pub(super) fn start_host(host: &mut Host<'_>) -> Result<()> {

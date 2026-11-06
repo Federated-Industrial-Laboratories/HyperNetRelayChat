@@ -10,6 +10,13 @@ Theme selection is saved with the current chat profile. Conversation layout,
 density and text size stay separate controls. The TUI uses the selected light
 or dark mode; custom desktop colours do not change terminal configuration.
 
+Opening a [Page link](Interfaces.md#hypernet-page-links) shares the selected palette
+with the HyperNetSuite graphical browser. HRC writes one private, atomically
+replaced `BrowserTheme.json` beside its desktop preferences. The file contains
+only the palette format below, with no chat content, credentials or network
+configuration. The browser reads it once at launch; an open window keeps that
+palette when HRC's selection changes.
+
 ## Import a theme
 
 Choose **Import JSON**, browse to a local `.json` file and select it. Inspect the

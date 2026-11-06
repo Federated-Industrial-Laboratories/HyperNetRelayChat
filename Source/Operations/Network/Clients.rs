@@ -9,6 +9,11 @@ use std::{
     sync::atomic::AtomicBool,
 };
 
+pub(super) fn grant_start(created_ms: u64, current_ms: u64) -> u64 {
+    // Native validity includes 1250 ms uncertainty; keep a whole-second margin.
+    created_ms.max((current_ms / 1000 * 1000).saturating_sub(2000))
+}
+
 fn delegate(
     host: &mut Host<'_>,
     label: &str,
@@ -30,6 +35,19 @@ fn delegate(
         return Ok(());
     }
     let id = host.id(&actual)?;
+    let start_key = format!("grant-start/{actual}");
+    let not_before = if service {
+        match host.remembered(&start_key) {
+            Some(value) => value.as_u64().ok_or(Error::State)?,
+            None => {
+                let start = grant_start(host.state.created_ms, now()?);
+                host.remember(&start_key, json!(start))?;
+                start
+            }
+        }
+    } else {
+        host.state.created_ms
+    };
     let mut a = bytes(&["authority-inspection", "delegate-grant"]);
     a.extend(services::online(host, "Administrator")?);
     a.extend(bytes(&[
@@ -44,12 +62,7 @@ fn delegate(
         "--actions",
         actions,
         "--not-before-ms",
-        &if service {
-            now()? / 1000 * 1000
-        } else {
-            host.state.created_ms
-        }
-        .to_string(),
+        &not_before.to_string(),
         "--expires-ms",
         &if service {
             host.state.expires_ms
@@ -446,34 +459,42 @@ pub fn invite_client(
 ) -> Result<ClientDelivery> {
     let mut host = Host::open(c, cancel, None)?;
     let was_running = super::lifecycle::unit_active(&host, "hrc");
-    if was_running {
-        host.stop_unit("hrc")?;
-    }
-    let result = invite(&mut host, request, operator);
-    if was_running {
-        super::lifecycle::start_hrc(&host)?;
-    }
-    result
+    let result = (|| {
+        if was_running {
+            host.stop_unit("hrc")?;
+        }
+        invite(&mut host, request, operator)
+    })();
+    restore_after_admission(&host, was_running, result)
 }
 pub fn enrol_client(c: &Configuration, registration: &Path, cancel: &AtomicBool) -> Result<Status> {
     let mut host = Host::open(c, cancel, None)?;
     let was_running = super::lifecycle::unit_active(&host, "hrc");
-    if was_running {
-        host.stop_unit("hrc")?;
-    }
-    let result = host.hrc(&bytes(&[
-        "service",
-        "enrol",
-        "--directory",
-        &text(&c.service_directory())?,
-        "--registration",
-        &text(registration)?,
-    ]));
-    if was_running {
-        super::lifecycle::start_hrc(&host)?;
-    }
-    result?;
+    let result = (|| {
+        if was_running {
+            host.stop_unit("hrc")?;
+        }
+        host.hrc(&bytes(&[
+            "service",
+            "enrol",
+            "--directory",
+            &text(&c.service_directory())?,
+            "--registration",
+            &text(registration)?,
+        ]))
+    })();
+    restore_after_admission(&host, was_running, result)?;
     super::lifecycle::observe(&mut host)
+}
+fn restore_after_admission<T>(host: &Host<'_>, was_running: bool, result: Result<T>) -> Result<T> {
+    if was_running && super::lifecycle::restore_hrc(host).is_err() {
+        let outcome = match &result {
+            Ok(_) => "The account operation completed.".to_owned(),
+            Err(error) => error.to_string(),
+        };
+        return Err(Error::ServiceRestore(outcome));
+    }
+    result
 }
 pub(super) fn create_owner(host: &mut Host<'_>) -> Result<()> {
     host.phase("Desktop account")?;

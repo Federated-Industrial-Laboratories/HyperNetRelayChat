@@ -29,6 +29,108 @@ fn podman(host: &Host<'_>, a: &[String]) -> Result<Vec<u8>> {
         &host.state.phase,
     )
 }
+fn mapped_offers(host: &Host<'_>, operator: &Path, source: &Path) -> Result<PathBuf> {
+    let mut paths = Vec::new();
+    for entry in std::fs::read_dir(source)
+        .map_err(|_| Error::State)?
+        .take(257)
+    {
+        let path = entry.map_err(|_| Error::State)?.path();
+        let name = path
+            .file_name()
+            .and_then(|v| v.to_str())
+            .ok_or(Error::State)?;
+        let generation = name
+            .strip_prefix("Generation")
+            .and_then(|v| v.strip_suffix(".cbor"));
+        if generation.is_none_or(|v| v.len() != 20 || !v.bytes().all(|c| c.is_ascii_digit())) {
+            return Err(Error::State);
+        }
+        native::public_file(&path, 98304).map_err(|_| Error::State)?;
+        paths.push(path);
+    }
+    if paths.is_empty() || paths.len() > 256 {
+        return Err(Error::Configuration(
+            "retained native offer history must contain 1 to 256 entries",
+        ));
+    }
+    let target = operator.join(format!("Offers-{}", digest(text(source)?.as_bytes())));
+    podman(
+        host,
+        &bytes(&[
+            "unshare",
+            "/usr/bin/mkdir",
+            "-p",
+            "-m",
+            "0700",
+            "--",
+            &text(&target)?,
+        ]),
+    )?;
+    let metadata = podman(
+        host,
+        &bytes(&[
+            "unshare",
+            "/usr/bin/stat",
+            "-c",
+            "%F %u:%a",
+            &text(&target)?,
+        ]),
+    )?;
+    if metadata != b"directory 1001:700\n" && metadata != b"directory 0:700\n" {
+        return Err(Error::State);
+    }
+    podman(
+        host,
+        &bytes(&["unshare", "/usr/bin/chown", "1001:1001", &text(&target)?]),
+    )?;
+    let retained = podman(
+        host,
+        &bytes(&[
+            "unshare",
+            "/usr/bin/find",
+            &text(&target)?,
+            "-mindepth",
+            "1",
+            "-maxdepth",
+            "1",
+            "-printf",
+            "%f\n",
+        ]),
+    )?;
+    let retained = std::str::from_utf8(&retained).map_err(|_| Error::State)?;
+    if retained.lines().any(|name| {
+        !paths
+            .iter()
+            .any(|path| path.file_name().and_then(|v| v.to_str()) == Some(name))
+    }) {
+        return Err(Error::State);
+    }
+    for path in paths {
+        let destination = target.join(path.file_name().ok_or(Error::State)?);
+        podman(
+            host,
+            &bytes(&[
+                "unshare",
+                "/usr/bin/cp",
+                "--remove-destination",
+                "--",
+                &text(&path)?,
+                &text(&destination)?,
+            ]),
+        )?;
+        podman(
+            host,
+            &bytes(&[
+                "unshare",
+                "/usr/bin/chown",
+                "1001:1001",
+                &text(&destination)?,
+            ]),
+        )?;
+    }
+    Ok(target)
+}
 pub(super) fn operator(host: &Host<'_>, who: &str, arguments: &[String]) -> Result<Value> {
     if !["Administrator", "ServiceOwner"].contains(&who) {
         return Err(Error::State);
@@ -105,7 +207,7 @@ pub(super) fn operator(host: &Host<'_>, who: &str, arguments: &[String]) -> Resu
     if owner != b"1001:700\n" {
         return Err(Error::State);
     }
-    podman(
+    let executable_matches = podman(
         host,
         &bytes(&[
             "unshare",
@@ -114,7 +216,46 @@ pub(super) fn operator(host: &Host<'_>, who: &str, arguments: &[String]) -> Resu
             &text(&host.c.suite)?,
             &text(&root.join("HyperNetSuite"))?,
         ]),
-    )?;
+    );
+    if executable_matches.is_err() {
+        // The selected installation may advance after an explicitly verified package update.
+        crate::operations::packages::verify_installed(
+            crate::operations::packages::Product::Suite,
+            &host.c.suite,
+            &host.c.publisher_key,
+            host.cancel,
+            host.end,
+        )
+        .map_err(|_| Error::Package)?;
+        let replacement = root.join("HyperNetSuite.next");
+        for command in [
+            bytes(&[
+                "unshare",
+                "/usr/bin/cp",
+                "--remove-destination",
+                "--",
+                &text(&host.c.suite)?,
+                &text(&replacement)?,
+            ]),
+            bytes(&["unshare", "/usr/bin/chmod", "0700", &text(&replacement)?]),
+            bytes(&[
+                "unshare",
+                "/usr/bin/chown",
+                "1001:1001",
+                &text(&replacement)?,
+            ]),
+            bytes(&[
+                "unshare",
+                "/usr/bin/mv",
+                "-f",
+                "--",
+                &text(&replacement)?,
+                &text(&root.join("HyperNetSuite"))?,
+            ]),
+        ] {
+            podman(host, &command)?;
+        }
+    }
     podman(
         host,
         &bytes(&[
@@ -156,7 +297,9 @@ pub(super) fn operator(host: &Host<'_>, who: &str, arguments: &[String]) -> Resu
                 }
             }
             converted.push("/Offers".into());
-            offers = Some(path);
+            // Native public-file checks still apply inside the isolated UID map.
+            // Keep the original signed offers untouched and copy only bounded inputs.
+            offers = Some(mapped_offers(host, &root, &path)?);
         } else if index > 0
             && (arguments[index - 1] == "--output"
                 || (arguments[index - 1] == "--receipt"
@@ -704,7 +847,35 @@ pub(super) fn activate_role(host: &mut Host<'_>, name: &str, operator_name: &str
         host.remember(&consent_key, v)?;
     }
     let generation = number(&preview, "localGeneration")?;
-    let request = folder.join(format!("ActivationRequest{generation}.cbor"));
+    let attempt_key = format!("activation-attempt/{name}/{generation}");
+    let mut attempt = host
+        .remembered(&attempt_key)
+        .map(|value| value.as_u64().ok_or(Error::State))
+        .transpose()?
+        .unwrap_or(0);
+    let completion_key = |attempt| {
+        if attempt == 0 {
+            format!("activation/{name}/{generation}")
+        } else {
+            format!("activation/{name}/{generation}/{attempt}")
+        }
+    };
+    let running = super::lifecycle::unit_active(host, &name.to_ascii_lowercase());
+    if host.remembered(&completion_key(attempt)).is_some() {
+        if running {
+            return Ok(());
+        }
+        // A completed request can fall below the native replay floor. A restart
+        // needs fresh authority; an unfinished request retains its exact identity.
+        attempt = attempt.checked_add(1).ok_or(Error::State)?;
+        host.remember(&attempt_key, json!(attempt))?;
+    }
+    let suffix = if attempt == 0 {
+        generation.to_string()
+    } else {
+        format!("{generation}-{attempt}")
+    };
+    let request = folder.join(format!("ActivationRequest{suffix}.cbor"));
     if !request.exists() {
         let mut a = bytes(&["authority-inspection", "deployments", "activation-request"]);
         let mut common = online(host, "Administrator")?;
@@ -737,10 +908,11 @@ pub(super) fn activate_role(host: &mut Host<'_>, name: &str, operator_name: &str
             &text(&request)?,
         ]),
     )?;
-    let receipt = folder.join(format!("ActivationReceipt{generation}.cbor"));
-    if !receipt.exists() {
-        host.wait(
-            || {
+    let receipt = folder.join(format!("ActivationReceipt{suffix}.cbor"));
+    let mut completed = None;
+    host.wait(
+        || {
+            if !receipt.exists() {
                 host.core(&bytes(&[
                     "runtime",
                     "services",
@@ -750,19 +922,28 @@ pub(super) fn activate_role(host: &mut Host<'_>, name: &str, operator_name: &str
                     "--output",
                     &text(&receipt)?,
                 ]))?;
-                Ok(())
-            },
-            45,
-        )?;
-    }
-    let key = format!("activation/{name}/{generation}");
-    if host.remembered(&key).is_none() {
-        let mut a = bytes(&["authority-inspection", "deployments", "activation-complete"]);
-        a.extend(online(host, "Administrator")?);
-        a.extend(bytes(&["--receipt", &text(&receipt)?]));
-        let v = operator(host, "Administrator", &a)?;
-        host.remember(&key, v)?;
-    }
+            }
+            let mut a = bytes(&["authority-inspection", "deployments", "activation-complete"]);
+            a.extend(online(host, "Administrator")?);
+            a.extend(bytes(&["--receipt", &text(&receipt)?]));
+            match operator(host, "Administrator", &a) {
+                Ok(value) => {
+                    completed = Some(value);
+                    Ok(())
+                }
+                Err(error) => {
+                    // Receipt export is historical and can race fresh activation.
+                    // Native completion verifies the current pending request. Remove
+                    // only this exported copy before reading the native report again.
+                    hrc::service::files::read(&receipt, 1_048_576).map_err(|_| Error::State)?;
+                    std::fs::remove_file(&receipt).map_err(|_| Error::State)?;
+                    Err(error)
+                }
+            }
+        },
+        45,
+    )?;
+    host.remember(&completion_key(attempt), completed.ok_or(Error::State)?)?;
     Ok(())
 }
 pub(super) fn activate(host: &mut Host<'_>) -> Result<()> {
@@ -935,6 +1116,9 @@ pub(super) fn register_application(host: &mut Host<'_>) -> Result<()> {
             "--accepted",
             &text(&accepted)?,
         ]));
+        if host.remembered("renew-application-from").is_some() {
+            a.push("--renew".into());
+        }
         let v = operator(host, "ServiceOwner", &a)?;
         host.remember(&registration_key, v)?;
     }

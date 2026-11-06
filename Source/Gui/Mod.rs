@@ -10,6 +10,8 @@ mod conversation;
 mod editor;
 #[path = "Encryption.rs"]
 mod encryption;
+#[path = "PageLinks.rs"]
+pub(crate) mod page_links;
 #[path = "Panels.rs"]
 mod panels;
 #[path = "Sound.rs"]
@@ -54,6 +56,7 @@ impl App {
             operations_requested: false,
             themes,
             theme_chooser: theme::Chooser::default(),
+            page_request: None,
         }
     }
     pub(crate) fn prepare_setup(&mut self) {
@@ -68,6 +71,9 @@ impl App {
     }
     pub(crate) fn take_operations(&mut self) -> bool {
         std::mem::take(&mut self.operations_requested)
+    }
+    pub(crate) fn take_page(&mut self) -> Option<page_links::Request> {
+        self.page_request.take()
     }
 }
 pub(crate) struct App {
@@ -93,6 +99,7 @@ pub(crate) struct App {
     operations_requested: bool,
     themes: theme::Library,
     theme_chooser: theme::Chooser,
+    page_request: Option<page_links::Request>,
 }
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {

@@ -42,6 +42,35 @@ fn review_digest(value: &RenewalPreview) -> Result<String> {
         &serde_json::to_vec(&value).map_err(|_| Error::State)?,
     ))
 }
+pub fn pending_renewal(c: &Configuration, cancel: &AtomicBool) -> Result<RenewalPreview> {
+    let host = Host::open(c, cancel, None)?;
+    let mut pending = host
+        .state
+        .results
+        .iter()
+        .filter(|(key, value)| key.starts_with("renewal/") && value["completed"] == false);
+    let (key, state) = pending
+        .next()
+        .ok_or(Error::Configuration("no unfinished renewal is retained"))?;
+    if pending.next().is_some() {
+        return Err(Error::State);
+    }
+    let until: u64 = key
+        .strip_prefix("renewal/")
+        .ok_or(Error::State)?
+        .parse()
+        .map_err(|_| Error::State)?;
+    let review: RenewalPreview =
+        serde_json::from_value(read(&host.p(&format!("Successor/{until}/Review.json")))?)
+            .map_err(|_| Error::State)?;
+    if review.valid_until_ms != until
+        || review.digest != review_digest(&review)?
+        || state["digest"] != review.digest
+    {
+        return Err(Error::State);
+    }
+    Ok(review)
+}
 fn role_names() -> Vec<(String, bool)> {
     let mut roles = (1..=4)
         .map(|n| (format!("A{n}"), false))

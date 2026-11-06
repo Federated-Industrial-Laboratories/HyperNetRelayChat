@@ -13,7 +13,7 @@ mod data;
 #[path = "ThemeLibrary.rs"]
 mod library;
 pub(super) use controls::{Chooser, controls};
-use data::Palette;
+pub(crate) use data::Palette;
 pub(super) use library::Library;
 
 const CORNER_CUT: f32 = 5.0;
@@ -147,6 +147,24 @@ pub fn configure_selected(
         preferences.text_scale,
         palette,
     );
+}
+pub(crate) fn browser_palette(
+    preferences: &hrc::client::Preferences,
+    library: &Library,
+) -> data::Result<Vec<u8>> {
+    let selected = library.selected(preferences).or_else(|| {
+        library.entries.iter().find(|entry| {
+            entry.id
+                == match preferences.theme {
+                    hrc::client::Theme::Dark => "hypernet-dark",
+                    hrc::client::Theme::Light => "hypernet-light",
+                }
+        })
+    });
+    selected
+        .ok_or("The selected browser palette is unavailable.")?
+        .palette
+        .bytes()
 }
 fn configure_palette(
     ctx: &egui::Context,

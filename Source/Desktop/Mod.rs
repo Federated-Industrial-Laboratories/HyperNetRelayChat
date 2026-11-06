@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Desktop lifecycle, profile selection and activation share one native event loop.
+#[path = "Browser.rs"]
+mod browser;
 #[path = "Installation.rs"]
 mod installation;
 #[path = "Instance.rs"]
@@ -96,6 +98,7 @@ struct Desktop {
     install_job: Option<mpsc::Receiver<Result<serde_json::Value, &'static str>>>,
     installed: bool,
     operations: operations::Workspace,
+    browser: browser::Browser,
 }
 impl Desktop {
     fn new(instance: instance::Instance, mut options: Options, ctx: &egui::Context) -> Self {
@@ -115,6 +118,7 @@ impl Desktop {
             install_job: None,
             installed: installation::is_installed(),
             operations: operations::Workspace::default(),
+            browser: browser::Browser::default(),
         };
         if !options.setup
             && let Some(profile) = options.profile
@@ -226,6 +230,15 @@ impl eframe::App for Desktop {
         }
         if let Some(chat) = &mut self.chat {
             chat.logic(ctx, frame);
+            if let Some(request) = chat.take_page() {
+                self.error = self
+                    .profile
+                    .as_deref()
+                    .ok_or("Select a configured chat profile before opening Pages.")
+                    .and_then(|profile| self.browser.open(profile, request))
+                    .err()
+                    .map(str::to_owned);
+            }
             if chat.take_operations() {
                 self.operations.visible = true;
             }
@@ -239,6 +252,9 @@ impl eframe::App for Desktop {
             }
         }
         self.operations.logic(ctx);
+        if let Some(error) = self.browser.poll() {
+            self.error = Some(error.into());
+        }
         if std::mem::take(&mut self.operations.join_requested) {
             if let Some(chat) = &mut self.chat {
                 chat.prepare_setup();
