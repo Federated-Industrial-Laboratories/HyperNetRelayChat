@@ -207,6 +207,9 @@ impl App {
                         (Panel::Help, "Help"),
                     ] {
                         if components::choice(ui, self.model.panel == panel, label).clicked() {
+                            if panel == Panel::Settings {
+                                self.nickname = self.model.snapshot.nickname.clone();
+                            }
                             self.model.panel = panel;
                             if panel == Panel::Agents {
                                 self.model.dispatch(Command::Inspect);
