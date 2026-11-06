@@ -18,7 +18,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-pub(super) fn public_file(path: &Path, maximum: usize) -> Result<Vec<u8>> {
+pub(crate) fn public_file(path: &Path, maximum: usize) -> Result<Vec<u8>> {
     if !path.is_absolute() || path.canonicalize().map_err(|_| Error::LocalConfiguration)? != path {
         return Err(Error::LocalConfiguration);
     }
@@ -44,7 +44,7 @@ pub(super) fn public_file(path: &Path, maximum: usize) -> Result<Vec<u8>> {
     }
     Ok(bytes)
 }
-pub(super) fn executable(path: &Path) -> Result<()> {
+pub(crate) fn executable(path: &Path) -> Result<()> {
     if !path.is_absolute() || path.canonicalize().map_err(|_| Error::RuntimeMissing)? != path {
         return Err(Error::RuntimeMissing);
     }
@@ -67,7 +67,7 @@ pub(super) fn executable(path: &Path) -> Result<()> {
     }
     Ok(())
 }
-pub(super) fn discover(name: &str) -> PathBuf {
+pub(crate) fn discover(name: &str) -> PathBuf {
     std::env::var_os("PATH")
         .and_then(|paths| {
             std::env::split_paths(&paths)
@@ -77,12 +77,12 @@ pub(super) fn discover(name: &str) -> PathBuf {
         })
         .unwrap_or_default()
 }
-pub(super) fn directory(path: &Path) -> Result<()> {
+pub(crate) fn directory(path: &Path) -> Result<()> {
     files::directory(path, !path.exists())
         .map(|_| ())
         .map_err(|_| Error::LocalConfiguration)
 }
-pub(super) fn exact_file(path: &Path, bytes: &[u8]) -> Result<()> {
+pub(crate) fn exact_file(path: &Path, bytes: &[u8]) -> Result<()> {
     if path.exists() {
         if files::read(path, bytes.len()).map_err(|_| Error::LocalConfiguration)? != bytes {
             return Err(Error::BundleBinding);
@@ -91,7 +91,7 @@ pub(super) fn exact_file(path: &Path, bytes: &[u8]) -> Result<()> {
     }
     files::create(path, bytes).map_err(|_| Error::LocalConfiguration)
 }
-pub(super) fn replace_file(path: &Path, bytes: &[u8]) -> Result<()> {
+pub(crate) fn replace_file(path: &Path, bytes: &[u8]) -> Result<()> {
     let parent = path.parent().ok_or(Error::LocalConfiguration)?;
     files::directory(parent, false).map_err(|_| Error::LocalConfiguration)?;
     if path.exists() {
@@ -108,7 +108,7 @@ pub(super) fn replace_file(path: &Path, bytes: &[u8]) -> Result<()> {
     }
     outcome.map_err(|_| Error::LocalConfiguration)
 }
-pub(super) fn check(cancel: &AtomicBool, end: Instant) -> Result<()> {
+pub(crate) fn check(cancel: &AtomicBool, end: Instant) -> Result<()> {
     if cancel.load(Ordering::Acquire) {
         return Err(Error::Cancelled);
     }
@@ -155,7 +155,7 @@ fn drain(pipe: &mut impl Read, bytes: &mut Vec<u8>, maximum: usize) -> Result<bo
         }
     }
 }
-pub(super) fn run(
+pub(crate) fn run(
     program: &Path,
     args: &[String],
     cancel: &AtomicBool,
@@ -195,7 +195,7 @@ pub(super) fn run(
         std::thread::sleep(Duration::from_millis(10));
     }
 }
-pub(super) fn json(
+pub(crate) fn json(
     program: &Path,
     args: &[String],
     cancel: &AtomicBool,
@@ -203,10 +203,10 @@ pub(super) fn json(
 ) -> Result<serde_json::Value> {
     serde_json::from_slice(&run(program, args, cancel, end)?).map_err(|_| Error::NativeRefused)
 }
-pub(super) fn strings(values: &[&str]) -> Vec<String> {
+pub(crate) fn strings(values: &[&str]) -> Vec<String> {
     values.iter().map(|v| (*v).into()).collect()
 }
-pub(super) fn current_user() -> Result<String> {
+pub(crate) fn current_user() -> Result<String> {
     let mut entry: libc::passwd = unsafe { std::mem::zeroed() };
     let mut result = std::ptr::null_mut();
     let mut buffer = vec![0u8; 16384];
@@ -230,13 +230,13 @@ pub(super) fn current_user() -> Result<String> {
     }
     Ok(name.to_owned())
 }
-pub(super) fn path(path: &Path) -> Result<String> {
+pub(crate) fn path(path: &Path) -> Result<String> {
     path.to_str()
         .map(str::to_owned)
         .filter(|v| !v.chars().any(char::is_control))
         .ok_or(Error::LocalConfiguration)
 }
-pub(super) fn private_socket(path: &Path) -> Result<()> {
+pub(crate) fn private_socket(path: &Path) -> Result<()> {
     use std::os::unix::fs::FileTypeExt;
     let m = fs::symlink_metadata(path).map_err(|_| Error::ClockPrerequisite)?;
     if !m.file_type().is_socket()
@@ -249,7 +249,7 @@ pub(super) fn private_socket(path: &Path) -> Result<()> {
 }
 
 /// Probe local IPC without blocking on a full listener backlog or deleting stale state.
-pub(super) fn socket_live(path: &Path) -> Result<bool> {
+pub(crate) fn socket_live(path: &Path) -> Result<bool> {
     use std::os::{
         fd::{FromRawFd, OwnedFd},
         unix::ffi::OsStrExt,

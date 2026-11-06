@@ -55,6 +55,7 @@ impl App {
             scroll_event: None,
             sound: sound::Sound::new(),
             setup_requested: false,
+            operations_requested: false,
         }
     }
     pub(crate) fn prepare_setup(&mut self) {
@@ -66,6 +67,9 @@ impl App {
     }
     pub(crate) fn ready_for_setup(&self) -> bool {
         self.setup_requested && self.model.draft_saved()
+    }
+    pub(crate) fn take_operations(&mut self) -> bool {
+        std::mem::take(&mut self.operations_requested)
     }
 }
 pub(crate) struct App {
@@ -88,6 +92,7 @@ pub(crate) struct App {
     scroll_event: Option<Id>,
     sound: sound::Sound,
     setup_requested: bool,
+    operations_requested: bool,
 }
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
@@ -222,6 +227,9 @@ impl App {
                             ui.close();
                         }
                     });
+                    if components::button(ui, "Operations").clicked() {
+                        self.operations_requested = true;
+                    }
                 });
             });
     }

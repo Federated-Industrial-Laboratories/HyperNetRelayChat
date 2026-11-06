@@ -3,7 +3,7 @@
 #[path = "Bundle.rs"]
 mod bundle;
 #[path = "Native.rs"]
-mod native;
+pub(crate) mod native;
 #[path = "Runtime.rs"]
 mod runtime;
 #[path = "Wizard.rs"]

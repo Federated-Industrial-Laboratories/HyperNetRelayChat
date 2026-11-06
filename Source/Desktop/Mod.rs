@@ -4,6 +4,8 @@
 mod installation;
 #[path = "Instance.rs"]
 mod instance;
+#[path = "Operations/Mod.rs"]
+mod operations;
 #[path = "Settings.rs"]
 mod settings;
 use crate::{gui, interaction::Model, onboarding};
@@ -93,6 +95,7 @@ struct Desktop {
     first_logic: bool,
     install_job: Option<mpsc::Receiver<Result<serde_json::Value, &'static str>>>,
     installed: bool,
+    operations: operations::Workspace,
 }
 impl Desktop {
     fn new(instance: instance::Instance, mut options: Options, ctx: &egui::Context) -> Self {
@@ -111,6 +114,7 @@ impl Desktop {
             first_logic: true,
             install_job: None,
             installed: installation::is_installed(),
+            operations: operations::Workspace::default(),
         };
         if !options.setup
             && let Some(profile) = options.profile
@@ -222,6 +226,9 @@ impl eframe::App for Desktop {
         }
         if let Some(chat) = &mut self.chat {
             chat.logic(ctx, frame);
+            if chat.take_operations() {
+                self.operations.visible = true;
+            }
             if chat.ready_for_setup() {
                 self.setup(ctx);
             }
@@ -229,6 +236,25 @@ impl eframe::App for Desktop {
             self.wizard.logic(ctx);
             if let Some(selection) = self.wizard.take_open() {
                 self.open(selection.profile, selection.offline, ctx);
+            }
+        }
+        self.operations.logic(ctx);
+        if std::mem::take(&mut self.operations.join_requested) {
+            if let Some(chat) = &mut self.chat {
+                chat.prepare_setup();
+            } else {
+                self.setup(ctx);
+            }
+        }
+        if let Some(profile) = self.operations.open_profile.take() {
+            self.operations.visible = false;
+            if self.chat.is_some() {
+                self.activation = Some(Options {
+                    profile: Some(profile),
+                    ..Default::default()
+                });
+            } else {
+                self.open(profile, false, ctx);
             }
         }
         if self.chat.is_none()
@@ -270,7 +296,9 @@ impl eframe::App for Desktop {
                 });
             });
         }
-        if let Some(chat) = &mut self.chat {
+        if self.operations.visible {
+            self.operations.ui(ui);
+        } else if let Some(chat) = &mut self.chat {
             chat.ui(ui, frame);
         } else {
             egui::Panel::top("desktop-setup-toolbar")
@@ -280,6 +308,9 @@ impl eframe::App for Desktop {
                         ui.strong("HRC");
                         ui.separator();
                         ui.label("Setup");
+                        if gui::components::button(ui, "Operations").clicked() {
+                            self.operations.visible = true;
+                        }
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if self.installed {
                                 gui::components::muted_badge(ui, "Launcher installed");

@@ -1,5 +1,13 @@
 # Using HRC
 
+Open **HyperNet Relay Chat** from the application menu. The setup wizard opens
+the last profile or guides a new endpoint through admission. **Operations** is
+available both before connecting and from the conversation toolbar. It contains
+network creation and hosting, local service admission, model and bot controls,
+and the optional external assistant installer. Return with **Back to chat**;
+the conversation and drafts remain open while an operation runs. See
+[desktop hosting](DesktopHosting.md) and [desktop bots](DesktopBots.md).
+
 Create an endpoint profile with the [service and client setup](ConversationSetup.md)
 procedure. Each open client owns that profile's encrypted local state exclusively.
 Use separate enrolled profiles for simultaneous clients or agents.

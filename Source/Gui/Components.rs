@@ -50,6 +50,7 @@ pub fn choice(ui: &mut Ui, selected: bool, label: &str) -> Response {
         [ACTION_WIDTH.min(ui.available_width()), CONTROL_HEIGHT],
         egui::Button::new(label).selected(selected).truncate(),
     )
+    .on_hover_text(label)
 }
 
 pub fn row(ui: &mut Ui, selected: bool, label: &str) -> Response {

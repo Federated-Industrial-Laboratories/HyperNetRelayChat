@@ -1,4 +1,6 @@
 //! HyperNet Relay Chat command-line interface.
+#[path = "Assistant/Mod.rs"]
+mod assistant;
 #[path = "Presentation/Commands.rs"]
 mod commands;
 #[path = "Cli.rs"]
@@ -13,6 +15,8 @@ mod gui;
 mod interaction;
 #[path = "Onboarding/Mod.rs"]
 mod onboarding;
+#[path = "Operations/Mod.rs"]
+mod operations;
 #[path = "Tui/Mod.rs"]
 mod tui;
 use clap::{Args, Parser, Subcommand};
@@ -35,6 +39,16 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Desktop setup and operator actions with structured results.
+    Manage {
+        #[command(subcommand)]
+        command: operations::Command,
+    },
+    /// Export optional skills and roles for an external LLM assistant.
+    Assistant {
+        #[command(subcommand)]
+        command: assistant::Command,
+    },
     /// Open the graphical conversation client.
     Gui(desktop::Options),
     /// Install the desktop launcher for the current user.
@@ -400,6 +414,20 @@ fn main() -> ExitCode {
             .and_then(|v| output(&v)),
         Command::Tui(options) => tui::run(&options.profile, options.offline).map_err(Failure),
         Command::Bot(options) => bot(options),
+        Command::Assistant { command } => assistant::run(command)
+            .map_err(Failure)
+            .and_then(|v| output(&v)),
+        Command::Manage { command } => match operations::run(command) {
+            Ok(value) => output(&value),
+            Err(message) => {
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "{}",
+                    json!({"status":"Failed","code":"OperationRefused","message":message})
+                );
+                return ExitCode::FAILURE;
+            }
+        },
         Command::Transport { command } => run(command),
         command => {
             let result = match command {
@@ -422,6 +450,7 @@ fn main() -> ExitCode {
                 Command::Abandon(request) => conversation::abandon(request),
                 Command::Transport { .. } | Command::Gui(_) | Command::Tui(_) => unreachable!(),
                 Command::Bot(_) | Command::Install | Command::SetupBundle(_) => unreachable!(),
+                Command::Manage { .. } | Command::Assistant { .. } => unreachable!(),
             };
             result.map_err(Failure).and_then(|v| output(&v))
         }
