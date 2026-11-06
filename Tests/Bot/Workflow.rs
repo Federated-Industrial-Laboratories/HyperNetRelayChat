@@ -114,6 +114,7 @@ impl Fixture {
             grant: None,
             resynchronise: false,
             model: None,
+            memory: None,
         }
     }
 }
@@ -539,7 +540,7 @@ fn rule_never_responds_to_agent_actors_or_reply_events() {
 }
 
 #[test]
-fn model_modes_keep_help_and_reject_agents_replies_and_multiple_rooms() {
+fn model_modes_keep_help_and_human_replies_but_reject_agents_causation_and_multiple_rooms() {
     let fixture = Fixture::new();
     let mut config = fixture.config();
     config.model = Some(LocalModel {
@@ -550,6 +551,9 @@ fn model_modes_keep_help_and_reject_agents_replies_and_multiple_rooms() {
         model: "Qwen".into(),
         prefix: "!qwen".into(),
         all_human_messages: true,
+        adapter: Adapter::LlamaCpp,
+        context_tokens: 4096,
+        output_tokens: 512,
     });
     config.validate().unwrap();
     let action = reply(&RetryWindow {
@@ -591,7 +595,10 @@ fn model_modes_keep_help_and_reject_agents_replies_and_multiple_rooms() {
     event.actor = Actor::Direct { acting: acting(20) };
     message.parent = Some(id(33));
     event.body = Value::serialized(&message).unwrap();
-    assert_eq!(runtime::reply_for(&event, None, &config), None);
+    assert_eq!(
+        runtime::reply_for(&event, None, &config),
+        Some(runtime::Reply::Model("Hello Qwen".into()))
+    );
     message.parent = None;
     message.causation = Some(id(33));
     event.body = Value::serialized(&message).unwrap();
@@ -602,6 +609,30 @@ fn model_modes_keep_help_and_reject_agents_replies_and_multiple_rooms() {
     assert_eq!(
         runtime::reply_for(&event, None, &config),
         Some(runtime::Reply::Help)
+    );
+    let mut controls = [event.clone(), event.clone()];
+    for (index, text) in ["!memory", "!forget"].into_iter().enumerate() {
+        message.text = text.into();
+        controls[index].event = id(80 + index as u8);
+        controls[index].sequence = index as u64 + 1;
+        controls[index].body = Value::serialized(&message).unwrap();
+    }
+    let mut page = crate::client::ConversationPage {
+        events: controls.to_vec(),
+        content: BTreeMap::new(),
+        cursor: Blob(vec![]),
+        has_more: false,
+        members: vec![],
+        room_revision: 1,
+        stale: false,
+    };
+    // A status request and reset queued during cooldown cannot share a consumed head cursor.
+    assert_eq!(runtime::control_page_limit(&page, &config), Some(1));
+    page.events.truncate(1);
+    assert_eq!(runtime::control_page_limit(&page, &config), None);
+    assert_eq!(
+        runtime::reply_for(&controls[1], None, &config),
+        Some(runtime::Reply::Forget)
     );
     config.rooms.push(RoomId {
         local: id(55),

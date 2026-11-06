@@ -68,6 +68,7 @@ pub fn action(bytes: &[u8]) -> Result<Action> {
             }
         }
         HistoryPage | EventsSubscribe | EventsResume => body::<messaging::Page>(body_json)?,
+        HistoryTail | CryptoTail => body::<messaging::Tail>(body_json)?,
         SearchQuery => body::<messaging::Search>(body_json)?,
         HistoryContext => body::<messaging::Context>(body_json)?,
         UnreadSet => body::<messaging::Unread>(body_json)?,

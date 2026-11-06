@@ -43,7 +43,7 @@ enum Command {
     SetupBundle(desktop::BundleOptions),
     /// Open the interactive terminal client.
     Tui(Interactive),
-    /// Run a bounded deterministic room-help bot with a separately enrolled agent profile.
+    /// Run a room bot with an agent profile and optional local model and memory.
     Bot(Bot),
     /// Stop automatic retries of an exact pending operation while retaining its unknown outcome.
     Abandon(conversation::Abandon),
@@ -138,7 +138,7 @@ struct Bot {
     /// Replace a stale cursor and catch up without triggering historical messages.
     #[arg(long)]
     resynchronise: bool,
-    /// Explicit local llama.cpp server address; only loopback IP addresses are accepted.
+    /// Local inference server address; only loopback IP addresses are accepted.
     #[arg(long, requires = "model")]
     model_endpoint: Option<std::net::SocketAddr>,
     /// Model name configured in the local server.
@@ -150,9 +150,31 @@ struct Bot {
     /// Prefix that addresses the local model; !help retains its fixed response.
     #[arg(long, default_value = "!qwen")]
     model_prefix: String,
-    /// Respond to original human messages in exactly one explicitly selected room.
+    /// Respond to direct human messages and replies in exactly one selected room.
     #[arg(long, requires = "model_endpoint")]
     all_human_messages: bool,
+    /// Local inference protocol.
+    #[arg(long, value_enum, default_value = "llama-cpp")]
+    model_adapter: ModelAdapter,
+    /// Total model context, including its reply allowance.
+    #[arg(long, default_value_t = 4096)]
+    model_context_tokens: u32,
+    #[arg(long, default_value_t = 512)]
+    model_output_tokens: u32,
+    /// Disable retained conversation context for model replies.
+    #[arg(long)]
+    no_memory: bool,
+    /// Maximum source age; shorter room or encrypted archive limits still apply.
+    #[arg(long, default_value_t = 30)]
+    memory_days: u16,
+    /// Bound for the encrypted derived memory record (16 KiB to 1 MiB).
+    #[arg(long, default_value_t = 262144)]
+    memory_bytes: usize,
+}
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum ModelAdapter {
+    LlamaCpp,
+    Ollama,
 }
 fn bot(options: Bot) -> Result<(), Failure> {
     let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -166,6 +188,12 @@ fn bot(options: Bot) -> Result<(), Failure> {
         }
     };
     let ready_stop = stop.clone();
+    let memory = (options.model_endpoint.is_some() && !options.no_memory).then_some(
+        hrc::bot::MemoryPolicy {
+            retention_days: options.memory_days,
+            max_bytes: options.memory_bytes,
+        },
+    );
     let result = hrc::bot::run_observed(
         hrc::bot::Config {
             profile: options.profile,
@@ -183,7 +211,14 @@ fn bot(options: Bot) -> Result<(), Failure> {
                     model,
                     prefix: options.model_prefix,
                     all_human_messages: options.all_human_messages,
+                    adapter: match options.model_adapter {
+                        ModelAdapter::LlamaCpp => hrc::bot::Adapter::LlamaCpp,
+                        ModelAdapter::Ollama => hrc::bot::Adapter::Ollama,
+                    },
+                    context_tokens: options.model_context_tokens,
+                    output_tokens: options.model_output_tokens,
                 }),
+            memory,
         },
         stop,
         move || {

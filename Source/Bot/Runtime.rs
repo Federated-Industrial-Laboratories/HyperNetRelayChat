@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Filtered original human messages feed bounded replies; durable plans survive interrupted submission.
-use super::{Config, Error, Result, state};
+//! Filtered human messages feed bounded replies; durable plans survive interrupted submission.
+use super::{Config, Error, Result, context, memory, state};
 use crate::{
     client::{self, Client, outbox},
     delegation, home, messaging,
@@ -27,6 +27,10 @@ pub(super) fn run(config: Config, stop: Arc<AtomicBool>, on_ready: impl FnOnce()
         .any(|r| r.home != client.profile.active_server().home)
     {
         return Err(Error::Configuration);
+    }
+    // A completed old configuration's plan must be settled before adopting new adapter settings.
+    if state::exists(&mut client.store)? {
+        settle_local(&mut client)?;
     }
     initialise(&mut client, &config)?;
     settle_local(&mut client)?;
@@ -135,7 +139,12 @@ pub(super) fn run(config: Config, stop: Arc<AtomicBool>, on_ready: impl FnOnce()
 }
 pub(super) fn initialise(client: &mut Client, config: &Config) -> Result<()> {
     state::initialise(&mut client.store, config)?;
+    memory::initialise(
+        &mut client.store,
+        config.memory.as_ref().map(|_| config.rooms[0]),
+    )?;
     if config.resynchronise {
+        memory::initialise(&mut client.store, None)?;
         for room in &config.rooms {
             client.resynchronise_history(*room)?;
         }
@@ -313,6 +322,8 @@ fn original_encrypted(event: &Event) -> bool {
 pub(super) enum Reply {
     Help,
     Model(String),
+    Memory { show: bool },
+    Forget,
 }
 pub(super) fn reply_for(
     event: &Event,
@@ -320,7 +331,19 @@ pub(super) fn reply_for(
     config: &Config,
 ) -> Option<Reply> {
     let text = match content {
-        Some(client::MessageContent::Decrypted(body)) if original_encrypted(event) => {
+        Some(client::MessageContent::Decrypted(body))
+            if original_encrypted(event)
+                || (config.model.is_some()
+                    && matches!(event.actor, Actor::Direct { .. })
+                    && matches!(event.kind, Operation::MessageSend | Operation::MessageReply)
+                    && event
+                        .body
+                        .deserialized::<crate::crypto::EncryptedEvent>()
+                        .is_ok_and(|message| {
+                            message.validate_event(event).is_ok()
+                                && message.context.causation.is_none()
+                        })) =>
+        {
             if encrypted_trigger(event, body) {
                 return Some(Reply::Help);
             }
@@ -331,9 +354,28 @@ pub(super) fn reply_for(
             if trigger(event) {
                 return Some(Reply::Help);
             }
-            original_text(event)?
+            if config.model.is_some()
+                && matches!(event.actor, Actor::Direct { .. })
+                && matches!(event.kind, Operation::MessageSend | Operation::MessageReply)
+            {
+                let body = event.body.deserialized::<messaging::Send>().ok()?;
+                if body.causation.is_some() {
+                    return None;
+                }
+                body.text
+            } else {
+                original_text(event)?
+            }
         }
     };
+    if config.model.is_some() {
+        match text.trim() {
+            "!memory" => return Some(Reply::Memory { show: false }),
+            "!memory show" => return Some(Reply::Memory { show: true }),
+            "!forget" => return Some(Reply::Forget),
+            _ => {}
+        }
+    }
     config
         .model
         .as_ref()?
@@ -375,6 +417,16 @@ pub(super) fn recover_history_context(
     }
     Ok(false)
 }
+/// Stop a signed page at its first control so later controls retain their own acknowledgement.
+pub(super) fn control_page_limit(page: &client::ConversationPage, config: &Config) -> Option<u16> {
+    let index = page.events.iter().position(|event| {
+        matches!(
+            reply_for(event, page.content.get(&event.event), config),
+            Some(Reply::Forget | Reply::Memory { .. })
+        )
+    })?;
+    (index + 1 < page.events.len()).then_some((index + 1) as u16)
+}
 fn pull(
     client: &mut Client,
     config: &Config,
@@ -384,20 +436,44 @@ fn pull(
     stop: &AtomicBool,
 ) -> Result<bool> {
     let prior = state::room(&mut client.store, room)?;
-    let page = match client.history_messages(
-        room,
-        &messaging::Page {
-            cursor: prior.cursor.clone(),
-            limit: 32,
-        },
-        grant,
-    ) {
+    let reading = if config.memory.is_some() && prior.cursor.is_none() {
+        client.history_tail(room, 32, grant)
+    } else {
+        client.history_messages(
+            room,
+            &messaging::Page {
+                cursor: prior.cursor.clone(),
+                limit: 32,
+            },
+            grant,
+        )
+    };
+    let reading = reading.and_then(|page| {
+        if prior.live
+            && let Some(limit) = control_page_limit(&page, config)
+        {
+            return client.history_messages(
+                room,
+                &messaging::Page {
+                    cursor: prior.cursor.clone(),
+                    limit,
+                },
+                grant,
+            );
+        }
+        Ok(page)
+    });
+    let page = match reading {
         Ok(page) => page,
         Err(error) if recover_history_context(&mut client.store, room, &error)? => {
             return Ok(false);
         }
         Err(error) => return Err(error.into()),
     };
+    // A concurrent filter change can alter the second page's event count. Retry its fresh view.
+    if prior.live && control_page_limit(&page, config).is_some() {
+        return Ok(false);
+    }
     let key = VerifyingKey::from_bytes(client.profile.active_server().signing_key.as_bytes())
         .map_err(|_| Error::State)?;
     let cursor = verify_cursor(&page.cursor.0, &key).map_err(|_| Error::State)?;
@@ -436,22 +512,44 @@ fn pull(
     if stop.load(Ordering::Acquire) {
         return Ok(false);
     }
+    let mut context = if config.model.is_some() {
+        match context::Context::load(client, config, &page, cursor.value(), &actor, grant, now) {
+            Ok(context) => Some(context),
+            Err(Error::Client(error)) if context::client_conflict(&error) => {
+                state::restart_room(&mut client.store, room)?;
+                return Ok(false);
+            }
+            Err(error) => return Err(error),
+        }
+    } else {
+        None
+    };
+    let control = page.events.iter().find_map(|event| {
+        reply_for(event, page.content.get(&event.event), config)
+            .filter(|reply| matches!(reply, Reply::Forget | Reply::Memory { .. }))
+            .map(|reply| (event, reply))
+    });
+    if prior.live && control.is_some() && now.lower_ms < state::next_reply(&mut client.store)? {
+        return Ok(false);
+    }
     let selected = if prior.live && now.lower_ms >= state::next_reply(&mut client.store)? {
-        page.events.iter().find_map(|event| {
-            reply_for(event, page.content.get(&event.event), config).map(|reply| (event, reply))
+        control.or_else(|| {
+            page.events.iter().find_map(|event| {
+                reply_for(event, page.content.get(&event.event), config).map(|reply| (event, reply))
+            })
         })
     } else {
         None
     };
     let window = client.session()?.ready.window.clone();
     if let Some((event, reply)) = selected {
-        let generated = match reply {
-            Reply::Help => Ok(Some(config.help.clone())),
-            Reply::Model(prompt) => config
-                .model
-                .as_ref()
-                .ok_or(Error::Configuration)?
-                .generate(&prompt, stop),
+        let generated = if let Some(context) = context.as_mut() {
+            context.generate(config, event, reply, stop)
+        } else {
+            match reply {
+                Reply::Help => Ok(Some(config.help.clone())),
+                _ => Err(Error::Configuration),
+            }
         };
         let Some(message) = reply_message(event.event, generated)? else {
             return Ok(false);
@@ -467,7 +565,19 @@ fn pull(
         if now.upper_ms >= cursor.value().expires_ms {
             return Err(Error::ResynchronisationRequired);
         }
-        client.prepare_send_with(room, &message, grant, false, None, |db, reply| {
+        if context
+            .as_ref()
+            .is_some_and(|context| context.generation_expired(now))
+        {
+            return Ok(false);
+        }
+        if let Some(context) = context.as_mut() {
+            context.prune(now);
+        }
+        let finalize = |db: &rusqlite::Transaction<'_>, reply: &VerifiedAction| {
+            if let Some(context) = &context {
+                context.save_in(db, room)?;
+            }
             state::advance_in(
                 db,
                 &state::Advance {
@@ -480,20 +590,42 @@ fn pull(
                     now,
                 },
             )
-        })?;
+        };
+        let prepared = if let Some(context) = &context {
+            client.prepare_send_guarded_with(room, &message, grant, context.guard, finalize)
+        } else {
+            client.prepare_send_with(room, &message, grant, false, None, finalize)
+        };
+        if let Err(error) = prepared {
+            if context::client_conflict(&error) {
+                state::restart_room(&mut client.store, room)?;
+                return Ok(false);
+            }
+            return Err(error.into());
+        }
     } else {
-        state::advance(
-            &mut client.store,
-            state::Advance {
-                room,
-                prior: prior.cursor.as_ref(),
-                cursor: &page.cursor,
-                live: prior.live || !page.has_more,
-                reply: None,
-                window: &window,
-                now,
-            },
-        )?;
+        let advance = state::Advance {
+            room,
+            prior: prior.cursor.as_ref(),
+            cursor: &page.cursor,
+            live: prior.live || !page.has_more,
+            reply: None,
+            window: &window,
+            now,
+        };
+        client
+            .store
+            .write(|db| {
+                if let Some(context) = &context {
+                    context.save_in(db, room)?;
+                }
+                state::advance_in(db, &advance)?;
+                Ok(crate::storage::Commit::new(
+                    (),
+                    b"HRC.BotObserve.1".to_vec(),
+                ))
+            })
+            .map_err(|_| Error::State)?;
     }
     Ok(!page.has_more)
 }
@@ -507,6 +639,12 @@ fn settle_local(client: &mut Client) -> Result<()> {
             .map_err(|_| Error::State)?
         {
             state::complete(&mut client.store, &plan, &outcome)?;
+            if context::revision_conflict(&outcome) {
+                if let Some(room) = plan.room {
+                    state::restart_room(&mut client.store, room)?;
+                }
+                continue;
+            }
             if matches!(outcome, Outcome::Rejected { .. }) {
                 return Err(Error::Denied);
             }
@@ -549,6 +687,12 @@ fn resolve_plan(client: &mut Client, config: &Config, stop: &AtomicBool) -> Resu
             return Err(error);
         }
         state::complete(&mut client.store, &plan, &outcome)?;
+        if context::revision_conflict(&outcome) {
+            if let Some(room) = plan.room {
+                state::restart_room(&mut client.store, room)?;
+            }
+            continue;
+        }
         if matches!(outcome, Outcome::Rejected { .. }) {
             return Err(Error::Denied);
         }

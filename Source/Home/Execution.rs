@@ -48,10 +48,12 @@ pub fn read_operation(op: Operation) -> bool {
             | Operation::CryptoInspect
             | Operation::CryptoWelcome
             | Operation::CryptoHistory
+            | Operation::CryptoTail
             | Operation::DelegationList
             | Operation::ModerationFilters
             | Operation::ModerationRestrictions
             | Operation::HistoryPage
+            | Operation::HistoryTail
             | Operation::HistoryContext
             | Operation::SearchQuery
             | Operation::SearchCancel
@@ -270,7 +272,7 @@ fn dispatch(
         RoomCreate | DirectCreate | RoomInvite | RoomJoin | RoomLeave | RoomSetTopic
         | RoomInspect => crate::conversations::operate(db, action, now),
         MessageSend | MessageReply | MessageAction | HistoryPage | HistoryContext | SearchQuery
-        | EventsSubscribe | EventsResume | CryptoHistory | UnreadSet => {
+        | EventsSubscribe | EventsResume | CryptoHistory | HistoryTail | CryptoTail | UnreadSet => {
             crate::messaging::operate(db, action, now, permit, signer, cancel)
         }
         DelegationCreate | DelegationInspect | DelegationList | DelegationPause

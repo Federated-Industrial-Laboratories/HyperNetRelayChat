@@ -16,6 +16,29 @@ pub struct PreparedSend {
     pub signed: Vec<u8>,
     pub encrypted: bool,
 }
+/// The room and recipient policy under which a generated reply was composed.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct SendGuard {
+    pub room_revision: u64,
+    pub filter_revision: u64,
+}
+impl SendGuard {
+    fn bind(self, action: &mut Action, inspection: &conversations::Inspection) -> Result<()> {
+        if self.room_revision != inspection.room_revision
+            || self.filter_revision != inspection.filter_revision
+        {
+            return Err(Error::Rejected {
+                code: ErrorCode::Conflict,
+                detail: "ExpectedRevision".into(),
+            });
+        }
+        action.expected.insert(Revision::Room, self.room_revision);
+        action
+            .expected
+            .insert(Revision::Filter, self.filter_revision);
+        Ok(())
+    }
+}
 pub(super) struct ControllerPreparedSend {
     pub(super) message: PreparedSend,
     proof: Option<VerifiedAction>,
@@ -258,7 +281,10 @@ impl Client {
                 let error = Error::from_outcome(outcome);
                 if matches!(
                     operation,
-                    Operation::RoomInspect | Operation::CryptoInspect | Operation::CryptoHistory
+                    Operation::RoomInspect
+                        | Operation::CryptoInspect
+                        | Operation::CryptoHistory
+                        | Operation::CryptoTail
                 ) && let Target::Room(room) = action.target
                 {
                     cache::inspection_failed(&mut self.store, operation, room, &error)
@@ -621,6 +647,30 @@ impl Client {
             finalize(tx, action)
         })
     }
+    /// Bind prompt authority before signing, persisting the outbox, or advancing MLS.
+    pub(crate) fn prepare_send_guarded_with(
+        &mut self,
+        room: RoomId,
+        message: &messaging::Send,
+        grant: Option<&delegation::Grant>,
+        guard: SendGuard,
+        finalize: impl FnOnce(&rusqlite::Transaction<'_>, &VerifiedAction) -> rusqlite::Result<()>,
+    ) -> Result<PreparedSend> {
+        self.save_draft_mentions(room, &message.text, &message.mentions)?;
+        self.prepare_preserved(
+            room,
+            message,
+            grant,
+            false,
+            None,
+            false,
+            Some(guard),
+            |tx, action| {
+                outbox::bind_draft_transaction(tx, action.action(), message)?;
+                finalize(tx, action)
+            },
+        )
+    }
     /// The controller already applied command/draft ordering. Preserve that decision
     /// while atomically preparing the exact outbox bytes and any MLS ratchet change.
     pub(super) fn prepare_preserved_send_with(
@@ -632,7 +682,9 @@ impl Client {
         approval: Option<Id>,
         finalize: impl FnOnce(&rusqlite::Transaction<'_>, &VerifiedAction) -> rusqlite::Result<()>,
     ) -> Result<PreparedSend> {
-        self.prepare_preserved(room, message, grant, is_action, approval, false, finalize)
+        self.prepare_preserved(
+            room, message, grant, is_action, approval, false, None, finalize,
+        )
     }
     pub(super) fn prepare_controller_send_with(
         &mut self,
@@ -644,8 +696,9 @@ impl Client {
         finalize: impl FnOnce(&rusqlite::Transaction<'_>, &VerifiedAction) -> rusqlite::Result<()>,
     ) -> Result<ControllerPreparedSend> {
         let known = grant.is_none() && approval.is_none() && self.known_community(room);
-        let message =
-            self.prepare_preserved(room, message, grant, is_action, approval, known, finalize)?;
+        let message = self.prepare_preserved(
+            room, message, grant, is_action, approval, known, None, finalize,
+        )?;
         let proof = if known {
             Some(
                 verify_action(&message.signed, &self.key.verifying_key())
@@ -665,6 +718,7 @@ impl Client {
         is_action: bool,
         approval: Option<Id>,
         known: bool,
+        guard: Option<SendGuard>,
         finalize: impl FnOnce(&rusqlite::Transaction<'_>, &VerifiedAction) -> rusqlite::Result<()>,
     ) -> Result<PreparedSend> {
         self.effects_ready()?;
@@ -687,6 +741,9 @@ impl Client {
         };
         let mut action = self.prepare_as(operation, Target::Room(room), message, grant)?;
         action.approval = approval;
+        if let Some(guard) = guard {
+            guard.bind(&mut action, inspection.as_ref().ok_or(Error::Input)?)?;
+        }
         if known
             || inspection
                 .as_ref()
@@ -751,7 +808,8 @@ impl Client {
         }
         action
             .expected
-            .insert(Revision::Room, inspection.room_revision);
+            .entry(Revision::Room)
+            .or_insert(inspection.room_revision);
         let context = crypto::EncryptionContext {
             home: action.home,
             room,
@@ -860,3 +918,7 @@ mod trust_tests;
 #[cfg(test)]
 #[path = "../../Tests/Client/PreparedMode.rs"]
 mod prepared_mode_tests;
+
+#[cfg(test)]
+#[path = "../../Tests/Client/SendGuard.rs"]
+mod send_guard_tests;

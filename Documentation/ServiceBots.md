@@ -36,66 +36,167 @@ semantics; `run` provides the ordinary silent library entry point.
 
 ## Local model chat
 
-Run a llama.cpp server on the bot's host, bound to `127.0.0.1` or `::1`, with a
-model that supports its `/v1/chat/completions` interface. Configure the server to
-disable prompt logging. Enrol a separate agent account and set its nickname to the
-name users should see, such as `Qwen`; the account retains its agent classification.
+Use llama.cpp or Ollama on the bot's host. Install the backend and a local model
+first; HRC does not download models or start the backend. Enrol a separate agent
+profile and set its nickname to the name participants should see, such as `Qwen`.
+Join the selected room with that profile before running the bot.
+
+### llama.cpp
+
+Start an installed `llama-server` with a local GGUF file and a chat template
+appropriate for the model. For example:
+
+```sh
+llama-server --model /absolute/models/qwen.gguf --alias Qwen \
+  --host 127.0.0.1 --port 8080 --ctx-size 4096 --parallel 1 \
+  --jinja --offline --log-disable
+```
+
+The backend must provide `/props`, `/apply-template`, `/tokenize` and
+`/v1/chat/completions`. HRC checks the active server context and tokenizes the
+rendered chat template before generation. The smaller of the server context and
+`--model-context-tokens` applies. Keep prompt logging disabled. Backend options
+are described in the [llama.cpp server guide](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md).
+
+In another terminal, start the bot:
 
 ```sh
 hrc bot --profile /absolute/private/qwen \
   --room ROOM --help-text 'Qwen: type !qwen followed by a message.' \
-  --model-endpoint 127.0.0.1:8080 --model Qwen \
+  --model-adapter llama-cpp --model-endpoint 127.0.0.1:8080 --model Qwen \
   --poll-interval-ms 1000
 ```
 
+### Ollama
+
+Run Ollama with cloud features disabled and a loopback listener:
+
+```sh
+OLLAMA_NO_CLOUD=1 OLLAMA_HOST=127.0.0.1:11434 ollama serve
+```
+
+If an Ollama service is already running, configure these variables on that
+service and restart it instead of starting a second server. Check its startup
+log for `Ollama cloud disabled: true`. See
+[Ollama server configuration](https://docs.ollama.com/faq#how-do-i-configure-ollama-server)
+and [cloud controls](https://docs.ollama.com/faq#how-do-i-disable-ollamas-cloud-features).
+Do not enable prompt debug logging.
+
+Use `ollama list` to find an installed local model. Replace `LOCAL_MODEL_NAME`
+below with its exact name:
+
+```sh
+hrc bot --profile /absolute/private/qwen \
+  --room ROOM --help-text 'Qwen: type !qwen followed by a message.' \
+  --model-adapter ollama --model-endpoint 127.0.0.1:11434 \
+  --model LOCAL_MODEL_NAME --poll-interval-ms 1000
+```
+
+HRC checks `/api/show` before sending conversation text, rejects cloud-model
+names and remote-model metadata, and uses Ollama's native `/api/chat` interface.
+Cloud disabling must be applied to the daemon; setting the variable only on the
+`hrc bot` command does not configure Ollama.
+
+### Options and interaction
+
 `--model-endpoint` and `--model` explicitly enable inference for exactly one
-selected room in every model mode. The deterministic bot still supports up to
-eight rooms. The endpoint must
-be a numeric loopback socket address, not a URL or hostname. `--model-prefix`
-defaults to `!qwen`; for example, `!qwen Explain the topic` submits only
-`Explain the topic` to the model. `!help` always returns the fixed help text.
-HRC uses an installed curl executable at `/usr/bin/curl`; `--model-curl` selects
-another absolute regular-file path. Curl configuration files, proxies and
-redirects are disabled. Inference stays on the bot's host; conversation transport
-still uses the authenticated HyperNet client.
+selected room. `--model-adapter` defaults to `llama-cpp`. The endpoint must be a
+numeric loopback socket address, not a URL or hostname. HRC uses `/usr/bin/curl`;
+`--model-curl` selects another absolute regular-file path. Curl configuration
+files, proxies and redirects are disabled. These adapters have no external
+provider mode. Chat transport continues to use HyperNet.
 
-Add `--all-human-messages` for natural chat in exactly one explicitly selected
-room. New original human messages then trigger replies without a prefix. Other
-`!` commands, agent messages, delegated messages, replies and automated causation
-never trigger inference. Only one reply is generated at a time. Existing rate and
-catch-up rules still apply, so additional messages within a rate interval or
-history page can be skipped. Use a dedicated bot conversation room for this mode.
+`--model-prefix` defaults to `!qwen`. Send `!qwen Explain the topic` to ask a
+question; the prefix is removed from the current question. Add
+`--all-human-messages` for a dedicated bot room where direct human messages and
+threaded replies should trigger answers without a prefix. Agent messages,
+delegated messages, automated causation and unrelated `!` commands do not trigger
+inference. `!help` returns the configured help and available memory commands.
+One answer is generated at a time. Rate and catch-up rules still apply, so
+additional questions in the same history page or rate interval can be skipped.
 
-Each inference request contains a fixed text-only instruction and the current
-message, with no retained conversational context, other room history, tools or
-credentials. A follow-up must include the context it needs. Explicitly enabling
-the model allows this host's model process to read the selected messages,
-including locally decrypted confidential messages for which the agent is an
-authorised participant. The model server must remain locally operated; this
-adapter provides no external-provider disclosure mode.
+| Option | Default | Accepted range |
+| --- | --- | --- |
+| `--model-context-tokens` | 4,096 | 2,048-32,768, including the reply allowance |
+| `--model-output-tokens` | 512 | 128-2,048; context must exceed output plus 1,024 |
+| `--memory-days` | 30 | 1-30; encrypted rooms have a seven-day ceiling |
+| `--memory-bytes` | 262,144 (256 KiB) | 16,384-1,048,576 bytes |
 
-Requests use nonstreaming generation, a 512-token output cap and
-`chat_template_kwargs.enable_thinking=false` for Qwen-compatible templates. Input
-is limited to 8,192 bytes and the normal 2,000-grapheme message limit. The entire
-JSON response is bounded to 65,536 bytes. Output must be one complete assistant
-text reply, at most 4,096 bytes and within normal protocol text limits; tool calls,
-truncated generation, invalid text and excessive output are rejected. The request
-has a 60-second deadline, with a two-second connection limit. Stop requests cancel
-and reap curl without creating a reply plan. A model connection failure, timeout
-or invalid response produces a short fixed failure notice instead of model text.
-That notice uses the same attributed reply, current permission checks, rate
-limit and atomic outbox/cursor transaction. Successful submission advances past
-the failed trigger so later messages can proceed; reconnect resolves the exact
-stored notice without rerunning inference. Configuration, authority and storage
-failures remain terminal. Prompt and response bodies are not written to
-diagnostic output by HRC.
+Llama.cpp verifies prompt size with its tokenizer. Ollama uses a conservative
+UTF-8 byte budget with room for the template and reply; this is not an exact token
+count. Older context is removed as necessary. The current question is never
+silently shortened; a question that cannot fit receives a fixed failure notice.
+Increasing the context requires enough memory in the model backend.
 
-Generation happens before the exact signed outbox transaction. Current service
-permission is checked when the reply is submitted, after generation. Changing
-model settings requires no pending plan and resets catch-up, like other bot
-configuration changes. Presence identifies a local model bot independently of
-the human operator. Long inference can allow its short-lived presence to expire;
-presence refresh resumes with the next bounded bot cycle.
+## Conversation memory
+
+Model bots retain room context by default in the agent profile's encrypted
+store. Memory starts when enabled; it does not import earlier room history.
+It survives bot restarts, with a default maximum age of 30 days and a 256 KiB
+storage cap. Encrypted-room sources expire within seven days, matching the
+existing decrypted archive limit. These are upper bounds, not guaranteed recall.
+
+The bot retains at most 64 recent messages. Each answer can use up to 12 recent
+messages plus a rolling summary of older context, within the model's input
+budget. Summaries are limited to 1,024 bytes and can omit details or contain model
+errors. Older messages are compressed in bounded groups; storage pressure can
+discard them, and expiry of a summary's oldest source removes that summary.
+No full archive, embedding database or unlimited conversation is sent to the
+model. Long-running rooms therefore use bounded storage and bounded prompts.
+
+| Room command | Effect | Who can use it |
+| --- | --- | --- |
+| `!memory` | Show counts, byte usage, retention and whether a summary exists | Direct human participants |
+| `!memory show` | Show the same metadata and current lossy summary | Bot operator or room moderator |
+| `!forget` | Clear retained context and start again from the current room position | Bot operator or room moderator |
+
+These commands produce replies in the room. In particular, `!memory show` shares
+the summary with current room participants. Clearing memory does not erase chat
+history or replies already sent. Memory commands do not invoke the model.
+
+Changes to the room audience, the bot's membership, recipient filters,
+delegation or encrypted-room membership clear prior context before reuse. The
+bot does not carry an old audience's conversation into a newly joined audience.
+Current read authority is checked before generation, and current send permission
+and room/filter revisions are checked when the answer is submitted. A change
+during generation prevents that answer from being published.
+
+Use `--no-memory` for replies based only on the current question. This also clears
+the stored derived memory and supports older or remote HRC services without the
+new bounded-history operation. Conversation history and encrypted archives are
+unchanged. Memory-enabled bots currently require an updated service that hosts
+the selected room; access through another service's federation route is not yet
+supported. There is no silent fallback that changes the selected memory policy.
+
+Enabling a model permits that host's model process to read the selected room's
+authorised context, including decrypted confidential messages when the agent is
+an admitted participant. History and summaries are supplied as untrusted data;
+they cannot grant tools, credentials or broader HRC permissions.
+
+## Model limits and recovery
+
+Both adapters use nonstreaming text generation with thinking disabled where the
+model template supports it. Requests are bounded to 128 KiB, responses to 256 KiB,
+and each call to 66 chat messages. Output must be one complete assistant text
+reply, at most 4,096 bytes and within normal protocol text limits. Tool calls,
+truncated generation, invalid text and excessive output are rejected.
+
+Each generation has a 60-second deadline covering its backend checks and HTTP
+requests, with a two-second connection limit. A reply that first compacts older
+memory can require a separate bounded summary generation. If summarisation
+fails, the bot continues with the context that still fits. Stop requests cancel
+and reap curl without creating a reply plan.
+
+A model connection failure, timeout or invalid response produces a short fixed
+failure notice. That notice uses the same attributed reply, permission checks,
+rate limit and durable outbox as a successful answer. Reconnect resolves a stored
+reply without rerunning inference. Configuration, authority and storage failures
+remain terminal. HRC does not write prompt or response bodies to diagnostics.
+
+Changing model settings requires no pending plan and resets catch-up, like other
+bot configuration changes. Presence identifies a local model bot independently
+of its operator. Long inference can allow its short-lived presence to expire;
+presence refresh resumes with the next bot cycle.
 
 ## Rules and current authority
 
@@ -134,8 +235,8 @@ The runtime never accepts an unknown contact fingerprint automatically. A missin
 key, untrusted roster, unavailable Welcome or required membership change prevents
 encrypted participation until the operator completes that step. Current recipient
 filters and history scope apply before rule evaluation. Rejected or unavailable
-ciphertext cannot trigger a reply; authenticated original human messages retain
-the same no-agent, no-reply and no-causation conditions.
+ciphertext cannot trigger a reply. After decryption, deterministic and model
+triggers follow their respective rules above.
 
 Encrypted reply preparation commits the MLS sender state, ordinary exact-byte
 outbox, trigger cursor and bot plan in one transaction. Reconnect submits those
@@ -189,6 +290,6 @@ rooms, help text, model settings or selected grant requires no outstanding bot p
 the same no-trigger catch-up. Both transitions preserve existing outbox outcomes.
 
 The bot schema accepts version 1 only. Unknown schemas and corrupt encrypted
-state fail closed. The bot stores cursors, one plan and rate metadata, not another
-plaintext transcript. Conversation history and outbox retention remain governed
-by their existing service and client policies.
+state fail closed. Cursors, one plan, rate metadata and optional bounded model
+memory are stored in the encrypted profile. Conversation history and outbox
+retention remain governed by their existing service and client policies.

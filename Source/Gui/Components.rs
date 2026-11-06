@@ -55,11 +55,12 @@ pub fn choice(ui: &mut Ui, selected: bool, label: &str) -> Response {
 pub fn row(ui: &mut Ui, selected: bool, label: &str) -> Response {
     ui.add_sized(
         [ui.available_width(), CONTROL_HEIGHT + 6.0],
-        egui::Button::new(label)
+        egui::Button::new((label, egui::Atom::grow()))
             .selected(selected)
             .frame_when_inactive(false)
             .truncate(),
     )
+    .on_hover_text(label)
 }
 
 pub fn badge(ui: &mut Ui, label: &str, colour: Color32) -> Response {

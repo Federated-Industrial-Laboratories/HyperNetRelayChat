@@ -286,6 +286,22 @@ for operation-specific access and the correlated Search.Cancel contract.
 
 ### Bounded client views
 
+The optional `bounded-history-tail-v1` capability adds `HistoryTail` (38) and
+`CryptoTail` (39). Both target a room with `{limit: unsigned}` (1-32) and return
+the ordinary history-page shape, a complete current member roster, and a signed
+forward cursor at the room head. Events appear in ascending sequence order;
+`hasMore` is false. The suffix scan examines at most 256 raw events and 1 MiB
+before current history, delegation and recipient filters. A short or empty
+result does not assert that the room has no older messages. Both reads use
+`HistoryPage` delegation rights; `CryptoTail` additionally requires current
+encrypted-reader authority. It returns ciphertext, never service plaintext.
+
+Clients request this capability explicitly. Its authenticated local session
+advertisement permits the tail operation. Older and remote sessions lacking
+that advertisement return `UnsupportedFeature/HistoryTailUnavailable` locally;
+they do not fall back to walking all history. Encrypted clients still process
+MLS transitions through their independent crypto synchronization cursor.
+
 The optional `bounded-client-views-v1` capability selects two fixed read contracts.
 Client.Metadata targets the acting account and always returns its account view
 and service information. Its optional pages contain rooms, recipient filters,

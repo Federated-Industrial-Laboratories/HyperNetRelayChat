@@ -159,6 +159,7 @@ impl Session {
             required_capabilities: Vec::new(),
             optional_capabilities: vec![
                 CLIENT_VIEWS_CAPABILITY.into(),
+                HISTORY_TAIL_CAPABILITY.into(),
                 "community-rooms".into(),
                 "delegation".into(),
                 "history".into(),
@@ -494,14 +495,13 @@ impl Session {
         Ok((verified, exchange_ns))
     }
     pub(crate) fn local_views_for(&self, home: ServiceId, key: Id) -> bool {
+        self.local_capability_for(home, key, CLIENT_VIEWS_CAPABILITY)
+    }
+    pub(super) fn local_capability_for(&self, home: ServiceId, key: Id, capability: &str) -> bool {
         self.remote.is_none()
             && self.ready.home == home
             && self.server_key.to_bytes() == *key.as_bytes()
-            && self
-                .ready
-                .capabilities
-                .iter()
-                .any(|c| c == CLIENT_VIEWS_CAPABILITY)
+            && self.ready.capabilities.iter().any(|c| c == capability)
     }
     pub fn stream_handle(&self) -> Arc<Stream> {
         Arc::clone(&self.stream)

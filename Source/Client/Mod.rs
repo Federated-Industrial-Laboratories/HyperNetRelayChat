@@ -9,6 +9,7 @@ pub use approvals::GrantPreview;
 #[path = "Encrypted.rs"]
 mod encrypted;
 pub use encrypted::PreparedSend;
+pub(crate) use encrypted::SendGuard;
 #[path = "Archive.rs"]
 mod archive;
 #[path = "EncryptedHistory.rs"]

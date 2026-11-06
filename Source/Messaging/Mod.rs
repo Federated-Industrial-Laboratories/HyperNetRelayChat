@@ -9,7 +9,7 @@ use crate::{
     home::{self, types::*},
     protocol::*,
 };
-pub use history::{Context, ContextResult, Page, PageResult, Search, Unread};
+pub use history::{Context, ContextResult, Page, PageResult, Search, Tail, Unread};
 use rusqlite::{OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -107,6 +107,9 @@ pub(crate) fn operate(
         | Operation::EventsSubscribe
         | Operation::EventsResume
         | Operation::CryptoHistory => history::page(db, action, now, permit, signer, cancel),
+        Operation::HistoryTail | Operation::CryptoTail => {
+            history::tail(db, action, now, permit, signer, cancel)
+        }
         Operation::HistoryContext => history::context(db, action, now, permit, signer),
         Operation::SearchQuery => history::search(db, action, now, permit, signer, cancel),
         Operation::UnreadSet => history::unread(db, action, now),

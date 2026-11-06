@@ -1,5 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Persistent service bots share the authenticated client and exact outbox.
+#[path = "Context.rs"]
+mod context;
+#[path = "Memory.rs"]
+mod memory;
 #[path = "Model.rs"]
 mod model;
 #[path = "Runtime.rs"]
@@ -7,7 +11,8 @@ mod runtime;
 #[path = "State.rs"]
 mod state;
 use crate::{client, protocol::*};
-pub use model::LocalModel;
+pub use memory::Policy as MemoryPolicy;
+pub use model::{Adapter, LocalModel};
 use std::{
     path::PathBuf,
     sync::{Arc, atomic::AtomicBool},
@@ -25,6 +30,8 @@ pub struct Config {
     pub resynchronise: bool,
     /// Explicit opt-in to inference on this host; None retains deterministic help only.
     pub model: Option<LocalModel>,
+    /// Derived context is scoped to the current room audience and authority.
+    pub memory: Option<MemoryPolicy>,
 }
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -78,6 +85,12 @@ impl Config {
         if let Some(model) = &self.model {
             model.validate()?;
             if self.rooms.len() != 1 {
+                return Err(Error::Configuration);
+            }
+        }
+        if let Some(memory) = &self.memory {
+            memory.validate()?;
+            if self.model.is_none() {
                 return Err(Error::Configuration);
             }
         }

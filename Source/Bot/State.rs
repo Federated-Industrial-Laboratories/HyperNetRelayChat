@@ -34,6 +34,17 @@ pub(super) struct Plan {
     pub operation: OperationId,
     pub digest: Id,
 }
+pub(super) fn exists(store: &mut Store) -> Result<bool> {
+    store
+        .read(READ, |db| {
+            db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='bot_meta')",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .map_err(|_| Error::State)
+}
 pub(super) fn initialise(store: &mut Store, config: &Config) -> Result<()> {
     let identity = if let Some(model) = &config.model {
         encode(&(
@@ -194,6 +205,7 @@ pub(super) struct Advance<'a> {
     pub window: &'a RetryWindow,
     pub now: TimeBounds,
 }
+#[cfg(test)]
 pub(super) fn advance(store: &mut Store, a: Advance<'_>) -> Result<()> {
     store
         .write(|db| {
