@@ -4,6 +4,8 @@
 mod bootstrap;
 #[path = "Clients.rs"]
 mod clients;
+#[path = "Companion.rs"]
+mod companion;
 #[path = "Configuration.rs"]
 mod configuration;
 #[path = "Engine.rs"]

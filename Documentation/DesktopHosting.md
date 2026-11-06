@@ -93,6 +93,9 @@ the exact replacement through Core's native stopped transition. The native
 service identities, TLS keys, endpoint, privacy mode and resource limits remain
 fixed. The desktop's renewed connect grant and the service owner's management
 grant are limited to their existing HRC service and the reviewed deadline.
+Renewal replaces the stopped desktop companion's cached voucher under its
+exclusive lock. Account keys, requester journals, route identity and privacy
+settings remain unchanged; the new voucher is checked before connection.
 There is no unattended renewal. Interrupted work resumes its retained native
 operations; direct edits to installed Config files are unsupported.
 

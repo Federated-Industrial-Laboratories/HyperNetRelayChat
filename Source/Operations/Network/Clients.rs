@@ -718,6 +718,21 @@ pub(super) fn renew_local_client(host: &mut Host<'_>) -> Result<()> {
         ]))?;
     }
     let label = format!("client-{}", &delivery.principal[..16]);
+    host.phase("Renewing stopped desktop companion")?;
+    if super::lifecycle::unit_active(host, "client") {
+        return Err(Error::Busy);
+    }
+    let bootstrap = host.bootstrap()?;
+    super::companion::replace_target(
+        &host.p("Client/Companion"),
+        &profile,
+        &host.state.ids["application"],
+        &string(&bootstrap, "network")?,
+        &string(&bootstrap, "incarnation")?,
+        &host
+            .p("Client/Joined/Routes")
+            .join(format!("{}.json", host.state.ids["application"])),
+    )?;
     let path = exchange.join("Targets.json");
     host.immutable_json(&path,&json!([{"service":host.state.ids["application"],"protocol":"hrc/1","grant":grant_reference(host,&format!("{label}-connect"))?,"route":host.p("Client/Joined/Routes").join(format!("{}.json",host.state.ids["application"])),"renewalMs":0}]))?;
     host.remember("active-client-targets", json!(path))?;
