@@ -189,14 +189,26 @@ fn catchup_budget_and_original_end_stop_continuous_history_without_hot_loop() {
             })
             .unwrap();
     }
-    assert!(worker.selected_catchup.is_none());
-    assert!(worker.snapshot.selected.as_ref().unwrap().has_more);
     assert!(
-        !worker.view_turn_due(),
+        worker.selected_catchup.is_none(),
         "budget exhaustion cannot schedule itself again"
     );
+    assert!(worker.snapshot.selected.as_ref().unwrap().has_more);
     worker
         .catchup_turn_with(|_, _| panic!("no ninth page"))
+        .unwrap();
+    // Durable page writes can outlast the independent metadata interval. Due
+    // metadata remains valid work; it must not recreate the exhausted burst.
+    worker.poll = Instant::now() - Duration::from_secs(6);
+    assert!(worker.view_turn_due());
+    worker.tick();
+    assert!(matches!(
+        worker.refresh_cycle.as_ref().unwrap().stage,
+        Stage::Metadata(_)
+    ));
+    assert!(worker.selected_catchup.is_none());
+    worker
+        .catchup_turn_with(|_, _| panic!("metadata restarted exhausted catch-up"))
         .unwrap();
     worker.continue_selected(room, 0);
     worker
