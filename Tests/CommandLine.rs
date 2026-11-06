@@ -1,6 +1,37 @@
 use super::*;
 
 #[test]
+fn desktop_entry_opens_without_command_line_profile_assembly() {
+    assert!(Cli::try_parse_from(["hrc"]).unwrap().command.is_none());
+    let cli = Cli::try_parse_from(["hrc", "gui", "--setup"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Some(Command::Gui(desktop::Options {
+            profile: None,
+            setup: true,
+            offline: false
+        }))
+    ));
+    let cli = Cli::try_parse_from(["hrc", "gui", "--offline"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Some(Command::Gui(desktop::Options {
+            profile: None,
+            offline: true,
+            ..
+        }))
+    ));
+    assert!(Cli::try_parse_from(["hrc", "tui"]).is_err());
+}
+
+#[test]
+fn old_preferences_default_to_unboxed_classic_history() {
+    let old = serde_json::json!({"theme":"Dark", "density":"Comfortable", "textScale":1.0, "quiet":false, "sound":false, "ambiguousWide":false});
+    let preferences: hrc::client::Preferences = serde_json::from_value(old).unwrap();
+    assert_eq!(preferences.chat_layout, hrc::client::ChatLayout::Classic);
+}
+
+#[test]
 fn encrypted_history_recovery_requires_an_explicit_sync_flag() {
     let id = |n| hrc::protocol::Id::from_bytes([n; 32]);
     let room = hrc::protocol::RoomId {
@@ -30,7 +61,7 @@ fn encrypted_history_recovery_requires_an_explicit_sync_flag() {
         }
         let cli = Cli::try_parse_from(args).unwrap();
         assert!(
-            matches!(cli.command,Command::Crypto {command: conversation::encryption_cli::Command::Sync {resynchronise,..}} if resynchronise==requested)
+            matches!(cli.command,Some(Command::Crypto {command: conversation::encryption_cli::Command::Sync {resynchronise,..}}) if resynchronise==requested)
         );
     }
 }

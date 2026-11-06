@@ -88,6 +88,12 @@ five-minute silence and a one-day ban. Scope, expiry and moderator attribution a
 inspectable in Status. All service authorisation checks still apply.
 
 Settings provide dark/light appearance, compact/comfortable density and text scale.
+The desktop update adds **Classic** history with horizontal dividers and **Bubbles**
+with cut-corner message panels. Settings also provide nickname editing. The bottom
+readout separates connection state, TLS, relay and content protection. **LAST RTT**
+measures the latest direct message frame write through its authenticated service
+commit acknowledgement; it excludes UI time and is not a recipient receipt.
+An unavailable measurement is shown as a dash.
 Per-room notifications can include all messages, bound mentions only, or none.
 Quiet mode suppresses notifications and sounds. Catch-up does not generate a burst
 of alerts. Sound requires both global and room selection; it is off initially.

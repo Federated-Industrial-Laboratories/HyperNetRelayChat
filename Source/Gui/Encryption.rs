@@ -5,6 +5,7 @@ use hrc::client::{
     CryptoView, RoomView,
     trust::{ContactTrust, TrustState},
 };
+
 impl App {
     pub(super) fn encryption(&mut self, ui: &mut egui::Ui) {
         let snapshot = self.model.snapshot.clone();
@@ -18,30 +19,35 @@ impl App {
             .members
             .iter()
             .any(|m| m.account == snapshot.account && m.moderator);
-        ui.collapsing("Encryption and authorised endpoints", |ui| {
-            self.encryption_content(ui, room, moderator);
+        ui.collapsing("Encryption", |ui| {
+            self.encryption_content(ui, room, moderator)
         });
     }
     fn encryption_content(&mut self, ui: &mut egui::Ui, room: &RoomView, moderator: bool) {
         let id = room.summary.room;
-        ui.label("Room names, topics and membership are visible to the home service. New devices receive future encrypted traffic only.");
         ui.horizontal_wrapped(|ui| {
-            if ui.button("Inspect current encryption").clicked() {
+            if components::button(ui, "Inspect").clicked() {
                 self.model.dispatch(Command::CryptoInspect {
                     room: id,
                     grant: None,
                 });
             }
-            if ui.button("Enrol this endpoint's encryption key").clicked() {
+            if components::button(ui, "Enrol device")
+                .on_hover_text("Register this endpoint's encryption key")
+                .clicked()
+            {
                 self.model.dispatch(Command::CryptoEnrol);
             }
-            if ui.button("Request future-message access").clicked() {
+            if components::button(ui, "Request access")
+                .on_hover_text("Request future encrypted messages on this endpoint")
+                .clicked()
+            {
                 self.model.dispatch(Command::CryptoPublish {
                     room: id,
                     grant: None,
                 });
             }
-            if ui.button("Synchronise encrypted history").clicked() {
+            if components::button(ui, "Synchronise").clicked() {
                 self.model.dispatch(Command::CryptoSync {
                     room: id,
                     grant: None,
@@ -49,31 +55,41 @@ impl App {
             }
         });
         let Some(view) = &room.crypto else {
-            ui.label(
-                "Inspect encryption to view fingerprints, pending endpoints and the send barrier.",
-            );
+            components::muted_badge(ui, "Encryption state not inspected");
             return;
         };
         if room.stale {
-            ui.label("Retained encryption state; current authority is unconfirmed.");
+            components::badge(
+                ui,
+                "Retained · authority unconfirmed",
+                egui::Color32::from_rgb(211, 170, 91),
+            );
         }
-        let sending = if view.remote.send_barrier {
-            "blocked"
-        } else {
-            "permitted for ready endpoints"
-        };
-        let verification = if view.remote.frozen {
-            "frozen"
-        } else {
-            "active"
-        };
-        ui.label(format!(
-            "Epoch {} · sending {sending} · verification {verification}",
-            view.remote.epoch
-        ));
-        if let Some(group) = view.remote.group {
-            ui.label(format!("Group {group}"));
-        }
+        ui.horizontal_wrapped(|ui| {
+            components::readout(ui, "EPOCH", &view.remote.epoch.to_string());
+            components::readout(
+                ui,
+                "SEND",
+                if view.remote.send_barrier {
+                    "Blocked"
+                } else {
+                    "Ready endpoints"
+                },
+            );
+            components::readout(
+                ui,
+                "VERIFY",
+                if view.remote.frozen {
+                    "Frozen"
+                } else {
+                    "Active"
+                },
+            );
+        });
+        ui.collapsing("Group details", |ui| {
+            if let Some(group) = view.remote.group { ui.add(egui::Label::new(group.to_string()).wrap().selectable(true)); }
+            ui.label("Names, topics and membership are visible to the home service. New devices receive future encrypted messages only.");
+        });
         for contact in &view.contacts {
             self.encryption_contact(ui, contact);
         }
@@ -86,27 +102,25 @@ impl App {
             TrustState::Trusted => "Trusted",
             TrustState::Changed => "Changed",
         };
-        let label = format!("{} · {state}", display::short_account(contact.account));
-        ui.collapsing(label, |ui| {
-            ui.label(contact.account.to_string());
-            ui.label(format!("First-contact fingerprint {}", contact.anchor));
-            ui.label(format!("Recovery public key {}", contact.recovery_key));
-            match contact.state {
-                TrustState::UntrustedRegistration | TrustState::LegacyAnchor => {
-                    let legacy = contact.state == TrustState::LegacyAnchor;
-                    ui.label(if legacy {
-                        "This legacy identity lacks a signed original registration. Accept only after independently checking its fingerprint."
-                    } else {
-                        "Compare this fingerprint with the intended contact before trusting it. A valid signature alone does not identify the person you intended."
-                    });
-                    let label = if legacy { "Accept this legacy anchor" } else { "Trust this exact fingerprint" };
-                    if ui.button(label).clicked() {
-                        self.model.dispatch(Command::TrustContact { account: contact.account, anchor_digest: contact.anchor, legacy });
-                    }
+        ui.collapsing(format!("{} · {state}", display::short_account(contact.account)), |ui| {
+            components::frame(ui).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                for (label, value) in [("Account", contact.account.to_string()), ("Fingerprint", contact.anchor.to_string()), ("Recovery public key", contact.recovery_key.to_string())] {
+                    ui.weak(label); ui.add(egui::Label::new(egui::RichText::new(value).monospace()).wrap().selectable(true));
                 }
-                TrustState::Trusted => { ui.label("The current signed continuity extends the pinned identity."); }
-                TrustState::Changed => { ui.colored_label(egui::Color32::YELLOW, "Identity continuity changed; encrypted admission is blocked."); }
-            }
+                match contact.state {
+                    TrustState::UntrustedRegistration | TrustState::LegacyAnchor => {
+                        let legacy = contact.state == TrustState::LegacyAnchor;
+                        ui.label(if legacy { "No signed original registration. Independently check this fingerprint before accepting." }
+                            else { "Compare this fingerprint with the intended contact before trusting it." });
+                        if components::button(ui, if legacy { "Accept legacy" } else { "Trust fingerprint" }).clicked() {
+                            self.model.dispatch(Command::TrustContact { account: contact.account, anchor_digest: contact.anchor, legacy });
+                        }
+                    }
+                    TrustState::Trusted => { components::accent_badge(ui, "Signed continuity matches"); }
+                    TrustState::Changed => { components::badge(ui, "Identity changed · admission blocked", egui::Color32::from_rgb(211, 170, 91)); }
+                }
+            });
         });
     }
     fn encryption_members(
@@ -119,15 +133,28 @@ impl App {
         let id = room.summary.room;
         for member in &view.remote.members {
             let endpoint = member.actor.acting().endpoint;
-            ui.horizontal_wrapped(|ui| {
-                ui.label(format!(
-                    "{} · endpoint {endpoint}",
-                    display::actor(&member.actor, &room.members)
-                ));
+            components::frame(ui).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.label(
+                    egui::RichText::new(display::actor(&member.actor, &room.members)).strong(),
+                );
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(endpoint.to_string())
+                            .small()
+                            .monospace(),
+                    )
+                    .wrap()
+                    .selectable(true),
+                );
                 if view.remote.required_removals.contains(&endpoint) {
-                    ui.label("Removal required before sending");
+                    components::badge(
+                        ui,
+                        "Removal required before sending",
+                        egui::Color32::from_rgb(211, 170, 91),
+                    );
                 }
-                if moderator && ui.button("Remove endpoint").clicked() {
+                if moderator && components::button(ui, "Remove device").clicked() {
                     self.model.dispatch(Command::CryptoCommit {
                         room: id,
                         additions: vec![],
@@ -135,24 +162,26 @@ impl App {
                     });
                 }
             });
+            ui.add_space(6.0);
         }
         if !moderator {
             return;
         }
-        if view.remote.group.is_none() && ui.button("Start encrypted group").clicked() {
+        if view.remote.group.is_none() && components::primary(ui, "Start group").clicked() {
             self.model.dispatch(Command::CryptoInitialise {
                 room: id,
                 recover: false,
             });
         }
         for package in &view.remote.packages {
-            ui.horizontal_wrapped(|ui| {
-                ui.label(format!(
-                    "Admission requested by {} · {}",
-                    display::actor(&package.member.actor, &room.members),
-                    package.member.actor.acting().endpoint
-                ));
-                if ui.button("Admit this endpoint").clicked() {
+            components::section(ui, "Device admission", |ui| {
+                ui.strong(display::actor(&package.member.actor, &room.members));
+                ui.add(
+                    egui::Label::new(package.member.actor.acting().endpoint.to_string())
+                        .wrap()
+                        .selectable(true),
+                );
+                if components::button(ui, "Admit device").clicked() {
                     self.model.dispatch(Command::CryptoCommit {
                         room: id,
                         additions: vec![package.digest],
@@ -162,32 +191,43 @@ impl App {
             });
         }
         if room.summary.confidentiality == RoomConfidentiality::PrivateGroup {
-            ui.add(
-                egui::TextEdit::singleline(&mut self.invite_account)
-                    .hint_text("Account ID to invite")
-                    .char_limit(200),
-            );
-            if ui.button("Invite account").clicked()
-                && let Ok(account) = self.invite_account.parse()
-            {
-                self.model.dispatch(Command::Invite { room: id, account });
-            }
+            components::section(ui, "Invite account", |ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.invite_account)
+                        .hint_text("Account ID")
+                        .desired_width(ui.available_width())
+                        .char_limit(200),
+                );
+                if components::button(ui, "Invite").clicked() {
+                    match self.invite_account.parse() {
+                        Ok(account) => {
+                            self.model.dispatch(Command::Invite { room: id, account });
+                        }
+                        Err(_) => self.model.error = Some("Enter a valid account ID".into()),
+                    }
+                }
+            });
         }
         if view.remote.group.is_some() && (view.remote.frozen || view.remote.send_barrier) {
-            ui.checkbox(&mut self.confirm_recovery, "Start a new group; other endpoints must be readmitted and old history is not transferred");
-            if ui
-                .add_enabled(
-                    self.confirm_recovery,
-                    egui::Button::new("Recover into a fresh encrypted group"),
-                )
-                .clicked()
-            {
-                self.model.dispatch(Command::CryptoInitialise {
-                    room: id,
-                    recover: true,
-                });
-                self.confirm_recovery = false;
-            }
+            components::section(ui, "Group recovery", |ui| {
+                ui.checkbox(
+                    &mut self.confirm_recovery,
+                    "Start a new group; readmit other devices. Old history is not transferred.",
+                );
+                if ui
+                    .add_enabled_ui(self.confirm_recovery, |ui| {
+                        components::button(ui, "Recover group")
+                    })
+                    .inner
+                    .clicked()
+                {
+                    self.model.dispatch(Command::CryptoInitialise {
+                        room: id,
+                        recover: true,
+                    });
+                    self.confirm_recovery = false;
+                }
+            });
         }
     }
 }

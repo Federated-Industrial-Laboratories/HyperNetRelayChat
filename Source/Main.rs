@@ -3,12 +3,16 @@
 mod commands;
 #[path = "Cli.rs"]
 mod conversation;
+#[path = "Desktop/Mod.rs"]
+mod desktop;
 #[path = "Presentation/Display.rs"]
 mod display;
 #[path = "Gui/Mod.rs"]
 mod gui;
 #[path = "Presentation/Interaction.rs"]
 mod interaction;
+#[path = "Onboarding/Mod.rs"]
+mod onboarding;
 #[path = "Tui/Mod.rs"]
 mod tui;
 use clap::{Args, Parser, Subcommand};
@@ -26,13 +30,17 @@ const ACTION: &[u8] = b"HRC transport diagnostic reply v1\0";
 #[command(version, about = "HyperNet Relay Chat")]
 struct Cli {
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(Subcommand)]
 enum Command {
     /// Open the graphical conversation client.
-    Gui(Interactive),
+    Gui(desktop::Options),
+    /// Install the desktop launcher for the current user.
+    Install,
+    /// Assemble an operator invitation for the graphical setup wizard.
+    SetupBundle(desktop::BundleOptions),
     /// Open the interactive terminal client.
     Tui(Interactive),
     /// Run a bounded deterministic room-help bot with a separately enrolled agent profile.
@@ -318,8 +326,15 @@ fn run(command: Transport) -> Result<(), Failure> {
 }
 
 fn main() -> ExitCode {
-    let result = match Cli::parse().command {
-        Command::Gui(options) => gui::run(&options.profile, options.offline).map_err(Failure),
+    let result = match Cli::parse()
+        .command
+        .unwrap_or_else(|| Command::Gui(desktop::Options::default()))
+    {
+        Command::Gui(options) => desktop::run(options).map_err(Failure),
+        Command::Install => desktop::install().map_err(Failure).and_then(|v| output(&v)),
+        Command::SetupBundle(options) => desktop::bundle(options)
+            .map_err(Failure)
+            .and_then(|v| output(&v)),
         Command::Tui(options) => tui::run(&options.profile, options.offline).map_err(Failure),
         Command::Bot(options) => bot(options),
         Command::Transport { command } => run(command),
@@ -343,7 +358,7 @@ fn main() -> ExitCode {
                 Command::Resolve { profile } => conversation::resolve(&profile),
                 Command::Abandon(request) => conversation::abandon(request),
                 Command::Transport { .. } | Command::Gui(_) | Command::Tui(_) => unreachable!(),
-                Command::Bot(_) => unreachable!(),
+                Command::Bot(_) | Command::Install | Command::SetupBundle(_) => unreachable!(),
             };
             result.map_err(Failure).and_then(|v| output(&v))
         }
