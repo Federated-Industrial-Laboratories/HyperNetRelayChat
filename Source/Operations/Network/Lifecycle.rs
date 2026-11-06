@@ -22,11 +22,33 @@ pub(super) fn start_hrc(host: &Host<'_>) -> Result<()> {
     start_hrc_with(host, host.cancel, host.end)
 }
 pub(super) fn restore_hrc(host: &Host<'_>) -> Result<()> {
-    start_hrc_with(
-        host,
-        &AtomicBool::new(false),
-        Instant::now() + Duration::from_secs(30),
+    let cancel = AtomicBool::new(false);
+    let end = Instant::now() + Duration::from_secs(30);
+    let systemctl = Path::new("/usr/bin/systemctl");
+    let name = host.unit_name("hrc");
+    // Cancellation can interrupt the stop command before systemd finishes its job.
+    // Join that stop under the cleanup budget before recreating the transient unit.
+    if raw(
+        systemctl,
+        &bytes(&["--user", "stop", &name]),
+        &cancel,
+        end,
+        "chat service cleanup",
     )
+    .is_err()
+    {
+        let state = raw(
+            systemctl,
+            &bytes(&["--user", "show", &name, "--property=LoadState", "--value"]),
+            &cancel,
+            end,
+            "chat service cleanup",
+        )?;
+        if state != b"not-found\n" {
+            return Err(Error::NotReady);
+        }
+    }
+    start_hrc_with(host, &cancel, end)
 }
 fn start_hrc_with(host: &Host<'_>, cancel: &AtomicBool, end: Instant) -> Result<()> {
     host.unit_with_context(

@@ -13,6 +13,7 @@ the release notes distinguish current features from earlier qualification eviden
 | Install and open the desktop application | [Installation and upgrades](Installation.md) |
 | Join a conversation and use the interfaces | [GUI, TUI and CLI](Interfaces.md) |
 | Choose or import desktop colours | [Themes](Themes.md) |
+| Open a HyperNet Page from a conversation | [Page links and browser configuration](Interfaces.md#hypernet-page-links) |
 | Create a network or host an HRC service | [Desktop hosting](DesktopHosting.md) and [service setup](ConversationSetup.md) |
 | Set up a bot from the desktop | [Desktop bots and local models](DesktopBots.md) |
 | Configure bot behaviour and model memory | [Service bot reference](ServiceBots.md) |
