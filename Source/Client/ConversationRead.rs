@@ -77,6 +77,63 @@ impl Client {
             stale: false,
         })
     }
+    /// Read a bounded recent suffix and obtain a fresh forward-resume cursor.
+    /// Older or remote services without a verified capability do not trigger a history walk.
+    pub fn history_tail(
+        &mut self,
+        room: RoomId,
+        limit: u16,
+        grant: Option<&delegation::Grant>,
+    ) -> Result<ConversationPage> {
+        let server = self.profile.active_server();
+        if room.home != server.home
+            || !self.session()?.local_capability_for(
+                server.home,
+                server.signing_key,
+                HISTORY_TAIL_CAPABILITY,
+            )
+        {
+            return Err(Error::Rejected {
+                code: ErrorCode::UnsupportedFeature,
+                detail: "HistoryTailUnavailable".into(),
+            });
+        }
+        let inspection: conversations::Inspection = self.read_as(
+            Operation::RoomInspect,
+            Target::Room(room),
+            &home::Empty {},
+            grant,
+        )?;
+        let encrypted = inspection.confidentiality != RoomConfidentiality::Community;
+        if encrypted {
+            // Tail reads never replace or advance the independent MLS transition cursor.
+            self.crypto_sync(room, grant)?;
+        }
+        let result: messaging::PageResult = self.read_as(
+            if encrypted {
+                Operation::CryptoTail
+            } else {
+                Operation::HistoryTail
+            },
+            Target::Room(room),
+            &messaging::Tail { limit },
+            grant,
+        )?;
+        let content = if encrypted {
+            archive::content(&mut self.store, &result.events).map_err(|_| Error::Storage)?
+        } else {
+            BTreeMap::new()
+        };
+        Ok(ConversationPage {
+            events: result.events,
+            content,
+            cursor: result.cursor,
+            has_more: result.has_more,
+            members: result.members,
+            room_revision: result.room_revision,
+            stale: false,
+        })
+    }
     pub fn search_messages(
         &mut self,
         room: RoomId,

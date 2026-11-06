@@ -324,6 +324,47 @@ fn private_group_requires_invitation_orders_mls_and_blocks_stale_recipient_keys(
         })
         .unwrap();
     let public: crypto::EncryptedEvent = event.body.deserialized().unwrap();
+    let recent = run(
+        &mut home,
+        &bob,
+        &action(
+            &bob,
+            Operation::CryptoTail,
+            Target::Room(room),
+            &messaging::Tail { limit: 1 },
+        ),
+    );
+    let Outcome::Result { body } = recent else {
+        panic!("encrypted tail: {recent:?}")
+    };
+    let recent: messaging::PageResult = body.deserialized().unwrap();
+    assert_eq!(recent.events, vec![event.clone()]);
+    assert!(!recent.has_more);
+    assert_eq!(recent.members.len(), 2);
+    let tail_cursor = verify_cursor(&recent.cursor.0, &home.signing_key().verifying_key()).unwrap();
+    assert_eq!(tail_cursor.value().sequence, event.sequence);
+    let resumed = run(
+        &mut home,
+        &bob,
+        &action(
+            &bob,
+            Operation::CryptoHistory,
+            Target::Room(room),
+            &messaging::Page {
+                cursor: Some(recent.cursor),
+                limit: 1,
+            },
+        ),
+    );
+    let Outcome::Result { body } = resumed else {
+        panic!("encrypted tail resume: {resumed:?}")
+    };
+    assert!(
+        body.deserialized::<messaging::PageResult>()
+            .unwrap()
+            .events
+            .is_empty()
+    );
     let delivery = b
         .device
         .receive(
@@ -406,6 +447,37 @@ fn private_group_requires_invitation_orders_mls_and_blocks_stale_recipient_keys(
     assert!(!page.events.iter().any(|e| e.event == event_id));
     assert!(
         page.events
+            .iter()
+            .any(|e| e.kind == Operation::CryptoCommit)
+    );
+    // Separate the tail permission assertions from the preceding burst of MLS setup/read work.
+    home.store
+        .write(|db| {
+            db.execute(
+                "DELETE FROM hrc_budgets WHERE key=?1 OR key IN('service:crypto','service:crypto-bytes')",
+                [format!("operation:{}", bob.record.acting.account)],
+            )?;
+            Ok(Commit::new((), b"encrypted tail read phase".to_vec()))
+        })
+        .unwrap();
+    let recent = run(
+        &mut home,
+        &bob,
+        &action(
+            &bob,
+            Operation::CryptoTail,
+            Target::Room(room),
+            &messaging::Tail { limit: 32 },
+        ),
+    );
+    let Outcome::Result { body } = recent else {
+        panic!("filtered encrypted tail: {recent:?}")
+    };
+    let recent: messaging::PageResult = body.deserialized().unwrap();
+    assert!(!recent.events.iter().any(|e| e.event == event_id));
+    assert!(
+        recent
+            .events
             .iter()
             .any(|e| e.kind == Operation::CryptoCommit)
     );

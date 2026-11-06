@@ -88,6 +88,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 const CAPABILITIES: &[&str] = &[
     CLIENT_VIEWS_CAPABILITY,
+    HISTORY_TAIL_CAPABILITY,
     "community-rooms",
     "delegation",
     "history",
@@ -658,7 +659,18 @@ fn serve(shared: &Shared, stream: &Stream) -> Result<()> {
         window,
         maximum_frame_bytes: ORDINARY_FRAME_BYTES as u64,
         maximum_crypto_frame_bytes: CRYPTO_FRAME_BYTES as u64,
-        capabilities: CAPABILITIES.iter().map(|s| (*s).to_owned()).collect(),
+        capabilities: CAPABILITIES
+            .iter()
+            .filter(|capability| {
+                **capability != HISTORY_TAIL_CAPABILITY
+                    || hello
+                        .required_capabilities
+                        .iter()
+                        .chain(&hello.optional_capabilities)
+                        .any(|requested| requested == **capability)
+            })
+            .map(|s| (*s).to_owned())
+            .collect(),
         account_revision: endpoint.revision,
         binding_digest: endpoint.acting.binding_digest,
         acting: endpoint.acting.clone(),

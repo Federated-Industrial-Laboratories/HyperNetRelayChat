@@ -9,6 +9,8 @@ mod federation;
 mod lifecycle;
 #[path = "Search.rs"]
 mod search;
+#[path = "Tail.rs"]
+mod tail;
 #[path = "Views.rs"]
 mod views;
 use crate::{conversations, delegation, identity, messaging, moderation};

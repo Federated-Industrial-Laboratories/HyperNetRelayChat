@@ -218,6 +218,8 @@ pub(crate) fn authorize(
             | Operation::CryptoWelcome
             | Operation::CryptoReport
             | Operation::CryptoHistory
+            | Operation::HistoryTail
+            | Operation::CryptoTail
             | Operation::RoomInspect
             | Operation::AccountPublicIdentity
     ) {

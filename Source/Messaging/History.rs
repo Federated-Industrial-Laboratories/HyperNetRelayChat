@@ -17,6 +17,11 @@ pub struct Page {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Tail {
+    pub limit: u16,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Search {
     pub terms: Vec<String>,
     pub sender: Option<AccountId>,
@@ -131,7 +136,10 @@ impl PageContext<'_> {
                 outcome: outcome.clone(),
             };
             // Enforce the actual role, frame, logical depth and node limits together.
-            let representation = if self.action.operation == Operation::CryptoHistory {
+            let representation = if matches!(
+                self.action.operation,
+                Operation::CryptoHistory | Operation::CryptoTail
+            ) {
                 sign_crypto_response(&response, self.signer)
             } else {
                 sign_response(&response, self.signer)
@@ -139,11 +147,20 @@ impl PageContext<'_> {
             if representation.is_ok() && canonical_encode(&value(&outcome)?, self.bytes).is_ok() {
                 return Ok(outcome);
             }
-            if events.pop().is_none() {
+            if events.is_empty() {
                 return Err(Fault::Reject(ErrorCode::Overloaded, "PageRepresentation"));
             }
-            last = events.last().map(|e| e.sequence).unwrap_or(self.start);
-            more = true;
+            if matches!(
+                self.action.operation,
+                Operation::HistoryTail | Operation::CryptoTail
+            ) {
+                // A tail keeps the newest events and always resumes from the observed head.
+                events.remove(0);
+            } else {
+                events.pop();
+                last = events.last().map(|e| e.sequence).unwrap_or(self.start);
+                more = true;
+            }
         }
     }
 }
@@ -254,6 +271,97 @@ pub(crate) fn page_bounded(
         include_members,
     }
     .finish(result, last, more)
+}
+/// Inspect a bounded suffix before applying current access and recipient filtering.
+/// Filtered or expired rows cannot turn this query into an unbounded archive walk.
+pub(super) fn tail(
+    db: &Transaction<'_>,
+    action: &Action,
+    now: TimeBounds,
+    permit: Permit,
+    signer: &SigningKey,
+    cancel: &Cancellation,
+) -> Domain<Outcome> {
+    let body: Tail = unpack(&action.body)?;
+    let limit = page_limit(body.limit)?;
+    let access = conversations::access(db, action, now)?;
+    let encrypted = access.confidentiality != RoomConfidentiality::Community;
+    if encrypted != (action.operation == Operation::CryptoTail) {
+        return invalid("HistoryPrivacyMode");
+    }
+    if encrypted {
+        crate::confidential::check_reader(db, action, now)?;
+    }
+    if cancel.is_cancelled() {
+        return Err(Fault::Reject(ErrorCode::Unavailable, "Cancelled"));
+    }
+    let context = digest(&encode(&(
+        "history",
+        access.access_digest,
+        permit.history_from,
+        permit.history_until,
+    ))?);
+    let from = access
+        .history_from
+        .max(permit.history_from)
+        .max(now.upper_ms.saturating_sub(RETENTION));
+    let until = permit.history_until.min(i64::MAX as u64);
+    // The room/sequence index bounds raw candidates, even when every row is ignored.
+    // Read payloads only after their metadata fits the scan and response budgets.
+    let mut stmt = db.prepare(
+        "SELECT e.sequence,e.created,e.kind,length(e.event),EXISTS(SELECT 1 FROM hrc_filters f WHERE f.owner=?2 AND f.ignored=1 AND f.subject IN(e.actor,e.represented,e.operator)) FROM hrc_events e WHERE e.room=?1 ORDER BY e.sequence DESC LIMIT 256",
+    )?;
+    let mut rows = stmt.query(params![
+        access.room.to_string(),
+        action.actor.represented().to_string()
+    ])?;
+    let mut result = Vec::new();
+    let mut scanned_bytes = 0usize;
+    let mut response_bytes = 0usize;
+    while let Some(row) = rows.next()? {
+        if cancel.is_cancelled() {
+            return Err(Fault::Reject(ErrorCode::Unavailable, "Cancelled"));
+        }
+        if result.len() == limit {
+            break;
+        }
+        let size: usize = row.get(3)?;
+        scanned_bytes = scanned_bytes.saturating_add(size);
+        if scanned_bytes > 1024 * 1024 {
+            break;
+        }
+        let created: u64 = row.get(1)?;
+        let kind: u16 = row.get(2)?;
+        let ignored: bool = row.get(4)?;
+        if created < from || created > until || (ignored && (!encrypted || matches!(kind, 20..=22)))
+        {
+            continue;
+        }
+        if response_bytes.saturating_add(size) > if encrypted { 240 * 1024 } else { 48 * 1024 } {
+            break;
+        }
+        let sequence: u64 = row.get(0)?;
+        let data: Vec<u8> = db.query_row(
+            "SELECT event FROM hrc_events WHERE room=?1 AND sequence=?2",
+            params![access.room.to_string(), sequence],
+            |r| r.get(0),
+        )?;
+        response_bytes += data.len();
+        result.push(decode(&data)?);
+    }
+    result.reverse();
+    PageContext {
+        db,
+        action,
+        now,
+        signer,
+        access: &access,
+        digest: context,
+        start: access.sequence,
+        bytes: CRYPTO_FRAME_BYTES,
+        include_members: true,
+    }
+    .finish(result, access.sequence, false)
 }
 pub(super) fn search(
     db: &Transaction<'_>,

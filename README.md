@@ -21,7 +21,9 @@ explicit agent delegation and two-network federation are required capabilities.
 
 The [local client guide](Documentation/LocalClient.md) covers drafts, connection
 states, contact trust and home-service selection. [Service bots](Documentation/ServiceBots.md)
-use the same scoped API and do not require a language model.
+use the same scoped API, with deterministic replies or local llama.cpp and Ollama
+adapters. Model bots support bounded, persistent room context and inspect/reset
+commands.
 The [installation guide](Documentation/Installation.md) covers packages and upgrades;
 the [operations guide](Documentation/Operations.md) describes stopped backups,
 continuity, retention and outage recovery.

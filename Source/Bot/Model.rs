@@ -1,25 +1,56 @@
 // SPDX-License-Identifier: Apache-2.0
-//! A bounded local inference request produces text only; model output never becomes an operation.
+//! Local model configuration and bounded conversation packing; adapters produce text only.
+#[path = "Adapters/Http.rs"]
+mod http;
+#[path = "Adapters/LlamaCpp.rs"]
+mod llama_cpp;
+#[path = "Adapters/Ollama.rs"]
+mod ollama;
 use super::{Error, Result};
-use serde::Serialize;
-use serde_json::{Value, json};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::{
-    io::{Read, Write},
     net::SocketAddr,
-    os::fd::AsRawFd,
-    path::{Path, PathBuf},
-    process::{Child, Command, Stdio},
+    path::PathBuf,
     sync::atomic::{AtomicBool, Ordering},
-    thread,
     time::{Duration, Instant},
 };
 
-const INPUT_BYTES: usize = 8192;
+const INPUT_BYTES: usize = 128 * 1024;
 const OUTPUT_BYTES: usize = 4096;
-const RESPONSE_BYTES: usize = 65536;
+const RESPONSE_BYTES: usize = 256 * 1024;
+const MAX_MESSAGES: usize = 66;
 const DEADLINE: Duration = Duration::from_secs(60);
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "camelCase")]
+pub enum Adapter {
+    #[default]
+    LlamaCpp,
+    Ollama,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Role {
+    System,
+    User,
+    Assistant,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChatMessage {
+    pub role: Role,
+    pub content: String,
+}
+fn default_context() -> u32 {
+    4096
+}
+fn default_output() -> u32 {
+    512
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LocalModel {
     /// Absolute path of the locally installed curl executable.
     pub curl: PathBuf,
@@ -28,6 +59,12 @@ pub struct LocalModel {
     pub prefix: String,
     /// Trigger without a prefix; all model modes require exactly one configured room.
     pub all_human_messages: bool,
+    #[serde(default)]
+    pub adapter: Adapter,
+    #[serde(default = "default_context")]
+    pub context_tokens: u32,
+    #[serde(default = "default_output")]
+    pub output_tokens: u32,
 }
 impl LocalModel {
     pub(super) fn validate(&self) -> Result<()> {
@@ -38,6 +75,8 @@ impl LocalModel {
             || self.model.is_empty()
             || self.model.len() > 128
             || self.model.chars().any(char::is_control)
+            || self.model.to_ascii_lowercase().contains(":cloud")
+            || self.model.to_ascii_lowercase().ends_with("-cloud")
             || self.prefix.is_empty()
             || self.prefix.len() > 32
             || !self.prefix.starts_with('!')
@@ -46,6 +85,9 @@ impl LocalModel {
                 .prefix
                 .chars()
                 .any(|c| c.is_whitespace() || c.is_control())
+            || !(2048..=32768).contains(&self.context_tokens)
+            || !(128..=2048).contains(&self.output_tokens)
+            || self.output_tokens.saturating_add(1024) >= self.context_tokens
         {
             return Err(Error::Configuration);
         }
@@ -61,41 +103,72 @@ impl LocalModel {
         }
         (self.all_human_messages && !text.is_empty() && !text.starts_with('!')).then_some(text)
     }
-    pub(super) fn generate(&self, prompt: &str, stop: &AtomicBool) -> Result<Option<String>> {
+    /// Preliminary content budget. llama.cpp subsequently verifies actual template tokens;
+    /// Ollama's byte budget is deliberately conservative and is not a tokenizer count.
+    pub(crate) fn input_budget_bytes(&self) -> usize {
+        let available = self
+            .context_tokens
+            .saturating_sub(self.output_tokens)
+            .saturating_sub(1024) as usize;
+        match self.adapter {
+            Adapter::LlamaCpp => available.saturating_mul(4).min(INPUT_BYTES / 2),
+            Adapter::Ollama => available.min(INPUT_BYTES / 2),
+        }
+    }
+    pub(super) fn generate(
+        &self,
+        messages: &[ChatMessage],
+        stop: &AtomicBool,
+    ) -> Result<Option<String>> {
         self.validate()?;
         if stop.load(Ordering::Acquire) {
             return Ok(None);
         }
-        if prompt.len() > INPUT_BYTES || crate::text::message(prompt).is_err() {
-            return Err(Error::Configuration);
+        let deadline = Instant::now() + DEADLINE;
+        let messages = fit_messages(messages, self.input_budget_bytes())?;
+        match self.adapter {
+            Adapter::LlamaCpp => llama_cpp::generate(self, messages, stop, deadline),
+            Adapter::Ollama => ollama::generate(self, messages, stop, deadline),
         }
-        let body = serde_json::to_vec(&json!({
-            "model": self.model,
-            "messages": [
-                {"role": "system", "content": "You are a local chat assistant in HyperNet Relay Chat. Reply to the user's message clearly and concisely, using plain text. You have no tools, cannot perform actions, and receive only this message, not earlier conversation. Do not claim to have performed actions. Keep replies under 1000 characters. Do not include reasoning or thinking blocks."},
-                {"role": "user", "content": prompt}
-            ],
-            "stream": false,
-            "max_tokens": 512,
-            "temperature": 0.6,
-            "chat_template_kwargs": {"enable_thinking": false}
-        }))
-        .map_err(|_| Error::Configuration)?;
-        let bytes = request(&self.curl, self.endpoint, &body, stop, DEADLINE)?;
-        bytes.map(|bytes| response(&bytes)).transpose()
     }
 }
 
-fn response(bytes: &[u8]) -> Result<String> {
-    if bytes.len() > RESPONSE_BYTES {
+fn fit_messages(messages: &[ChatMessage], budget: usize) -> Result<Vec<ChatMessage>> {
+    if !(2..=MAX_MESSAGES).contains(&messages.len())
+        || messages.first().is_none_or(|m| m.role != Role::System)
+        || messages.last().is_none_or(|m| m.role != Role::User)
+        || messages[1..].iter().any(|m| m.role == Role::System)
+        || messages.iter().any(|m| {
+            m.content.is_empty()
+                || m.content
+                    .chars()
+                    .any(|c| c.is_control() && !matches!(c, '\n' | '\t'))
+        })
+        || messages.iter().map(|m| m.content.len()).sum::<usize>() > INPUT_BYTES
+    {
         return Err(Error::ModelResponse);
     }
-    let value: Value = serde_json::from_slice(bytes).map_err(|_| Error::ModelResponse)?;
-    let choices = value["choices"].as_array().ok_or(Error::ModelResponse)?;
-    if choices.len() != 1 || choices[0]["finish_reason"] != "stop" {
-        return Err(Error::ModelResponse);
+    let mut fitted = messages.to_vec();
+    // Include a per-turn allowance in addition to the provider's fixed template reserve.
+    while fitted.iter().map(|m| m.content.len() + 32).sum::<usize>() > budget {
+        if !drop_oldest(&mut fitted) {
+            return Err(Error::ModelResponse);
+        }
     }
-    let message = &choices[0]["message"];
+    Ok(fitted)
+}
+fn drop_oldest(messages: &mut Vec<ChatMessage>) -> bool {
+    if messages.len() <= 2 {
+        return false;
+    }
+    messages.remove(1);
+    // Do not leave an orphaned assistant answer as the oldest historical turn.
+    while messages.len() > 2 && messages[1].role == Role::Assistant {
+        messages.remove(1);
+    }
+    true
+}
+fn text_response(message: &Value) -> Result<String> {
     if message["role"] != "assistant"
         || !message["function_call"].is_null()
         || (!message["tool_calls"].is_null()
@@ -113,130 +186,6 @@ fn response(bytes: &[u8]) -> Result<String> {
         return Err(Error::ModelResponse);
     }
     Ok(text.to_owned())
-}
-
-struct Request(Child);
-impl Drop for Request {
-    fn drop(&mut self) {
-        // Also covers cancellation, invalid output and I/O errors, without leaving an orphan.
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
-fn nonblocking(fd: &impl AsRawFd) -> Result<()> {
-    let fd = fd.as_raw_fd();
-    // The descriptor is an owned child pipe and stays live throughout both calls.
-    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
-    if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
-        return Err(Error::ModelUnavailable);
-    }
-    Ok(())
-}
-
-fn request(
-    curl: &Path,
-    endpoint: SocketAddr,
-    body: &[u8],
-    stop: &AtomicBool,
-    timeout: Duration,
-) -> Result<Option<Vec<u8>>> {
-    // No inherited curl configuration, proxies, redirects, hostname resolution, or external URL.
-    let mut child = Request(
-        Command::new(curl)
-            .args([
-                "--disable",
-                "--silent",
-                "--fail",
-                "--proxy",
-                "",
-                "--noproxy",
-                "*",
-                "--proto",
-                "=http",
-                "--no-location",
-                "--max-redirs",
-                "0",
-                "--connect-timeout",
-                "2",
-                "--max-time",
-                "60",
-                "--max-filesize",
-                "65536",
-                "--header",
-                "Content-Type: application/json",
-                "--data-binary",
-                "@-",
-                "--url",
-            ])
-            .arg(format!("http://{endpoint}/v1/chat/completions"))
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|_| Error::ModelUnavailable)?,
-    );
-    let input = child.0.stdin.take().ok_or(Error::ModelUnavailable)?;
-    let mut output = child.0.stdout.take().ok_or(Error::ModelUnavailable)?;
-    nonblocking(&input)?;
-    nonblocking(&output)?;
-    let mut input = Some(input);
-    let mut written = 0;
-    let mut bytes = Vec::new();
-    let deadline = Instant::now() + timeout;
-    loop {
-        if stop.load(Ordering::Acquire) {
-            return Ok(None);
-        }
-        if Instant::now() >= deadline {
-            return Err(Error::ModelTimeout);
-        }
-        if let Some(pipe) = input.as_mut() {
-            match pipe.write(&body[written..]) {
-                Ok(count) => written += count,
-                Err(error)
-                    if matches!(
-                        error.kind(),
-                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
-                    ) => {}
-                Err(_) => return Err(Error::ModelUnavailable),
-            }
-            if written == body.len() {
-                input = None;
-            }
-        }
-        let mut buffer = [0u8; 4096];
-        let mut eof = false;
-        // At most 64 KiB per iteration, so a busy writer cannot delay cancellation.
-        for _ in 0..16 {
-            match output.read(&mut buffer) {
-                Ok(0) => {
-                    eof = true;
-                    break;
-                }
-                Ok(count) => {
-                    if bytes.len() + count > RESPONSE_BYTES {
-                        return Err(Error::ModelResponse);
-                    }
-                    bytes.extend_from_slice(&buffer[..count]);
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
-                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(_) => return Err(Error::ModelUnavailable),
-            }
-        }
-        if let Some(status) = child.0.try_wait().map_err(|_| Error::ModelUnavailable)? {
-            if !status.success() {
-                if status.code() == Some(28) {
-                    return Err(Error::ModelTimeout);
-                }
-                return Err(Error::ModelUnavailable);
-            }
-            if eof {
-                return Ok(Some(bytes));
-            }
-        }
-        thread::sleep(Duration::from_millis(20));
-    }
 }
 
 #[cfg(test)]
