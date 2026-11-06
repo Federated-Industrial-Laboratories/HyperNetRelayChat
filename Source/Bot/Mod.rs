@@ -1,10 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
-//! A persistent deterministic help bot shares the authenticated client and exact outbox.
+//! Persistent service bots share the authenticated client and exact outbox.
+#[path = "Model.rs"]
+mod model;
 #[path = "Runtime.rs"]
 mod runtime;
 #[path = "State.rs"]
 mod state;
 use crate::{client, protocol::*};
+pub use model::LocalModel;
 use std::{
     path::PathBuf,
     sync::{Arc, atomic::AtomicBool},
@@ -20,6 +23,8 @@ pub struct Config {
     pub grant: Option<Id>,
     /// Explicitly abandon a stale resume position and catch up without historical triggers.
     pub resynchronise: bool,
+    /// Explicit opt-in to inference on this host; None retains deterministic help only.
+    pub model: Option<LocalModel>,
 }
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -39,6 +44,12 @@ pub enum Error {
     Denied,
     #[error("the service requested bounded backoff")]
     RetryLater { delay_ms: u64 },
+    #[error("the local model request failed")]
+    ModelUnavailable,
+    #[error("the local model exceeded its inference deadline")]
+    ModelTimeout,
+    #[error("the local model returned invalid or excessive output")]
+    ModelResponse,
     #[error(transparent)]
     Client(#[from] client::Error),
 }
@@ -63,6 +74,12 @@ impl Config {
         rooms.dedup();
         if rooms.len() != self.rooms.len() {
             return Err(Error::Configuration);
+        }
+        if let Some(model) = &self.model {
+            model.validate()?;
+            if self.rooms.len() != 1 {
+                return Err(Error::Configuration);
+            }
         }
         Ok(())
     }

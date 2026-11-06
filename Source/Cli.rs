@@ -139,6 +139,13 @@ pub enum Profile {
         #[arg(long)]
         profile: PathBuf,
     },
+    /// Set the account display name without changing its identity.
+    Nickname {
+        #[arg(long)]
+        profile: PathBuf,
+        #[arg(long)]
+        nickname: String,
+    },
 }
 #[derive(Subcommand)]
 pub enum Room {
@@ -436,6 +443,16 @@ pub fn service(command: Service) -> Result<Json, &'static str> {
 pub fn profile(command: Profile) -> Result<Json, &'static str> {
     match command {
         Profile::Identity { command } => identity_cli::run(command),
+        Profile::Nickname { profile, nickname } => {
+            let mut c = open(&profile)?;
+            let account = c.profile.registration.account;
+            call(
+                &mut c,
+                Operation::AccountSetNickname,
+                Target::Account(account),
+                &hrc::identity::Nickname { nickname },
+            )
+        }
         Profile::Create {
             directory,
             invitation,

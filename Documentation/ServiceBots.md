@@ -1,9 +1,11 @@
-# Deterministic service bots
+# Service bots
 
 `hrc bot` runs a persistent, headless help bot through the shared authenticated
-client and encrypted outbox. It requires a separately enrolled agent endpoint
+client and encrypted outbox, with optional local-model replies. It requires a
+separately enrolled agent endpoint
 with an explicit human operator. It does not use an operator's endpoint keys,
-invoke a language model, execute tools, or load scripts. Human classification
+execute tools, or load scripts. Model inference requires explicit configuration
+below. Human classification
 describes an account; it does not prove that a person typed a message.
 
 Create and enrol the agent profile using [conversation setup](ConversationSetup.md).
@@ -32,9 +34,72 @@ the event. It records completion at that instant, not a promise of continuing
 connectivity. The library's `run_observed` callback has these same once-only
 semantics; `run` provides the ordinary silent library entry point.
 
+## Local model chat
+
+Run a llama.cpp server on the bot's host, bound to `127.0.0.1` or `::1`, with a
+model that supports its `/v1/chat/completions` interface. Configure the server to
+disable prompt logging. Enrol a separate agent account and set its nickname to the
+name users should see, such as `Qwen`; the account retains its agent classification.
+
+```sh
+hrc bot --profile /absolute/private/qwen \
+  --room ROOM --help-text 'Qwen: type !qwen followed by a message.' \
+  --model-endpoint 127.0.0.1:8080 --model Qwen \
+  --poll-interval-ms 1000
+```
+
+`--model-endpoint` and `--model` explicitly enable inference for exactly one
+selected room in every model mode. The deterministic bot still supports up to
+eight rooms. The endpoint must
+be a numeric loopback socket address, not a URL or hostname. `--model-prefix`
+defaults to `!qwen`; for example, `!qwen Explain the topic` submits only
+`Explain the topic` to the model. `!help` always returns the fixed help text.
+HRC uses an installed curl executable at `/usr/bin/curl`; `--model-curl` selects
+another absolute regular-file path. Curl configuration files, proxies and
+redirects are disabled. Inference stays on the bot's host; conversation transport
+still uses the authenticated HyperNet client.
+
+Add `--all-human-messages` for natural chat in exactly one explicitly selected
+room. New original human messages then trigger replies without a prefix. Other
+`!` commands, agent messages, delegated messages, replies and automated causation
+never trigger inference. Only one reply is generated at a time. Existing rate and
+catch-up rules still apply, so additional messages within a rate interval or
+history page can be skipped. Use a dedicated bot conversation room for this mode.
+
+Each inference request contains a fixed text-only instruction and the current
+message, with no retained conversational context, other room history, tools or
+credentials. A follow-up must include the context it needs. Explicitly enabling
+the model allows this host's model process to read the selected messages,
+including locally decrypted confidential messages for which the agent is an
+authorised participant. The model server must remain locally operated; this
+adapter provides no external-provider disclosure mode.
+
+Requests use nonstreaming generation, a 512-token output cap and
+`chat_template_kwargs.enable_thinking=false` for Qwen-compatible templates. Input
+is limited to 8,192 bytes and the normal 2,000-grapheme message limit. The entire
+JSON response is bounded to 65,536 bytes. Output must be one complete assistant
+text reply, at most 4,096 bytes and within normal protocol text limits; tool calls,
+truncated generation, invalid text and excessive output are rejected. The request
+has a 60-second deadline, with a two-second connection limit. Stop requests cancel
+and reap curl without creating a reply plan. A model connection failure, timeout
+or invalid response produces a short fixed failure notice instead of model text.
+That notice uses the same attributed reply, current permission checks, rate
+limit and atomic outbox/cursor transaction. Successful submission advances past
+the failed trigger so later messages can proceed; reconnect resolves the exact
+stored notice without rerunning inference. Configuration, authority and storage
+failures remain terminal. Prompt and response bodies are not written to
+diagnostic output by HRC.
+
+Generation happens before the exact signed outbox transaction. Current service
+permission is checked when the reply is submitted, after generation. Changing
+model settings requires no pending plan and resets catch-up, like other bot
+configuration changes. Presence identifies a local model bot independently of
+the human operator. Long inference can allow its short-lived presence to expire;
+presence refresh resumes with the next bounded bot cycle.
+
 ## Rules and current authority
 
-The bot replies only to a new original `MessageSend` containing `!help` after
+The deterministic rule replies only to a new original `MessageSend` containing `!help` after
 whitespace trimming, from a direct account actor. Agent actors, delegated actors,
 replies and events already carrying automated causation do not trigger it. The
 reply names the original event as both parent and causation. The service's normal
@@ -108,12 +173,19 @@ Unknown original outcomes require operator attention. Stop the bot before using
 Abandonment stops resubmission while preserving the immutable unknown record; it
 does not assert rejection or retract an already committed reply.
 
-Expired cursors or changed access context require an explicit restart with
-`--resynchronise`. This replaces the stale cursor and catches up without old
+An authenticated `CursorContext` refusal, including an ordinary room membership
+change, resets that room's bot cursor and catches up without triggering old
+messages. The next normal polling cycle rechecks current authority; no immediate
+retry loop is used. Exact pending plans, decrypted archives and MLS state survive.
+Permission refusal, expired authority and actual history gaps are not treated as
+context changes.
+
+History gaps, invalid history positions or other unrecoverable continuation states
+require an explicit restart with `--resynchronise`. This replaces the stale cursor and catches up without old
 triggers. It also resets the shared encrypted-history continuation and gap while
 preserving decrypted archives and MLS state. Current authority is checked again
 on resumed reads; no pending exact effect is discarded. Changing the configured
-rooms, help text or selected grant requires no outstanding bot plan and starts
+rooms, help text, model settings or selected grant requires no outstanding bot plan and starts
 the same no-trigger catch-up. Both transitions preserve existing outbox outcomes.
 
 The bot schema accepts version 1 only. Unknown schemas and corrupt encrypted
