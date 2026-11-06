@@ -12,17 +12,23 @@ Core and Suite installations, the release publisher public key, a readable
 chrony command socket, the host IPv4 address, ports, display name and nickname.
 The currently supported route profile requires the advertised IPv4 address to be
 assigned to the host. Separate NAT bind and advertised addresses are not
-supported. Loopback is suitable for a local installation; a reachable LAN or
-public address is needed for other computers. HRC does not change firewall or
-router settings.
+supported. Choose a reachable LAN or public IPv4 from **Host interface**, or enter
+an address assigned to an active interface on this host. No address is selected
+automatically. Loopback cannot connect the isolated native containers, including
+on a single-host installation. HRC does not change firewall or router settings.
 
 Review the exact proposed topology, organisational privacy mode, resource limits
 and finite consent interval. The preview also verifies the signed installed
-packages. Applying that preview creates distinct identities, obtains native
+packages, the selected host address and conflicts with the four requested
+authority subnets. An incomplete subnet inspection blocks fresh setup. The three
+service networks use native automatic allocation. Applying that preview creates distinct identities, obtains native
 operator consent, starts the approved services and creates the first desktop
 account. Setup reports Ready only after a live Suite authority operation and an
 authenticated HRC client session both succeed. A process running by itself is
 not that evidence.
+
+Native failures show the failed step and a bounded, redacted diagnostic when one
+is available. Existing keys and pending operations remain in place for resumption.
 
 The single-owner recovery key and certificate issuer remain in the selected
 recovery folder outside the active runtime. Protect and back up that folder
@@ -64,6 +70,13 @@ operator. HyperNet grants and HRC agent delegation remain separate permissions.
 
 Stop and Start act only on the units derived from this hosting configuration.
 They preserve keys, profiles, conversation history and native replay protection.
+Native container-network reservations also remain available for restart. A
+second host configuration needs a different unused subnet range; stopping the
+first host does not release those reservations. Native withdrawal is permanent
+and releases the withdrawn deployment's reservations.
+For resumption, HRC verifies the exact private hosting journal and configuration;
+it does not claim that the saved subnets are free. Native runtime checks remain
+authoritative for retained reservations and every later allocation.
 These are session services; boot startup and user lingering are not silently
 enabled. The desktop can display the durable phase of an interrupted setup
 without acquiring its mutation lock.

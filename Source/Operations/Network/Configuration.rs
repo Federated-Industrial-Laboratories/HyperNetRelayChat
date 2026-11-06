@@ -78,8 +78,8 @@ impl Configuration {
             publisher_key: PathBuf::new(),
             chronyc: PathBuf::from("/usr/bin/chronyc"),
             chrony_socket: PathBuf::from("/run/chrony/chronyd.sock"),
-            bind_address: Ipv4Addr::LOCALHOST,
-            advertised_address: Ipv4Addr::LOCALHOST,
+            bind_address: Ipv4Addr::UNSPECIFIED,
+            advertised_address: Ipv4Addr::UNSPECIFIED,
             relay_port: 24443,
             authority_first_port: 24450,
             subnet_octet: 220,
@@ -124,11 +124,10 @@ impl Configuration {
                 "acknowledge that this host operates both relay and destination",
             ));
         }
-        if invalid_address(self.advertised_address)
-            || self.bind_address.is_multicast()
-            || self.bind_address.is_broadcast()
-        {
-            return Err(Error::Configuration("explicit unicast IPv4 address"));
+        if !valid_host_address(self.advertised_address) || !valid_host_address(self.bind_address) {
+            return Err(Error::Configuration(
+                "choose this host's reachable LAN or public IPv4 address; isolated native containers cannot use loopback or an unspecified address",
+            ));
         }
         if self.bind_address != self.advertised_address {
             return Err(Error::Configuration(
@@ -195,8 +194,52 @@ pub(super) fn clean_path(path: &Path) -> Result<()> {
     }
     Ok(())
 }
-fn invalid_address(ip: Ipv4Addr) -> bool {
-    ip.is_unspecified() || ip.is_multicast() || ip.is_broadcast()
+pub fn valid_host_address(ip: Ipv4Addr) -> bool {
+    !ip.is_unspecified() && !ip.is_loopback() && !ip.is_multicast() && !ip.is_broadcast()
+}
+/// Enumerate active local addresses without probing routes or choosing an address.
+pub fn local_addresses() -> Result<Vec<Ipv4Addr>> {
+    struct Addresses(*mut libc::ifaddrs);
+    impl Drop for Addresses {
+        fn drop(&mut self) {
+            unsafe { libc::freeifaddrs(self.0) };
+        }
+    }
+    let mut first = std::ptr::null_mut();
+    if unsafe { libc::getifaddrs(&mut first) } != 0 {
+        return Err(Error::Prerequisite(
+            "local IPv4 interfaces could not be inspected",
+        ));
+    }
+    let _owned = Addresses(first);
+    let mut addresses = Vec::new();
+    let mut current = first;
+    let mut count = 0;
+    while !current.is_null() {
+        count += 1;
+        if count > 1024 {
+            return Err(Error::Prerequisite(
+                "local interface inventory exceeds its bound",
+            ));
+        }
+        // getifaddrs owns this list until _owned is dropped; the family check
+        // precedes reading the corresponding sockaddr_in representation.
+        let item = unsafe { &*current };
+        if item.ifa_flags & libc::IFF_UP as u32 != 0
+            && !item.ifa_addr.is_null()
+            && unsafe { (*item.ifa_addr).sa_family } == libc::AF_INET as u16
+        {
+            let address = unsafe { &*item.ifa_addr.cast::<libc::sockaddr_in>() };
+            let address = Ipv4Addr::from(address.sin_addr.s_addr.to_ne_bytes());
+            if valid_host_address(address) {
+                addresses.push(address);
+            }
+        }
+        current = item.ifa_next;
+    }
+    addresses.sort_unstable();
+    addresses.dedup();
+    Ok(addresses)
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

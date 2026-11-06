@@ -95,9 +95,15 @@ pub(super) fn raw(
     let program = program
         .canonicalize()
         .map_err(|_| Error::Native(phase.into()))?;
-    let result = native::run(&program, args, cancel, end);
+    let result = native::run_diagnostic(&program, args, cancel, end);
     check(cancel, end)?;
-    result.map_err(|_| Error::Native(phase.into()))
+    result.map_err(|failure| {
+        let context = match failure.detail {
+            Some(detail) => format!("{phase}: {detail}"),
+            None => phase.into(),
+        };
+        Error::Native(context)
+    })
 }
 pub(super) fn config_digest(c: &Configuration) -> Result<String> {
     Ok(digest(&serde_json::to_vec(&json!({"format":"HrcHostingReview/1","configuration":c,"core":crate::operations::packages::Product::Core.version(),"suite":crate::operations::packages::Product::Suite.version(),"publisher":crate::operations::packages::PUBLISHER})).map_err(|_| Error::State)?))
@@ -106,6 +112,12 @@ pub fn preview(c: &Configuration, cancel: &AtomicBool) -> Result<Preview> {
     c.validate()?;
     let end = Instant::now() + Duration::from_secs(180);
     let mut requirements = Vec::new();
+    let addresses = super::local_addresses()?;
+    requirements.push(Requirement {
+        component: "Host IPv4 address".into(),
+        ready: addresses.contains(&c.advertised_address),
+        action: "Select an active LAN or public IPv4 assigned to this host and reachable by the native containers. Loopback, a remote address and separate NAT bind/advertised addresses are unsupported.".into(),
+    });
     for (component, path, action) in [
         (
             "Podman",
@@ -185,6 +197,7 @@ pub fn preview(c: &Configuration, cancel: &AtomicBool) -> Result<Preview> {
         end,
     )
     .map_err(|_| Error::Package)?;
+    requirements.push(super::subnets::requirement(c, cancel, end)?);
     let ready = requirements.iter().all(|v| v.ready);
     let review_digest = digest(
         &serde_json::to_vec(&json!({"configuration":config_digest(c)?,"core":core,"suite":suite}))

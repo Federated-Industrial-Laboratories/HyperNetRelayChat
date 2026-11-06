@@ -141,6 +141,81 @@ fn failed_native_command_never_displays_its_private_stderr() {
 }
 
 #[test]
+fn operator_native_diagnostics_strip_controls_and_private_material() {
+    let shell = Path::new("/bin/sh").canonicalize().unwrap();
+    let args = native::strings(&[
+        "-c",
+        r#"printf private-success-output; printf '\033[31mError: subnet overlaps\033[0m; missing slirp4netns\n\033]8;;https://hidden.invalid\007helper\033]8;;\007\n\342\200\256direction\nargument %s\n-----BEGIN PRIVATE KEY-----\nprivate-key-material\n-----END PRIVATE KEY-----\ntoken=private-token-material\nabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd\n' "$1" >&2; exit 7"#,
+        "--key-file",
+        "private-argument-value",
+    ]);
+    let failure = native::run_diagnostic(
+        &shell,
+        &args,
+        &AtomicBool::new(false),
+        Instant::now() + Duration::from_secs(5),
+    )
+    .unwrap_err();
+    assert_eq!(failure.category, Error::NativeRefused);
+    let detail = failure.detail.unwrap();
+    assert!(detail.contains("Error: subnet overlaps") && detail.contains("missing slirp4netns"));
+    assert!(detail.contains("helper") && detail.contains("direction"));
+    for private in [
+        "private-success-output",
+        "private-argument-value",
+        "private-key-material",
+        "private-token-material",
+        "abcdef",
+        "hidden.invalid",
+        "[31m",
+    ] {
+        assert!(!detail.contains(private), "leaked {private}");
+    }
+    assert!(
+        !detail
+            .chars()
+            .any(|c| c.is_control() || hrc::text::sensitive(c))
+    );
+}
+
+#[test]
+fn operator_native_reports_are_bounded_and_only_returned_for_failed_exits() {
+    let shell = Path::new("/bin/sh").canonicalize().unwrap();
+    let cancel = AtomicBool::new(false);
+    let end = Instant::now() + Duration::from_secs(5);
+    let failure = native::run_diagnostic(
+        &shell,
+        &native::strings(&["-c", "i=0; while [ $i -lt 800 ]; do printf 'bounded diagnostic ' >&2; i=$((i+1)); done; exit 1"]),
+        &cancel,
+        end,
+    ).unwrap_err();
+    let detail = failure.detail.unwrap();
+    assert!(detail.len() <= 2048 && detail.ends_with("[truncated]"));
+    assert_eq!(
+        native::run_diagnostic(
+            &shell,
+            &native::strings(&["-c", "printf success; printf private-stderr >&2"]),
+            &cancel,
+            end,
+        )
+        .unwrap(),
+        b"success"
+    );
+    let stopped = native::run_diagnostic(&shell, &[], &AtomicBool::new(true), end).unwrap_err();
+    assert_eq!(stopped.category, Error::Cancelled);
+    assert!(stopped.detail.is_none());
+    let limited = native::run_diagnostic(
+        &shell,
+        &native::strings(&["-c", "exec /usr/bin/yes 1>&2"]),
+        &cancel,
+        end,
+    )
+    .unwrap_err();
+    assert_eq!(limited.category, Error::OutputLimit);
+    assert!(limited.detail.is_none());
+}
+
+#[test]
 fn unbounded_native_stdout_is_stopped_and_reaped() {
     let program = Path::new("/usr/bin/yes").canonicalize().unwrap();
     assert_eq!(

@@ -16,6 +16,8 @@ pub(super) struct Form {
     agent: bool,
     operator: String,
     address: String,
+    addresses: Vec<std::net::Ipv4Addr>,
+    address_error: Option<String>,
 }
 impl Form {
     pub fn progress(&self) -> ops::Result<String> {
@@ -43,6 +45,10 @@ impl Form {
             .unwrap_or_else(|| "/".into())
             .join(".hrc/n")
             .join(&id);
+        let (addresses, address_error) = match ops::network::local_addresses() {
+            Ok(addresses) => (addresses, None),
+            Err(error) => (Vec::new(), Some(error.to_string())),
+        };
         Self {
             config: Configuration::at(root),
             file: ops::root().join("Networks").join(format!("{id}.json")),
@@ -56,7 +62,9 @@ impl Form {
             registration: PathBuf::new(),
             agent: false,
             operator: String::new(),
-            address: "127.0.0.1".into(),
+            address: String::new(),
+            addresses,
+            address_error,
         }
     }
 }
@@ -176,7 +184,34 @@ impl Workspace {
             );
         });
         c::section(ui, "Hosting consent", |ui| {
-            field(ui, "Listener IPv4", &mut self.network.address);
+            c::field(ui, "Host interface", |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    egui::ComboBox::from_id_salt("hosting-address")
+                        .selected_text("Choose a host IPv4")
+                        .width(240.0)
+                        .show_ui(ui, |ui| {
+                            for address in &self.network.addresses {
+                                let value = address.to_string();
+                                if ui.selectable_label(self.network.address == value, &value).clicked() {
+                                    self.network.address = value;
+                                }
+                            }
+                        });
+                    if c::button(ui, "Refresh").clicked() {
+                        match ops::network::local_addresses() {
+                            Ok(addresses) => {
+                                self.network.addresses = addresses;
+                                self.network.address_error = None;
+                            }
+                            Err(error) => self.network.address_error = Some(error.to_string()),
+                        }
+                    }
+                });
+                if let Some(error) = &self.network.address_error {
+                    ui.colored_label(ui.visuals().error_fg_color, error);
+                }
+            });
+            field(ui, "Host IPv4", &mut self.network.address);
             if let Ok(address) = self.network.address.parse() {
                 self.network.config.advertised_address = address;
                 self.network.config.bind_address = address;
@@ -191,7 +226,7 @@ impl Workspace {
                     egui::DragValue::new(&mut self.network.config.lifetime_hours).range(1..=168),
                 );
             });
-            ui.small("Use an address assigned to this host. No firewall rule, router mapping or direct chat fallback is created.");
+            ui.small("Choose this host's reachable LAN or public IPv4. Isolated native containers cannot use loopback. Firewall and router settings remain operator-controlled.");
             ui.collapsing("Advanced limits", |ui| {
                 ui.horizontal(|ui| {
                     ui.label("First authority port (four consecutive ports)");
@@ -249,11 +284,15 @@ impl Workspace {
             });
         });
         });
-        let valid_address = self.network.address.parse::<std::net::Ipv4Addr>().is_ok();
+        let valid_address = self
+            .network
+            .address
+            .parse::<std::net::Ipv4Addr>()
+            .is_ok_and(ops::network::valid_host_address);
         if !valid_address {
             ui.colored_label(
                 ui.visuals().error_fg_color,
-                "Enter a complete IPv4 address before reviewing this setup.",
+                "Choose a non-loopback LAN or public IPv4 assigned to this host before reviewing setup.",
             );
         }
         if before != serde_json::to_vec(&self.network.config).ok() || !valid_address {

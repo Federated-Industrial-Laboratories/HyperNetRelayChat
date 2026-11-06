@@ -14,9 +14,13 @@ mod lifecycle;
 mod renewal;
 #[path = "Services.rs"]
 mod services;
+#[path = "Subnets.rs"]
+mod subnets;
 
 pub use clients::{enrol_client, invite_client};
-pub use configuration::{Configuration, Preview, Requirement, Status};
+pub use configuration::{
+    Configuration, Preview, Requirement, Status, local_addresses, valid_host_address,
+};
 pub use engine::{apply, preview, progress};
 pub use lifecycle::{start, status, stop};
 pub use renewal::{renew, renewal_preview};

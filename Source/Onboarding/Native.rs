@@ -161,6 +161,30 @@ pub(crate) fn run(
     cancel: &AtomicBool,
     end: Instant,
 ) -> Result<Vec<u8>> {
+    run_diagnostic(program, args, cancel, end).map_err(|failure| failure.category)
+}
+
+#[derive(Debug)]
+pub(crate) struct Failure {
+    pub category: Error,
+    pub detail: Option<String>,
+}
+impl From<Error> for Failure {
+    fn from(category: Error) -> Self {
+        Self {
+            category,
+            detail: None,
+        }
+    }
+}
+
+/// Only explicit operator callers may display a bounded nonzero-exit diagnostic.
+pub(crate) fn run_diagnostic(
+    program: &Path,
+    args: &[String],
+    cancel: &AtomicBool,
+    end: Instant,
+) -> std::result::Result<Vec<u8>, Failure> {
     check(cancel, end)?;
     executable(program)?;
     let mut command = Command::new(program);
@@ -189,11 +213,160 @@ pub(crate) fn run(
             return if status.success() {
                 Ok(out)
             } else {
-                Err(Error::NativeRefused)
+                Err(Failure {
+                    category: Error::NativeRefused,
+                    detail: diagnostic(&err, args),
+                })
             };
         }
         std::thread::sleep(Duration::from_millis(10));
     }
+}
+
+fn diagnostic(bytes: &[u8], args: &[String]) -> Option<String> {
+    const LIMIT: usize = 2048;
+    // Drop terminal sequences, including OSC hyperlinks and control strings,
+    // before redaction. Keep no command line, stdout or key-file contents.
+    let mut plain = String::new();
+    let mut escape = 0;
+    for c in String::from_utf8_lossy(bytes).chars() {
+        match escape {
+            1 => {
+                escape = match c {
+                    '[' => 2,
+                    ']' | 'P' | 'X' | '^' | '_' => 3,
+                    _ => 0,
+                };
+                continue;
+            }
+            2 => {
+                if ('\u{40}'..='\u{7e}').contains(&c) {
+                    escape = 0;
+                }
+                continue;
+            }
+            3 => {
+                if matches!(c, '\u{7}' | '\u{9c}') {
+                    escape = 0;
+                } else if c == '\u{1b}' {
+                    escape = 4;
+                }
+                continue;
+            }
+            4 => {
+                escape = if c == '\\' { 0 } else { 3 };
+                continue;
+            }
+            _ => {}
+        }
+        escape = match c {
+            '\u{1b}' => 1,
+            '\u{9b}' => 2,
+            '\u{90}' | '\u{98}' | '\u{9d}' | '\u{9e}' | '\u{9f}' => 3,
+            _ => 0,
+        };
+        if escape != 0 || hrc::text::sensitive(c) || matches!(c, '\u{200c}' | '\u{200d}') {
+            continue;
+        }
+        if c == '\n' {
+            plain.push('\n');
+        } else if c.is_whitespace() {
+            plain.push(' ');
+        } else if !c.is_control() {
+            plain.push(c);
+        }
+    }
+    // Native parsers can quote argument values on failure. Never add them to
+    // the operator report, including values supplied with --option=value.
+    let mut values = args
+        .iter()
+        .enumerate()
+        .filter_map(|(index, argument)| {
+            argument
+                .strip_prefix('-')
+                .and_then(|v| v.split_once('='))
+                .map(|(_, v)| v)
+                .or_else(|| {
+                    (index > 0 && args[index - 1].starts_with('-') && !argument.starts_with('-'))
+                        .then_some(argument.as_str())
+                })
+                .filter(|v| !v.is_empty())
+        })
+        .collect::<Vec<_>>();
+    values.sort_by_key(|v| std::cmp::Reverse(v.len()));
+    let mut remaining = plain.as_str();
+    let mut redacted = String::new();
+    while !remaining.is_empty() && redacted.len() < 65536 {
+        if let Some(value) = values.iter().find(|v| remaining.starts_with(**v)) {
+            redacted.push_str("[argument]");
+            remaining = &remaining[value.len()..];
+        } else {
+            let c = remaining.chars().next().expect("nonempty diagnostic");
+            redacted.push(c);
+            remaining = &remaining[c.len_utf8()..];
+        }
+    }
+    if !remaining.is_empty() {
+        redacted.push_str(" [truncated]");
+    }
+    let mut lines = Vec::new();
+    let mut private_block = false;
+    for line in redacted.lines() {
+        if line.contains("-----BEGIN ") {
+            private_block = true;
+            lines.push("[private material omitted]".to_owned());
+        }
+        if private_block {
+            if line.contains("-----END ") {
+                private_block = false;
+            }
+            continue;
+        }
+        let lower = line.to_ascii_lowercase();
+        if [
+            "password",
+            "passphrase",
+            "secret",
+            "token",
+            "authorization:",
+            "private key",
+        ]
+        .iter()
+        .any(|word| lower.contains(word))
+        {
+            lines.push("[private detail omitted]".to_owned());
+            continue;
+        }
+        let line = line
+            .split_whitespace()
+            .map(|word| {
+                if word
+                    .split(|c: char| {
+                        !c.is_ascii_alphanumeric() && !matches!(c, '+' | '/' | '=' | '_' | '-')
+                    })
+                    .any(|part| part.len() >= 32)
+                {
+                    "[opaque value]"
+                } else {
+                    word
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        if !line.is_empty() {
+            lines.push(line);
+        }
+    }
+    let mut result = lines.join(" ");
+    if result.len() > LIMIT {
+        let mut boundary = LIMIT - " [truncated]".len();
+        while !result.is_char_boundary(boundary) {
+            boundary -= 1;
+        }
+        result.truncate(boundary);
+        result.push_str(" [truncated]");
+    }
+    (!result.is_empty()).then_some(result)
 }
 pub(crate) fn json(
     program: &Path,

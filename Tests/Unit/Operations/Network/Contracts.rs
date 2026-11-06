@@ -3,12 +3,36 @@
 use super::*;
 use std::{net::Ipv4Addr, path::PathBuf};
 
+#[test]
+fn native_failure_keeps_phase_and_category_with_bounded_operator_detail() {
+    use std::{
+        path::Path,
+        sync::atomic::AtomicBool,
+        time::{Duration, Instant},
+    };
+    let error = engine::raw(
+        Path::new("/bin/sh"),
+        &engine::bytes(&["-c", "printf 'Error: subnet already occupied' >&2; exit 1"]),
+        &AtomicBool::new(false),
+        Instant::now() + Duration::from_secs(5),
+        "Authority activation",
+    )
+    .unwrap_err();
+    assert!(matches!(error, Error::Native(_)));
+    let displayed = error.to_string();
+    assert!(displayed.contains("Authority activation"));
+    assert!(displayed.contains("subnet already occupied"));
+    assert!(!displayed.contains("printf") && !displayed.contains("/bin/sh"));
+}
+
 fn configuration() -> Configuration {
     let mut c = Configuration::at(PathBuf::from("/tmp/HrcHostContract"));
     c.core = PathBuf::from("/tmp/Core/Bin/HyperNet");
     c.suite = PathBuf::from("/tmp/Suite/Bin/HyperNetSuite");
     c.publisher_key = PathBuf::from("/tmp/Publisher.pub");
     c.same_organisation = true;
+    c.advertised_address = Ipv4Addr::new(192, 0, 2, 1);
+    c.bind_address = c.advertised_address;
     c
 }
 #[test]
@@ -36,11 +60,28 @@ fn review_changes_when_exposure_consent_or_identity_location_changes() {
             0 => c.lifetime_hours = 2,
             1 => c.relay_port += 1,
             2 => c.recovery_directory = PathBuf::from("/tmp/AnotherRecovery"),
-            3 => c.advertised_address = Ipv4Addr::new(192, 0, 2, 1),
+            3 => c.advertised_address = Ipv4Addr::new(192, 0, 2, 2),
             _ => c.resources.connection_bytes *= 2,
         }
         assert_ne!(engine::config_digest(&c).unwrap(), pin);
     }
+}
+
+#[test]
+fn hosting_requires_an_explicit_non_loopback_address_for_native_containers() {
+    let mut c = configuration();
+    for address in [
+        Ipv4Addr::UNSPECIFIED,
+        Ipv4Addr::LOCALHOST,
+        Ipv4Addr::new(127, 3, 2, 1),
+    ] {
+        c.bind_address = address;
+        c.advertised_address = address;
+        let error = c.validate().unwrap_err().to_string();
+        assert!(error.contains("isolated native containers cannot use loopback"));
+    }
+    let initial = Configuration::at(PathBuf::from("/tmp/HrcUnsetAddress"));
+    assert!(initial.bind_address.is_unspecified() && initial.advertised_address.is_unspecified());
 }
 #[test]
 fn native_port_subnet_and_domain_limits_are_checked_before_effects() {
