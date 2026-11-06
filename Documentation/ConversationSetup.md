@@ -156,6 +156,7 @@ This setup retry never submits a conversation operation or reuses old authority.
 
 ```sh
 hrc profile session --profile /private/hrc-device
+hrc profile nickname --profile /private/hrc-device --nickname Qwen
 hrc room create --profile /private/hrc-device --name laboratory
 hrc room list --profile /private/hrc-device
 hrc room join --profile /private/hrc-device --room ROOM

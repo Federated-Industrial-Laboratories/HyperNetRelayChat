@@ -138,6 +138,21 @@ struct Bot {
     /// Replace a stale cursor and catch up without triggering historical messages.
     #[arg(long)]
     resynchronise: bool,
+    /// Explicit local llama.cpp server address; only loopback IP addresses are accepted.
+    #[arg(long, requires = "model")]
+    model_endpoint: Option<std::net::SocketAddr>,
+    /// Model name configured in the local server.
+    #[arg(long, requires = "model_endpoint")]
+    model: Option<String>,
+    /// Absolute path of the locally installed curl executable.
+    #[arg(long, default_value = "/usr/bin/curl")]
+    model_curl: PathBuf,
+    /// Prefix that addresses the local model; !help retains its fixed response.
+    #[arg(long, default_value = "!qwen")]
+    model_prefix: String,
+    /// Respond to original human messages in exactly one explicitly selected room.
+    #[arg(long, requires = "model_endpoint")]
+    all_human_messages: bool,
 }
 fn bot(options: Bot) -> Result<(), Failure> {
     let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -159,6 +174,16 @@ fn bot(options: Bot) -> Result<(), Failure> {
             poll_interval_ms: options.poll_interval_ms,
             grant: options.grant,
             resynchronise: options.resynchronise,
+            model: options
+                .model_endpoint
+                .zip(options.model)
+                .map(|(endpoint, model)| hrc::bot::LocalModel {
+                    curl: options.model_curl,
+                    endpoint,
+                    model,
+                    prefix: options.model_prefix,
+                    all_human_messages: options.all_human_messages,
+                }),
         },
         stop,
         move || {
@@ -182,6 +207,9 @@ fn bot(options: Bot) -> Result<(), Failure> {
             hrc::bot::Error::Denied => "BotPermissionDenied",
             hrc::bot::Error::Client(error) => error.code(),
             hrc::bot::Error::RetryLater { .. } => "BotTemporarilyUnavailable",
+            hrc::bot::Error::ModelUnavailable => "BotModelUnavailable",
+            hrc::bot::Error::ModelTimeout => "BotModelTimeout",
+            hrc::bot::Error::ModelResponse => "BotModelInvalidResponse",
         })
     })?;
     output(&json!({"status":"BotStopped"}))

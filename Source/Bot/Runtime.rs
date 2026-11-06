@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Current filtered pulls feed one fixed help rule; durable plans survive interrupted submission.
+//! Filtered original human messages feed bounded replies; durable plans survive interrupted submission.
 use super::{Config, Error, Result, state};
 use crate::{
     client::{self, Client, outbox},
@@ -71,7 +71,13 @@ pub(super) fn run(config: Config, stop: Arc<AtomicBool>, on_ready: impl FnOnce()
                     Operation::PresenceSet,
                     Target::Account(owner),
                     Value::serialized(&crate::identity::Presence {
-                        status: "Service bot: !help".into(),
+                        status: match &config.model {
+                            Some(model) if model.all_human_messages => {
+                                "Local model bot: room chat".into()
+                            }
+                            Some(model) => format!("Local model bot: {}", model.prefix),
+                            None => "Service bot: !help".into(),
+                        },
                         duration_ms: 60000,
                     })
                     .map_err(|_| Error::State)?,
@@ -279,15 +285,19 @@ fn actor(client: &mut Client, grant: Option<Id>) -> Result<(Actor, Option<delega
 }
 /// Only a direct account's original message can trigger; replies and all agent actors are excluded.
 pub(super) fn trigger(event: &Event) -> bool {
+    original_text(event).is_some_and(|text| text.trim() == "!help")
+}
+fn original_text(event: &Event) -> Option<String> {
     if event.kind != Operation::MessageSend || !matches!(event.actor, Actor::Direct { .. }) {
-        return false;
+        return None;
     }
-    let Ok(body) = event.body.deserialized::<messaging::Send>() else {
-        return false;
-    };
-    body.parent.is_none() && body.causation.is_none() && body.text.trim() == "!help"
+    let body = event.body.deserialized::<messaging::Send>().ok()?;
+    (body.parent.is_none() && body.causation.is_none()).then_some(body.text)
 }
 pub(super) fn encrypted_trigger(event: &Event, body: &crate::crypto::ApplicationMessage) -> bool {
+    original_encrypted(event) && body.text.trim() == "!help"
+}
+fn original_encrypted(event: &Event) -> bool {
     event.kind == Operation::MessageSend
         && matches!(event.actor, Actor::Direct { .. })
         && event
@@ -298,7 +308,72 @@ pub(super) fn encrypted_trigger(event: &Event, body: &crate::crypto::Application
                     && message.context.parent.is_none()
                     && message.context.causation.is_none()
             })
-        && body.text.trim() == "!help"
+}
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum Reply {
+    Help,
+    Model(String),
+}
+pub(super) fn reply_for(
+    event: &Event,
+    content: Option<&client::MessageContent>,
+    config: &Config,
+) -> Option<Reply> {
+    let text = match content {
+        Some(client::MessageContent::Decrypted(body)) if original_encrypted(event) => {
+            if encrypted_trigger(event, body) {
+                return Some(Reply::Help);
+            }
+            body.text.clone()
+        }
+        Some(_) => return None,
+        None => {
+            if trigger(event) {
+                return Some(Reply::Help);
+            }
+            original_text(event)?
+        }
+    };
+    config
+        .model
+        .as_ref()?
+        .prompt(&text)
+        .map(|prompt| Reply::Model(prompt.to_owned()))
+}
+/// Inference failures are attributed replies, subject to the same exact plan and current authority.
+pub(super) fn reply_message(
+    trigger: Id,
+    generated: Result<Option<String>>,
+) -> Result<Option<messaging::Send>> {
+    let text = match generated {
+        Ok(text) => text,
+        Err(Error::ModelUnavailable) => Some("Local model unavailable. Please try again later.".into()),
+        Err(Error::ModelTimeout) => Some("Local model timed out. Please try a shorter message.".into()),
+        Err(Error::ModelResponse) => Some("Local model could not produce a complete reply within its limits. Please try a shorter request.".into()),
+        Err(error) => return Err(error),
+    };
+    Ok(text.map(|text| messaging::Send {
+        text,
+        mentions: vec![],
+        parent: Some(trigger),
+        causation: Some(trigger),
+    }))
+}
+/// A changed membership/filter context restarts only this bot's bounded no-trigger catch-up.
+pub(super) fn recover_history_context(
+    store: &mut crate::storage::Store,
+    room: RoomId,
+    error: &client::Error,
+) -> Result<bool> {
+    if matches!(error,
+        client::Error::Rejected { code: ErrorCode::ResynchronisationRequired, detail }
+        | client::Error::Refused { code: ErrorCode::ResynchronisationRequired, detail, .. }
+        if detail == "CursorContext")
+    {
+        state::restart_room(store, room)?;
+        return Ok(true);
+    }
+    Ok(false)
 }
 fn pull(
     client: &mut Client,
@@ -309,14 +384,20 @@ fn pull(
     stop: &AtomicBool,
 ) -> Result<bool> {
     let prior = state::room(&mut client.store, room)?;
-    let page = client.history_messages(
+    let page = match client.history_messages(
         room,
         &messaging::Page {
             cursor: prior.cursor.clone(),
             limit: 32,
         },
         grant,
-    )?;
+    ) {
+        Ok(page) => page,
+        Err(error) if recover_history_context(&mut client.store, room, &error)? => {
+            return Ok(false);
+        }
+        Err(error) => return Err(error.into()),
+    };
     let key = VerifyingKey::from_bytes(client.profile.active_server().signing_key.as_bytes())
         .map_err(|_| Error::State)?;
     let cursor = verify_cursor(&page.cursor.0, &key).map_err(|_| Error::State)?;
@@ -356,24 +437,36 @@ fn pull(
         return Ok(false);
     }
     let selected = if prior.live && now.lower_ms >= state::next_reply(&mut client.store)? {
-        page.events
-            .iter()
-            .find(|event| match page.content.get(&event.event) {
-                Some(client::MessageContent::Decrypted(body)) => encrypted_trigger(event, body),
-                Some(_) => false,
-                None => trigger(event),
-            })
+        page.events.iter().find_map(|event| {
+            reply_for(event, page.content.get(&event.event), config).map(|reply| (event, reply))
+        })
     } else {
         None
     };
     let window = client.session()?.ready.window.clone();
-    if let Some(event) = selected {
-        let message = messaging::Send {
-            text: config.help.clone(),
-            mentions: vec![],
-            parent: Some(event.event),
-            causation: Some(event.event),
+    if let Some((event, reply)) = selected {
+        let generated = match reply {
+            Reply::Help => Ok(Some(config.help.clone())),
+            Reply::Model(prompt) => config
+                .model
+                .as_ref()
+                .ok_or(Error::Configuration)?
+                .generate(&prompt, stop),
         };
+        let Some(message) = reply_message(event.event, generated)? else {
+            return Ok(false);
+        };
+        if stop.load(Ordering::Acquire) {
+            return Ok(false);
+        }
+        let now = client
+            .profile
+            .clock
+            .sample()
+            .map_err(|_| client::Error::Clock)?;
+        if now.upper_ms >= cursor.value().expires_ms {
+            return Err(Error::ResynchronisationRequired);
+        }
         client.prepare_send_with(room, &message, grant, false, None, |db, reply| {
             state::advance_in(
                 db,

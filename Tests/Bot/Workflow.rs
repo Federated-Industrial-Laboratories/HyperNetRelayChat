@@ -113,6 +113,7 @@ impl Fixture {
             poll_interval_ms: 1000,
             grant: None,
             resynchronise: false,
+            model: None,
         }
     }
 }
@@ -261,6 +262,240 @@ fn reply_cursor_and_outbox_are_atomic_and_restart_recovers_late_commit() {
 }
 
 #[test]
+fn model_failure_notice_commits_progress_and_does_not_poison_the_next_trigger() {
+    let fixture = Fixture::new();
+    let config = fixture.config();
+    let mut store = fixture.store(true);
+    state::initialise(&mut store, &config).unwrap();
+    let window = RetryWindow {
+        id: id(9),
+        expires_ms: TimeBounds::test_now().upper_ms + 120000,
+    };
+    let signer = SigningKey::from_bytes(&[10; 32]);
+    let sign = |operation, message: &messaging::Send| {
+        let mut action = reply(&window).action().clone();
+        action.operation_id.operation = operation;
+        action.body = Value::serialized(message).unwrap();
+        verify_action(
+            &sign_action(&action, &signer).unwrap(),
+            &signer.verifying_key(),
+        )
+        .unwrap()
+    };
+    let before = Blob(vec![1]);
+    let after = Blob(vec![2]);
+    state::advance(
+        &mut store,
+        state::Advance {
+            room: room(),
+            prior: None,
+            cursor: &before,
+            live: true,
+            reply: None,
+            window: &window,
+            now: TimeBounds::test_now(),
+        },
+    )
+    .unwrap();
+    let notice = runtime::reply_message(id(12), Err(Error::ModelResponse))
+        .unwrap()
+        .unwrap();
+    assert!(notice.text.contains("could not produce a complete reply"));
+    crate::text::message(&notice.text).unwrap();
+    let notice = sign(id(11), &notice);
+    state::advance(
+        &mut store,
+        state::Advance {
+            room: room(),
+            prior: Some(&before),
+            cursor: &after,
+            live: true,
+            reply: Some((&notice, id(12))),
+            window: &window,
+            now: TimeBounds::test_now(),
+        },
+    )
+    .unwrap();
+    drop(store);
+    let mut store = fixture.store(false);
+    state::initialise(&mut store, &config).unwrap();
+    assert_eq!(
+        state::room(&mut store, room()).unwrap().cursor,
+        Some(after.clone())
+    );
+    let pending = outbox::pending(&mut store, &signer.verifying_key()).unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].action.signed_bytes(), notice.signed_bytes());
+    let server = SigningKey::from_bytes(&[30; 32]);
+    let response = Response {
+        home: room().home,
+        operation_id: notice.action().operation_id,
+        action_digest: notice.digest(),
+        outcome: Outcome::Committed {
+            event: Some(id(31)),
+            position: 1,
+            body: Value::Null,
+        },
+    };
+    let response = verify_response(
+        &sign_response(&response, &server).unwrap(),
+        &server.verifying_key(),
+    )
+    .unwrap();
+    outbox::record(&mut store, &notice, &response, TimeBounds::test_now()).unwrap();
+    let plan = state::plans(&mut store).unwrap().pop().unwrap();
+    state::complete(&mut store, &plan, &response.value().outcome).unwrap();
+    let next = runtime::reply_message(id(13), Ok(Some("The next reply succeeds.".into())))
+        .unwrap()
+        .unwrap();
+    let next = sign(id(14), &next);
+    let next_cursor = Blob(vec![3]);
+    let advance = || state::Advance {
+        room: room(),
+        prior: Some(&after),
+        cursor: &next_cursor,
+        live: true,
+        reply: Some((&next, id(13))),
+        window: &window,
+        now: TimeBounds::test_now(),
+    };
+    // Advance the test's rate reservation without sleeping or altering authority/clock state.
+    store
+        .write(|db| {
+            db.execute("UPDATE bot_meta SET next_reply=0 WHERE singleton=1", [])?;
+            Ok(Commit::new(
+                (),
+                b"elapsed bot rate interval fixture".to_vec(),
+            ))
+        })
+        .unwrap();
+    state::advance(&mut store, advance()).unwrap();
+    assert_eq!(
+        state::room(&mut store, room()).unwrap().cursor,
+        Some(next_cursor)
+    );
+    let pending = outbox::pending(&mut store, &signer.verifying_key()).unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].action.signed_bytes(), next.signed_bytes());
+}
+
+#[test]
+fn only_inference_errors_become_notices_and_cancellation_has_no_effect() {
+    for error in [
+        Error::ModelUnavailable,
+        Error::ModelTimeout,
+        Error::ModelResponse,
+    ] {
+        let message = runtime::reply_message(id(12), Err(error)).unwrap().unwrap();
+        assert!(message.text.len() <= 128);
+        assert_eq!(message.parent, Some(id(12)));
+        assert_eq!(message.causation, Some(id(12)));
+        crate::text::message(&message.text).unwrap();
+    }
+    assert!(runtime::reply_message(id(12), Ok(None)).unwrap().is_none());
+    for error in [
+        Error::Configuration,
+        Error::Denied,
+        Error::State,
+        Error::Grant,
+        Error::PendingOutcome,
+    ] {
+        assert!(runtime::reply_message(id(12), Err(error)).is_err());
+    }
+}
+
+#[test]
+fn cursor_context_recovery_skips_old_triggers_and_preserves_exact_pending_effects() {
+    let fixture = Fixture::new();
+    let mut store = fixture.store(true);
+    state::initialise(&mut store, &fixture.config()).unwrap();
+    let window = RetryWindow {
+        id: id(9),
+        expires_ms: TimeBounds::test_now().upper_ms + 120000,
+    };
+    let prior = Blob(vec![1]);
+    let cursor = Blob(vec![2]);
+    state::advance(
+        &mut store,
+        state::Advance {
+            room: room(),
+            prior: None,
+            cursor: &prior,
+            live: true,
+            reply: None,
+            window: &window,
+            now: TimeBounds::test_now(),
+        },
+    )
+    .unwrap();
+    let pending = reply(&window);
+    state::advance(
+        &mut store,
+        state::Advance {
+            room: room(),
+            prior: Some(&prior),
+            cursor: &cursor,
+            live: true,
+            reply: Some((&pending, id(12))),
+            window: &window,
+            now: TimeBounds::test_now(),
+        },
+    )
+    .unwrap();
+    for (code, detail) in [
+        (ErrorCode::Denied, "CursorContext"),
+        (ErrorCode::Expired, "CursorContext"),
+        (ErrorCode::ResynchronisationRequired, "CursorHistoryGap"),
+        (ErrorCode::ResynchronisationRequired, "CursorPosition"),
+    ] {
+        assert!(
+            !runtime::recover_history_context(
+                &mut store,
+                room(),
+                &client::Error::Rejected {
+                    code,
+                    detail: detail.into()
+                }
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            state::room(&mut store, room()).unwrap().cursor,
+            Some(cursor.clone())
+        );
+    }
+    assert!(
+        runtime::recover_history_context(
+            &mut store,
+            room(),
+            &client::Error::Rejected {
+                code: ErrorCode::ResynchronisationRequired,
+                detail: "CursorContext".into(),
+            }
+        )
+        .unwrap()
+    );
+    let room_state = state::room(&mut store, room()).unwrap();
+    assert!(room_state.cursor.is_none() && !room_state.live);
+    assert_eq!(state::plans(&mut store).unwrap().len(), 1);
+    assert_eq!(
+        outbox::pending(
+            &mut store,
+            &SigningKey::from_bytes(&[10; 32]).verifying_key()
+        )
+        .unwrap()[0]
+            .action
+            .signed_bytes(),
+        pending.signed_bytes()
+    );
+    drop(store);
+    let mut store = fixture.store(false);
+    let room_state = state::room(&mut store, room()).unwrap();
+    assert!(room_state.cursor.is_none() && !room_state.live);
+    assert_eq!(state::plans(&mut store).unwrap().len(), 1);
+}
+
+#[test]
 fn rule_never_responds_to_agent_actors_or_reply_events() {
     let action = reply(&RetryWindow {
         id: id(9),
@@ -301,6 +536,88 @@ fn rule_never_responds_to_agent_actors_or_reply_events() {
         },
     };
     assert!(!runtime::trigger(&event));
+}
+
+#[test]
+fn model_modes_keep_help_and_reject_agents_replies_and_multiple_rooms() {
+    let fixture = Fixture::new();
+    let mut config = fixture.config();
+    config.model = Some(LocalModel {
+        curl: std::env::var_os("HRC_TEST_CURL")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| "/usr/bin/curl".into()),
+        endpoint: "127.0.0.1:8080".parse().unwrap(),
+        model: "Qwen".into(),
+        prefix: "!qwen".into(),
+        all_human_messages: true,
+    });
+    config.validate().unwrap();
+    let action = reply(&RetryWindow {
+        id: id(9),
+        expires_ms: u64::MAX,
+    });
+    let mut message = messaging::Send {
+        text: "Hello Qwen".into(),
+        mentions: vec![],
+        parent: None,
+        causation: None,
+    };
+    let mut event = Event {
+        home: room().home,
+        room: room(),
+        event: id(12),
+        sequence: 1,
+        timestamp_ms: 1,
+        actor: Actor::Direct { acting: acting(20) },
+        operation_id: action.action().operation_id,
+        action_digest: action.digest(),
+        kind: Operation::MessageSend,
+        body: Value::serialized(&message).unwrap(),
+    };
+    assert_eq!(
+        runtime::reply_for(&event, None, &config),
+        Some(runtime::Reply::Model("Hello Qwen".into()))
+    );
+    assert_eq!(
+        runtime::reply_for(
+            &event,
+            Some(&crate::client::MessageContent::Unavailable),
+            &config
+        ),
+        None
+    );
+    event.actor = action.action().actor.clone();
+    assert_eq!(runtime::reply_for(&event, None, &config), None);
+    event.actor = Actor::Direct { acting: acting(20) };
+    message.parent = Some(id(33));
+    event.body = Value::serialized(&message).unwrap();
+    assert_eq!(runtime::reply_for(&event, None, &config), None);
+    message.parent = None;
+    message.causation = Some(id(33));
+    event.body = Value::serialized(&message).unwrap();
+    assert_eq!(runtime::reply_for(&event, None, &config), None);
+    message.causation = None;
+    message.text = "!help".into();
+    event.body = Value::serialized(&message).unwrap();
+    assert_eq!(
+        runtime::reply_for(&event, None, &config),
+        Some(runtime::Reply::Help)
+    );
+    config.rooms.push(RoomId {
+        local: id(55),
+        ..room()
+    });
+    assert!(config.validate().is_err());
+    config.model.as_mut().unwrap().all_human_messages = false;
+    assert!(config.validate().is_err());
+    config.model = None;
+    config.rooms = (0..8)
+        .map(|n| RoomId {
+            local: id(50 + n),
+            ..room()
+        })
+        .collect();
+    config.validate().unwrap();
 }
 
 #[test]

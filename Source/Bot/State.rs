@@ -35,8 +35,19 @@ pub(super) struct Plan {
     pub digest: Id,
 }
 pub(super) fn initialise(store: &mut Store, config: &Config) -> Result<()> {
-    let identity = encode(&("HRC.HelpBot.1", &config.rooms, &config.help, config.grant))
-        .map_err(|_| Error::State)?;
+    let identity = if let Some(model) = &config.model {
+        encode(&(
+            "HRC.LocalModelBot.1",
+            &config.rooms,
+            &config.help,
+            config.grant,
+            model,
+        ))
+    } else {
+        // Preserve existing deterministic bots' cursor and exact-outbox identity.
+        encode(&("HRC.HelpBot.1", &config.rooms, &config.help, config.grant))
+    }
+    .map_err(|_| Error::State)?;
     let identity = digest(&identity);
     let existing = store
         .read(READ, |db| {
@@ -135,6 +146,20 @@ pub(super) fn next_reply(store: &mut Store) -> Result<u64> {
                 [],
                 |r| r.get(0),
             )
+        })
+        .map_err(|_| Error::State)
+}
+pub(super) fn restart_room(store: &mut Store, room: RoomId) -> Result<()> {
+    store
+        .write(|db| {
+            if db.execute(
+                "UPDATE bot_rooms SET cursor=NULL,live=0 WHERE room=?1",
+                [room.to_string()],
+            )? != 1
+            {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+            Ok(Commit::new((), encode(&("HRC.BotRestartContext", room))?))
         })
         .map_err(|_| Error::State)
 }
