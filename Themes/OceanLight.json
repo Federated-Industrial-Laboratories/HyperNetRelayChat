@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "name": "Ocean Light",
+  "mode": "light",
+  "colors": {
+    "panel": "#E8F0F6",
+    "surface": "#F5FAFD",
+    "window": "#F7FBFE",
+    "input": "#FFFFFF",
+    "faint": "#EFF6FA",
+    "text": "#183347",
+    "muted": "#496574",
+    "accent": "#086B8C",
+    "selection": "#C9E6F0",
+    "selectionText": "#174D61",
+    "border": "#A2BAC9",
+    "button": "#DDEAF2",
+    "hover": "#CEE1EB",
+    "pressed": "#BBD9E7"
+  },
+  "display": {
+    "cornerCut": 5,
+    "outlineWidth": 1
+  }
+}

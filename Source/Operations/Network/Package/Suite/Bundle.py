@@ -365,7 +365,7 @@ def install_current(args, admission):
     return {'product': PRODUCT, 'version': manifest['version'], 'prefix': str(prefix), 'binarySha256': manifest['metadata']['binarySha256']}
 
 
-def installed_manifest(args):
+def installed_manifest(args, admission=None):
     prefix = private_parent(args.prefix)
     info = prefix.lstat()
     require(stat.S_ISDIR(info.st_mode) and info.st_uid == os.geteuid() and stat.S_IMODE(info.st_mode) == 0o700, 'Installation prefix is not private')
@@ -401,7 +401,24 @@ def installed_manifest(args):
                     require(info.st_size == entry['size'] and stat.S_IMODE(info.st_mode) == entry['mode'] and digest_file(path, MAX_ARCHIVE) == entry['sha256'], 'Installed file was modified')
                     found.add(name)
         require(found == set(expected), 'Installed file is missing')
+        if admission is not None:
+            admission.check(archive, manifest, original, temporary)
         return manifest, expected, directories
+
+
+def admit_installed(args):
+    """Verify the exact retained installed target without advancing update trust."""
+    with PackageTrust.Admission(sys.modules[__name__], args) as admission:
+        manifest = installed_manifest(args, admission)[0]
+        require(admission.target['sequence'] == admission.trust['sequence']
+                and admission.target_digest == admission.trust['targetDigest'],
+                'Activation requires the exact retained installed target')
+        admission.fresh()
+        return {'manifest': manifest,
+                'trustDigest': PackageTrust.digest(sys.modules[__name__], admission.trust),
+                'targetDigest': admission.target_digest,
+                **{name: admission.target[name] for name in
+                   ('notBefore', 'expires', 'rootGeneration', 'sequence')}}
 
 
 def remove(args):
@@ -510,10 +527,14 @@ def main():
             option.add_argument('--trust-directory', required=True)
             option.add_argument('--policy', required=True)
             option.add_argument('--policy-signature', required=True)
-    for command in ('VerifyInstalled', 'Remove'):
+    for command in ('VerifyInstalled', 'AdmitInstalled', 'Remove'):
         option = commands.add_parser(command)
         option.add_argument('--prefix', required=True)
         option.add_argument('--public-key', required=True)
+        if command == 'AdmitInstalled':
+            option.add_argument('--trust-directory', required=True)
+            option.add_argument('--policy', required=True)
+            option.add_argument('--policy-signature', required=True)
     args = parser.parse_args()
     if args.command in PackageTrust.COMMANDS:
         result = PackageTrust.trust_command(sys.modules[__name__], args)
@@ -525,6 +546,8 @@ def main():
         result = remove(args)
     elif args.command == 'VerifyInstalled':
         result = installed_manifest(args)[0]
+    elif args.command == 'AdmitInstalled':
+        result = admit_installed(args)
     else:
         with tempfile.TemporaryDirectory(prefix='HyperNetSuiteVerify') as temporary_name:
             temporary = Path(temporary_name)

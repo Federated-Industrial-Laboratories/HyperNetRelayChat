@@ -29,12 +29,8 @@ use std::time::Duration;
 
 impl App {
     pub(crate) fn new(model: Model, ctx: &egui::Context) -> Self {
-        theme::configure(
-            ctx,
-            model.snapshot.preferences.theme == Theme::Light,
-            model.snapshot.preferences.density == Density::Compact,
-            model.snapshot.preferences.text_scale,
-        );
+        let themes = theme::Library::new();
+        theme::configure_selected(ctx, &model.snapshot.preferences, &themes);
         Self {
             nickname: model.snapshot.nickname.clone(),
             model,
@@ -56,6 +52,8 @@ impl App {
             sound: sound::Sound::new(),
             setup_requested: false,
             operations_requested: false,
+            themes,
+            theme_chooser: theme::Chooser::default(),
         }
     }
     pub(crate) fn prepare_setup(&mut self) {
@@ -88,11 +86,13 @@ pub(crate) struct App {
     grant: agents::GrantForm,
     focus_composer: bool,
     composer_room: Option<RoomId>,
-    applied: Option<(Theme, Density, u32)>,
+    applied: Option<(Theme, Density, u32, Option<String>)>,
     scroll_event: Option<Id>,
     sound: sound::Sound,
     setup_requested: bool,
     operations_requested: bool,
+    themes: theme::Library,
+    theme_chooser: theme::Chooser,
 }
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
@@ -109,14 +109,10 @@ impl eframe::App for App {
             preferences.theme,
             preferences.density,
             preferences.text_scale.to_bits(),
+            preferences.palette.clone(),
         );
-        if self.applied != Some(appearance) {
-            theme::configure(
-                ctx,
-                appearance.0 == Theme::Light,
-                appearance.1 == Density::Compact,
-                preferences.text_scale,
-            );
+        if self.applied.as_ref() != Some(&appearance) {
+            theme::configure_selected(ctx, preferences, &self.themes);
             self.applied = Some(appearance);
         }
         if ctx.input(|input| input.viewport().close_requested()) {
@@ -160,7 +156,7 @@ impl eframe::App for App {
             .show(ui, |ui| {
                 if let Some(error) = self.model.error.clone() {
                     ui.horizontal_wrapped(|ui| {
-                        ui.colored_label(egui::Color32::LIGHT_RED, error);
+                        ui.colored_label(theme::error(ui), error);
                         if ui.small_button("Dismiss").clicked() {
                             self.model.error = None;
                             self.model.closing = false;
@@ -240,11 +236,11 @@ impl App {
             ui.horizontal_wrapped(|ui| {
                 use hrc::client::ConnectionState;
                 let (state, colour) = match &snapshot.connection {
-                    ConnectionState::Online => ("Online", egui::Color32::from_rgb(117, 201, 153)),
+                    ConnectionState::Online => ("Online", theme::online(ui)),
                     ConnectionState::Offline => ("Offline", ui.visuals().weak_text_color()),
-                    ConnectionState::Connecting => ("Connecting", egui::Color32::from_rgb(211, 170, 91)),
-                    ConnectionState::Resolving => ("Resolving", egui::Color32::from_rgb(211, 170, 91)),
-                    ConnectionState::Backoff { .. } => ("Reconnecting", egui::Color32::from_rgb(211, 170, 91)),
+                    ConnectionState::Connecting => ("Connecting", theme::warning(ui)),
+                    ConnectionState::Resolving => ("Resolving", theme::warning(ui)),
+                    ConnectionState::Backoff { .. } => ("Reconnecting", theme::warning(ui)),
                 };
                 let connection = egui::Frame::new().fill(components::surface(ui)).stroke(ui.visuals().widgets.noninteractive.bg_stroke)
                     .inner_margin(egui::Margin::symmetric(9, 5)).show(ui, |ui| {

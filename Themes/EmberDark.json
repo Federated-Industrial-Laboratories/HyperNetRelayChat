@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "name": "Ember Dark",
+  "mode": "dark",
+  "colors": {
+    "panel": "#251C18",
+    "surface": "#332720",
+    "window": "#30241E",
+    "input": "#1C1511",
+    "faint": "#382A22",
+    "text": "#F5EAE0",
+    "muted": "#CFB6A5",
+    "accent": "#F3B77B",
+    "selection": "#5A3E27",
+    "selectionText": "#FFE3C7",
+    "border": "#654D3D",
+    "button": "#453326",
+    "hover": "#533F2E",
+    "pressed": "#5A3E27"
+  },
+  "display": {
+    "cornerCut": 5,
+    "outlineWidth": 1
+  }
+}

@@ -70,17 +70,27 @@ pub(super) fn clock(host: &mut Host<'_>) -> Result<()> {
     )?;
     host.wait(
         || {
-            host.core(&bytes(&[
-                "authority-clock",
-                "verify-export",
-                "--observation",
-                &text(&folder.join("Public/ClockHealth.cbor"))?,
-                "--monitor-key",
-                &key,
-                "--kernel-boot",
-                &boot,
-            ]))?;
-            Ok(())
+            let health = raw(
+                &host.c.core,
+                &bytes(&[
+                    "authority-clock",
+                    "verify-export",
+                    "--observation",
+                    &text(&folder.join("Public/ClockHealth.cbor"))?,
+                    "--monitor-key",
+                    &key,
+                    "--kernel-boot",
+                    &boot,
+                ]),
+                host.cancel,
+                host.end,
+                "Clock verification",
+            )?;
+            if health == b"ClockHealthy\n" {
+                Ok(())
+            } else {
+                Err(Error::NotReady)
+            }
         },
         30,
     )

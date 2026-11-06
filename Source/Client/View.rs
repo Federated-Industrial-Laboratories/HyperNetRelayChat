@@ -32,6 +32,8 @@ pub enum NotificationMode {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Preferences {
     pub theme: Theme,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub palette: Option<String>,
     pub density: Density,
     #[serde(default)]
     pub chat_layout: ChatLayout,
@@ -44,6 +46,7 @@ impl Default for Preferences {
     fn default() -> Self {
         Self {
             theme: Theme::Dark,
+            palette: None,
             density: Density::Comfortable,
             chat_layout: ChatLayout::Classic,
             text_scale: 1.0,

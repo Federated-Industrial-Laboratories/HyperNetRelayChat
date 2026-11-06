@@ -372,12 +372,19 @@ impl<'a> Host<'a> {
     pub fn bootstrap(&self) -> Result<Value> {
         self.remembered("bootstrap").ok_or(Error::State)
     }
+    pub fn bootstrap_file_digest(&self) -> Result<String> {
+        self.state
+            .artifacts
+            .get(&text(&self.p("Network/Bootstrap.cbor"))?)
+            .cloned()
+            .ok_or(Error::State)
+    }
     pub fn trust(&self) -> Result<Vec<String>> {
         Ok(bytes(&[
             "--bootstrap",
             &text(&self.p("Network/Bootstrap.cbor"))?,
             "--bootstrap-digest",
-            &string(&self.bootstrap()?, "fingerprint")?,
+            &self.bootstrap_file_digest()?,
         ]))
     }
     pub fn root_grant(&self) -> Result<String> {

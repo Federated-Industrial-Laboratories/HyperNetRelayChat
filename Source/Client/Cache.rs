@@ -72,7 +72,15 @@ pub(super) fn save_preferences<T: Serialize>(
     store.write(|db|{db.execute("INSERT INTO client_preferences VALUES(?1,?2) ON CONFLICT(id) DO UPDATE SET value=excluded.value",params![id,bytes])?;Ok(Commit::new((),encode(&("HRC.ClientPreferences",id,digest(&bytes)))?))})
 }
 pub(super) fn validate_preferences(p: &Preferences) -> bool {
-    p.text_scale.is_finite() && (0.75..=2.0).contains(&p.text_scale)
+    p.text_scale.is_finite()
+        && (0.75..=2.0).contains(&p.text_scale)
+        && p.palette.as_ref().is_none_or(|id| {
+            !id.is_empty()
+                && id.len() <= 64
+                && id
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        })
 }
 pub(super) fn room_preferences(
     store: &mut Store,

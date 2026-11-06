@@ -43,6 +43,7 @@ impl App {
             preferences.quiet,
             preferences.sound,
             preferences.ambiguous_wide,
+            preferences.palette.clone(),
         );
         egui::ScrollArea::vertical().show(ui, |ui| {
             components::section(ui, "Profile", |ui| {
@@ -61,16 +62,12 @@ impl App {
                 });
             });
             components::section(ui, "Appearance", |ui| {
-                components::field(ui, "Theme", |ui| {
-                    ui.horizontal_wrapped(|ui| {
-                        for (value, label) in [(Theme::Dark, "Dark"), (Theme::Light, "Light")] {
-                            if components::choice(ui, preferences.theme == value, label).clicked() {
-                                preferences.theme = value;
-                            }
-                        }
-                    })
-                    .inner
-                });
+                theme::controls(
+                    ui,
+                    &mut preferences,
+                    &mut self.themes,
+                    &mut self.theme_chooser,
+                );
                 components::field(ui, "Conversation", |ui| {
                     ui.horizontal_wrapped(|ui| {
                         for (value, label) in [
@@ -109,10 +106,7 @@ impl App {
                     .on_hover_text("Suppresses notifications and sounds");
                 ui.checkbox(&mut preferences.sound, "Notification sounds");
                 if self.sound.unavailable() {
-                    ui.colored_label(
-                        egui::Color32::from_rgb(211, 170, 91),
-                        "Desktop sound unavailable",
-                    );
+                    ui.colored_label(theme::warning(ui), "Desktop sound unavailable");
                 }
             });
             if let Some(room) = &snapshot.selected {
@@ -168,6 +162,7 @@ impl App {
                 preferences.quiet,
                 preferences.sound,
                 preferences.ambiguous_wide,
+                preferences.palette.clone(),
             )
         {
             self.model.dispatch(Command::SetPreferences(preferences));
@@ -230,7 +225,7 @@ impl App {
             });
             components::section(ui, "Filters and moderation", |ui| {
                 if components::button(ui, "Refresh").clicked() { self.model.dispatch(Command::Inspect); }
-                if snapshot.inspection.stale { components::badge(ui, "Retained · authority unconfirmed", egui::Color32::from_rgb(211, 170, 91)); }
+                if snapshot.inspection.stale { components::badge(ui, "Retained · authority unconfirmed", theme::warning(ui)); }
                 for line in display::filters(&snapshot) { ui.label(line); }
                 for line in display::restrictions(&snapshot) { ui.label(line); }
             });

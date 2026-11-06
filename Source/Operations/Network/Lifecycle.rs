@@ -241,7 +241,12 @@ fn stop_host(host: &mut Host<'_>) -> Result<()> {
                 "--directory",
                 &text(&folder)?,
             ]))?;
-            if current["running"] == true {
+            // A failed launch can retain an owned network even after its container is gone.
+            if current["running"] == true
+                || current["resourceCount"]
+                    .as_u64()
+                    .is_some_and(|count| count > 0)
+            {
                 let preview = host.core(&bytes(&[
                     "runtime",
                     "preview",

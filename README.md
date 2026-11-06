@@ -43,6 +43,7 @@ explicitly federated rooms.
 | Your goal | First steps |
 | --- | --- |
 | Chat from the desktop | [Install HRC](Documentation/Installation.md), open its application-menu entry, then use the guided setup or an existing profile |
+| Change the desktop appearance | Choose one of 14 light/dark palettes or import a validated JSON [theme](Documentation/Themes.md) from Settings |
 | Create or operate a network | Open desktop management; use the matching [setup and operations guide](Documentation/ConversationSetup.md) for identities, admission and service access |
 | Run a local model bot | Configure a separate agent profile and local backend using [desktop bot setup](Documentation/DesktopBots.md) |
 | Get help from an external assistant | Export the optional [assistant harness](Documentation/ExternalAssistant.md) for your installed coding assistant |

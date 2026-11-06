@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "name": "Forest Light",
+  "mode": "light",
+  "colors": {
+    "panel": "#EAF1E9",
+    "surface": "#F7FBF5",
+    "window": "#F9FCF7",
+    "input": "#FFFFFF",
+    "faint": "#F0F6ED",
+    "text": "#233B2A",
+    "muted": "#506853",
+    "accent": "#256B3D",
+    "selection": "#D3E7CF",
+    "selectionText": "#254F30",
+    "border": "#AABFA7",
+    "button": "#E0EBDD",
+    "hover": "#D5E5D0",
+    "pressed": "#C2D9BE"
+  },
+  "display": {
+    "cornerCut": 5,
+    "outlineWidth": 1
+  }
+}

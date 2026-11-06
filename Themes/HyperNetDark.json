@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "name": "HyperNet Dark",
+  "mode": "dark",
+  "colors": {
+    "panel": "#171B1F",
+    "surface": "#20252A",
+    "window": "#1E2328",
+    "input": "#111519",
+    "faint": "#1F2429",
+    "text": "#DBE3E8",
+    "muted": "#97A5AF",
+    "accent": "#8BC2C9",
+    "selection": "#315056",
+    "selectionText": "#B7DADB",
+    "border": "#363E45",
+    "button": "#262C32",
+    "hover": "#2F3D44",
+    "pressed": "#315056"
+  },
+  "display": {
+    "cornerCut": 5,
+    "outlineWidth": 1
+  }
+}

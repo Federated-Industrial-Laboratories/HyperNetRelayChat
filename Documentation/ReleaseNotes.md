@@ -18,6 +18,11 @@ The desktop adds consistent controls, Classic message dividers, optional bubble
 layout, left-aligned room and member lists, and separate connection readouts.
 Drafts and the active conversation remain available while using Operations.
 
+Appearance includes fourteen light and dark colour schemes, preserving both
+original HyperNet defaults. Local JSON themes have preview, import and removal
+controls, bounded storage and contrast validation. Themes contain no executable
+code or external assets.
+
 The external assistant harness exports reviewed setup and operations skills for
 Codex, Claude Code, Gemini CLI, GitHub Copilot CLI and Cursor. Desktop controls
 work independently. Provider exports follow their documented formats; live

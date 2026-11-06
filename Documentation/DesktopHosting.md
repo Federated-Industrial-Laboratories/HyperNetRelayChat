@@ -109,7 +109,7 @@ version string as sufficient package identity.
 | --- | --- |
 | Core Bundle.py | `47f636c1d35df1396ee878c30d3872504f5ee31cf54c6768eaf90b9e62a549e4` |
 | Core PackageTrust.py | `5f58c67ea68ceca21ed33aa5229d62c17ea647d028dc74a9a637f5aaeb3e8e2d` |
-| Suite Bundle.py | `7c7b69bb39776d6b457f2c1c252ba90f67d7752aeae828d556cbae9e805d723e` |
+| Suite Bundle.py | `9c738affdd1843a9969eaa6b0254cd39b685e68998c5ece6462d0a9c61b66dde` |
 | Suite PackageTrust.py | `84600aa9eec08d549d19a04534ae2ecf1644945687174e6d79a3bb17c1106833` |
 
 The helpers retain their MIT notices. See [native hosting licences](NativeHostingLicences.txt).

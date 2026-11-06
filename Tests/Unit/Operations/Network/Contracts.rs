@@ -86,7 +86,7 @@ fn embedded_verifiers_match_the_supported_released_sources() {
         (
             include_bytes!("../../../../Source/Operations/Network/Package/Suite/Bundle.py")
                 .as_slice(),
-            "7c7b69bb39776d6b457f2c1c252ba90f67d7752aeae828d556cbae9e805d723e",
+            "9c738affdd1843a9969eaa6b0254cd39b685e68998c5ece6462d0a9c61b66dde",
         ),
         (
             include_bytes!("../../../../Source/Operations/Network/Package/Suite/PackageTrust.py")

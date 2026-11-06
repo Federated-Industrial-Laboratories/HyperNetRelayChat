@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "name": "Plum Light",
+  "mode": "light",
+  "colors": {
+    "panel": "#F0EBF7",
+    "surface": "#FBF8FF",
+    "window": "#FDFBFF",
+    "input": "#FFFFFF",
+    "faint": "#F6F0FC",
+    "text": "#39284E",
+    "muted": "#6B587D",
+    "accent": "#78439E",
+    "selection": "#E6D6F2",
+    "selectionText": "#583075",
+    "border": "#BBA9CA",
+    "button": "#E9E0F2",
+    "hover": "#DECEEC",
+    "pressed": "#D4BEE6"
+  },
+  "display": {
+    "cornerCut": 5,
+    "outlineWidth": 1
+  }
+}

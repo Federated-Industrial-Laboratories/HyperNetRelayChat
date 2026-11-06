@@ -76,13 +76,12 @@ impl App {
                     components::badge(
                         ui,
                         "Retained history · access unconfirmed",
-                        egui::Color32::from_rgb(211, 170, 91),
+                        theme::warning(ui),
                     );
                 }
                 if let Some(gap) = &room.gap {
                     ui.horizontal_wrapped(|ui| {
-                        components::badge(ui, "History gap", egui::Color32::from_rgb(211, 170, 91))
-                            .on_hover_text(gap);
+                        components::badge(ui, "History gap", theme::warning(ui)).on_hover_text(gap);
                         if components::button(ui, "Resynchronise").clicked() {
                             self.model.dispatch(Command::Resynchronise);
                         }

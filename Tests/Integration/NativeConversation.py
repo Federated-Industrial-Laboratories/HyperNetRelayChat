@@ -5,6 +5,7 @@ The fixture supplies only HyperNet prerequisites and bounded transport faults.
 Every HRC registration, permission change, message and query uses the executable.
 No database keys, signing secrets or private SQL state are read by this driver.
 """
+import fcntl
 import hashlib
 import json
 import os
@@ -153,6 +154,13 @@ class Conversation:
         self.start()
         for name in self.profiles:
             assert self.session(name)['acting']['account'] == accounts[name]
+        # Desktop host controls authenticate while the chat owns this same store.
+        with (self.profiles['Alice'] / 'Writer.lock').open('r+b') as writer:
+            fcntl.flock(writer.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            checked = self.cli('SessionWithHistoryOpen', 'profile', 'session',
+                               '--profile', self.profiles['Alice'])
+            assert checked['status'] == 'Authenticated'
+            assert checked['session']['acting']['account'] == accounts['Alice']
         assert self.sessions['Agent']['classification']['kind'] == 'agent'
         self.record(dict(case='DistinctNativeHrcPrincipals',passed=True,
                          principals={k:v['principal'] for k,v in companions.items()}))

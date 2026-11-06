@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "name": "Forest Dark",
+  "mode": "dark",
+  "colors": {
+    "panel": "#15221C",
+    "surface": "#1C3026",
+    "window": "#1A2C23",
+    "input": "#101B15",
+    "faint": "#20352A",
+    "text": "#E5F1E8",
+    "muted": "#ADC7B5",
+    "accent": "#8BD1A2",
+    "selection": "#2B4D38",
+    "selectionText": "#D3F5DC",
+    "border": "#3E5B49",
+    "button": "#294232",
+    "hover": "#345440",
+    "pressed": "#2B4D38"
+  },
+  "display": {
+    "cornerCut": 5,
+    "outlineWidth": 1
+  }
+}
