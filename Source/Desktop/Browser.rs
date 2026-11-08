@@ -29,6 +29,15 @@ const SETUP: &str = "Configure this chat profile's Suite executable and joined n
 const FAILED: &str = "The HyperNet browser could not complete this request. Check its Page route and reader permission. A network profile can serve only one active native client; choose a separate reader in Settings > HyperNet Pages or close its existing browser window.";
 const PRIVATE_PROFILE: &str =
     "Choose an existing private, canonical native network Profile.json owned by this user.";
+const READER_BUSY: &str = "A browser already uses this reader profile. Navigate in that window, or close it before opening another Page from chat.";
+
+fn reader_available(reader: &Path, active: &[PathBuf]) -> Result<(), &'static str> {
+    if active.iter().any(|path| path == reader) {
+        Err(READER_BUSY)
+    } else {
+        Ok(())
+    }
+}
 
 pub(super) struct Job<T> {
     cancel: Arc<AtomicBool>,
@@ -301,8 +310,22 @@ impl Browser {
             return Err("A Page browser is already starting. Wait for its profile check.");
         }
         let profile = profile.to_owned();
+        let active_readers: Vec<_> = self
+            .children
+            .iter()
+            .map(|opened| opened.reader.clone())
+            .collect();
         self.opening = Some(Job::start(ctx, move |cancel| {
             let config = configuration(&profile)?;
+            reader_available(
+                config
+                    .page_browser_profile
+                    .as_deref()
+                    .unwrap_or(&config.network_profile),
+                &active_readers,
+            )?;
+            crate::onboarding::prepare_reader(&config, cancel)
+                .map_err(|_| "Page reader access could not be renewed. Close its existing browser and retry; the same reader identity is retained.")?;
             let network = validate(&config, cancel)?;
             let address = gui::page_links::Address::parse(&request.address)
                 .ok_or("Invalid HyperNet Page address.")?;
@@ -329,9 +352,7 @@ impl Browser {
             .iter()
             .any(|opened| opened.reader == launch.reader)
         {
-            return Err(
-                "A browser already uses this reader profile. Navigate in that window, or close it before opening another Page from chat.",
-            );
+            return Err(READER_BUSY);
         }
         write_palette(&launch.palette, &launch.colours)?;
         let child = launch

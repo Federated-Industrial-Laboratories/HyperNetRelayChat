@@ -3,7 +3,7 @@
 [Project](../README.md) &middot; [Install](Installation.md) &middot;
 [Trust](../README.md#trust-and-operations) &middot; [HyperNet](https://github.com/Federated-Industrial-Laboratories/HyperNet)
 
-These manuals describe HRC 0.2.1. Start with the task you want to complete;
+These manuals describe HRC 0.2.2. Start with the task you want to complete;
 the release notes distinguish current features from earlier qualification evidence.
 
 ## Choose a starting point
@@ -11,6 +11,7 @@ the release notes distinguish current features from earlier qualification eviden
 | Goal | Guide |
 | --- | --- |
 | Install and open the desktop application | [Installation and upgrades](Installation.md) |
+| Join with one private invitation, or operate optional self-service admission | [Private invitations](SelfServiceInvitations.md) |
 | Join a conversation and use the interfaces | [GUI, TUI and CLI](Interfaces.md) |
 | Choose or import desktop colours | [Themes](Themes.md) |
 | Open a HyperNet Page from a conversation | [Page links and browser configuration](Interfaces.md#hypernet-page-links) |

@@ -37,6 +37,7 @@ impl Draft {
     }
 }
 pub struct Model {
+    pub online_requested: bool,
     pub controller: Controller,
     pub snapshot: Arc<Snapshot>,
     pub editor: Editor,
@@ -60,6 +61,7 @@ impl Model {
         let controller = Controller::open(profile).map_err(|e| e.code())?;
         let snapshot = controller.snapshot();
         let mut model = Self {
+            online_requested: !offline,
             controller,
             snapshot,
             editor: Editor::default(),
@@ -93,6 +95,12 @@ impl Model {
         Ok(model)
     }
     pub fn dispatch(&mut self, command: Command) -> Option<u64> {
+        if matches!(&command, Command::Connect) {
+            self.online_requested = true;
+        }
+        if matches!(&command, Command::Disconnect) {
+            self.online_requested = false;
+        }
         match self.controller.dispatch(command) {
             Ok(id) => Some(id),
             Err(error) => {

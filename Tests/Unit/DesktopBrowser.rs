@@ -224,6 +224,17 @@ fn page_reader_existing_window_refuses_second_spawn_without_touching_palette() {
         child,
         reader: reader.clone(),
     });
+    assert_eq!(
+        reader_available(&reader, std::slice::from_ref(&reader)),
+        Err(READER_BUSY)
+    );
+    assert!(
+        reader_available(
+            &directory.0.join("Independent.json"),
+            std::slice::from_ref(&reader)
+        )
+        .is_ok()
+    );
     let result = browser.launch(Launch {
         command: Command::new("/nonexistent-must-not-run"),
         reader,

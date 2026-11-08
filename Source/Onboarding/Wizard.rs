@@ -25,6 +25,7 @@ pub struct Selection {
 enum Step {
     Existing,
     Runtime,
+    PrivateInvitation,
     Network,
     Bundle,
     Connect,
@@ -32,9 +33,10 @@ enum Step {
     Activation,
 }
 impl Step {
-    const ALL: [(Self, &'static str); 7] = [
+    const ALL: [(Self, &'static str); 8] = [
         (Self::Existing, "Open a profile"),
         (Self::Runtime, "Local runtime"),
+        (Self::PrivateInvitation, "Private invitation"),
         (Self::Network, "Request access"),
         (Self::Bundle, "Import invitation"),
         (Self::Connect, "Connect network"),
@@ -47,6 +49,7 @@ struct Job {
     receiver: mpsc::Receiver<super::Result<Completed>>,
     thread: Option<thread::JoinHandle<()>>,
     next: Option<Step>,
+    reload_runtime: bool,
 }
 impl Drop for Job {
     fn drop(&mut self) {
@@ -63,6 +66,7 @@ enum Pick {
     SetupFolder,
     Bootstrap,
     Bundle,
+    PrivateInvitation,
     Suite,
     Core,
     Chronyc,
@@ -91,6 +95,10 @@ pub struct Wizard {
     bootstrap_pin: String,
     bundle: String,
     bundle_pin: String,
+    private_invitation: String,
+    invitation_file: String,
+    private_setup: bool,
+    organisational_consent: bool,
     organisational: bool,
     notice: String,
     error: Option<Error>,
@@ -132,6 +140,10 @@ impl Wizard {
             bootstrap_pin: String::new(),
             bundle: String::new(),
             bundle_pin: String::new(),
+            private_invitation: String::new(),
+            invitation_file: String::new(),
+            private_setup: false,
+            organisational_consent: false,
             organisational: false,
             notice: String::new(),
             error: None,
@@ -152,6 +164,7 @@ impl Wizard {
         self.notice.clear();
         self.export = None;
         let config = self.config.clone();
+        let reload_runtime = matches!(&task, Task::PrivateInvitation { .. });
         let cancel = Arc::new(AtomicBool::new(false));
         let worker_cancel = cancel.clone();
         let (sender, receiver) = mpsc::sync_channel(1);
@@ -166,6 +179,7 @@ impl Wizard {
             receiver,
             thread: Some(thread),
             next,
+            reload_runtime,
         });
     }
     pub fn logic(&mut self, ctx: &egui::Context) {
@@ -178,7 +192,10 @@ impl Wizard {
                 Err(mpsc::TryRecvError::Empty) => None,
             });
         if let Some(outcome) = outcome {
-            let next = self.job.take().and_then(|job| job.next);
+            let job = self.job.take().expect("completed setup has a job");
+            let next = job.next;
+            let reload_runtime = job.reload_runtime;
+            drop(job);
             match outcome {
                 Ok(done) => {
                     self.folder = done.config.data_directory.display().to_string();
@@ -196,7 +213,17 @@ impl Wizard {
                         self.step = next;
                     }
                 }
-                Err(error) => self.error = Some(error),
+                Err(error) => {
+                    if reload_runtime
+                        && let Ok(saved) = RuntimeConfig::load(
+                            &self.config.data_directory.join("OnboardingRuntime.json"),
+                        )
+                        && saved.data_directory == self.config.data_directory
+                    {
+                        self.config = saved;
+                    }
+                    self.error = Some(error);
+                }
             }
         }
         if self.job.is_some() {
@@ -229,6 +256,7 @@ impl Wizard {
             Pick::SetupFolder => self.folder = text,
             Pick::Bootstrap => self.bootstrap = text,
             Pick::Bundle => self.bundle = text,
+            Pick::PrivateInvitation => self.invitation_file = text,
             Pick::Suite => self.config.suite = path,
             Pick::Core => self.config.core = path,
             Pick::Chronyc => self.config.chronyc = path,
@@ -351,7 +379,7 @@ impl Wizard {
         if let Some(job) = &self.job {
             ui.horizontal(|ui| {
                 ui.spinner();
-                ui.label("Working locally…");
+                ui.label("Working…");
                 if components::button(ui, "Cancel").clicked() {
                     job.cancel.store(true, Ordering::Release);
                 }
@@ -366,7 +394,7 @@ impl Wizard {
                         self.browse(&ctx, Pick::Profile, &self.profile.clone());
                     }
                 });
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     if components::primary(ui, "Open chat").clicked() {
                         self.start(
                             &ctx,
@@ -388,11 +416,40 @@ impl Wizard {
                         );
                     }
                     if components::button(ui, "New profile").clicked() {
+                        self.private_setup = false;
+                        self.step = Step::Runtime;
+                    }
+                    if ui.add(egui::Button::new("Join with a private invitation")
+                        .min_size(egui::vec2(components::ACTION_WIDTH, components::CONTROL_HEIGHT))).clicked() {
+                        self.private_setup = true;
                         self.step = Step::Runtime;
                     }
                 });
             }
             Step::Runtime => self.runtime_ui(ui, &ctx),
+            Step::PrivateInvitation => {
+                ui.label("Paste the private invitation supplied by your host, or choose its text file.");
+                ui.add(egui::TextEdit::multiline(&mut self.private_invitation).char_limit(65536).desired_rows(3).desired_width(f32::INFINITY));
+                ui.horizontal(|ui| {
+                    ui.text_edit_singleline(&mut self.invitation_file);
+                    if components::button(ui, "Choose invitation file…").clicked() {
+                        self.browse(&ctx, Pick::PrivateInvitation, &self.invitation_file.clone());
+                    }
+                    if components::button(ui, "Clear file").clicked() { self.invitation_file.clear(); }
+                });
+                ui.small("Keep this invitation private. Keys are generated on this computer. Its host admits your ordinary chat account and, when available, a separate read-only Page reader.");
+                ui.checkbox(&mut self.organisational_consent, "Accept this host operating both relay and service, and automatic access renewal within this invitation's existing limits");
+                if self.config.self_service.is_some() {
+                    ui.label("An invitation is retained in this setup folder. Leave both fields empty to resume it with the same keys.");
+                }
+                if ui.add_enabled(self.organisational_consent, egui::Button::new("Join or resume invitation")).clicked() {
+                    self.start(&ctx, Task::PrivateInvitation {
+                        text: self.private_invitation.clone(),
+                        file: (!self.invitation_file.trim().is_empty()).then(|| self.invitation_file.trim().into()),
+                    }, None);
+                    self.private_invitation.clear();
+                }
+            }
             Step::Network => {
                 ui.label("Network bootstrap");
                 ui.horizontal(|ui| {
@@ -581,10 +638,22 @@ impl Wizard {
                 self.start(ctx, Task::Preflight, None);
             }
             if components::button(ui, "Start local clock").clicked() {
-                self.start(ctx, Task::StartClock, Some(Step::Network));
+                self.start(
+                    ctx,
+                    Task::StartClock,
+                    Some(if self.private_setup {
+                        Step::PrivateInvitation
+                    } else {
+                        Step::Network
+                    }),
+                );
             }
             if components::button(ui, "Use current clock").clicked() {
-                self.step = Step::Network;
+                self.step = if self.private_setup {
+                    Step::PrivateInvitation
+                } else {
+                    Step::Network
+                };
             }
         });
     }

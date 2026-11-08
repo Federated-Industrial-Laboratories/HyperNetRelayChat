@@ -3,12 +3,12 @@
   "site": {
     "id": "hypernet-hrc-docs",
     "title": "HyperNet Relay Chat",
-    "description": "HRC 0.2.1 manuals for desktop setup, conversation and operations.",
+    "description": "HRC 0.2.2 manuals for desktop setup, conversation and operations.",
     "language": "en-GB",
-    "version": "0.2.1",
+    "version": "0.2.2",
     "channel": "stable",
     "homeUrl": "/docs/",
-    "footer": "Federated Industrial Laboratories | HyperNet Relay Chat 0.2.1",
+    "footer": "Federated Industrial Laboratories | HyperNet Relay Chat 0.2.2",
     "indexable": true,
     "origin": "https://hypernet.federatedindustrial.com"
   },
@@ -22,7 +22,7 @@
     "type": "snapshot",
     "root": "content",
     "manifest": "source.json",
-    "tag": "v0.2.1"
+    "tag": "v0.2.2"
   },
   "navigation": [
     {
@@ -42,6 +42,11 @@
           "source": "Documentation/DesktopHosting.md",
           "slug": "desktop-hosting",
           "label": "Create and operate a HyperNet"
+        },
+        {
+          "source": "Documentation/SelfServiceInvitations.md",
+          "slug": "self-service-invitations",
+          "label": "Optional private invitations"
         },
         {
           "source": "Documentation/DesktopBots.md",

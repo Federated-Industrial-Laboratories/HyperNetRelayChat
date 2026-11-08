@@ -27,3 +27,9 @@ For an expiring grant or federation agreement, report its scope and expiry. Obta
 current authority through the supported consent process. Do not lengthen validity,
 change the clock, suppress verification or replace identity to clear an error.
 Keep operational logs bounded and free of conversation content and credentials.
+
+Optional self-service hosting uses `hrc admission --help` and the installed
+SelfServiceInvitations manual. It starts disabled. Issue a separate private file
+for each recipient; never print its secret into logs or diagnostics. Inspect,
+disable and revoke through the supported commands. Disabling admission does not
+revoke existing native access. Keep exact uncertain effects and requester state.

@@ -1,5 +1,30 @@
 # Release notes
 
+## 0.2.2
+
+Hosts can enable optional self-service invitations and send one private code or
+text file in advance. The recipient joins from the desktop with locally generated
+keys, without a live request or registration exchange. Each invitation binds to
+one recipient. The existing manual approval workflow remains available, and
+self-service hosting starts disabled.
+
+The separate, pinned TLS 1.3 admission service exchanges only public setup and
+renewal artifacts. Native HyperNet remains the transport for chat and Pages.
+Recipients receive ordinary scoped permissions; an optional Page reader uses its
+own identity. Host controls bound the invitation count, expiry and native work,
+and can disable admission or revoke an exact recipient.
+
+Opted-in online profiles renew access within existing consent and membership
+limits. Renewal retains keys, account identity, history and original native
+requester state. Disconnect and offline mode suppress automatic reconnection.
+Interrupted requests resume their original outcome; uncertain native effects
+require operator inspection.
+
+Core 0.10.4 and Suite 0.10.3 remain the supported native pair. Initial native
+admission must finish within 24 hours after redemption, bounded by the host
+access deadline. See [private invitations](SelfServiceInvitations.md) for setup,
+recovery, expiry and limits.
+
 ## 0.2.1
 
 Service operators can restrict new rooms, private groups and direct conversations

@@ -54,6 +54,11 @@ endpoints. These are pilot defaults, not a measured concurrent-user guarantee.
 
 ## Clients and agents
 
+Hosts can optionally enable [self-service invitations](SelfServiceInvitations.md)
+to send one private invitation before a recipient creates their keys. That
+separate admission service defaults to disabled. It automates the public-file
+exchange and ordinary enrolment described below; manual approval remains available.
+
 A joining desktop first exports its native public NetworkRequest. The host
 creates an exact member invitation, bounded route vouchers, a Service-only HRC
 connect grant and a one-use HRC account invitation. The resulting HrcClientSetup

@@ -1,8 +1,8 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 28" role="img" aria-label="Apache 2.0, version 0.2.1, Rust 1.96, HyperNet transport">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 28" role="img" aria-label="Apache 2.0, version 0.2.2, Rust 1.96, HyperNet transport">
   <!-- SPDX-License-Identifier: Apache-2.0 -->
   <g font-family="Arial,sans-serif" font-size="13" text-anchor="middle">
     <g><path d="M0 0h192v28H0z" fill="#49555f"/><path d="M76 0h116v28H76z" fill="#65c5b7"/><text x="38" y="18" fill="#fff">License</text><text x="134" y="18" fill="#18222b">Apache-2.0</text></g>
-    <g transform="translate(200)"><path d="M0 0h152v28H0z" fill="#49555f"/><path d="M76 0h76v28H76z" fill="#65c5b7"/><text x="38" y="18" fill="#fff">Version</text><text x="114" y="18" fill="#18222b">0.2.1</text></g>
+    <g transform="translate(200)"><path d="M0 0h152v28H0z" fill="#49555f"/><path d="M76 0h76v28H76z" fill="#65c5b7"/><text x="38" y="18" fill="#fff">Version</text><text x="114" y="18" fill="#18222b">0.2.2</text></g>
     <g transform="translate(360)"><path d="M0 0h148v28H0z" fill="#49555f"/><path d="M72 0h76v28H72z" fill="#65c5b7"/><text x="36" y="18" fill="#fff">Rust</text><text x="110" y="18" fill="#18222b">1.96</text></g>
     <g transform="translate(516)"><path d="M0 0h204v28H0z" fill="#49555f"/><path d="M88 0h116v28H88z" fill="#65c5b7"/><text x="44" y="18" fill="#fff">Transport</text><text x="146" y="18" fill="#18222b">HyperNet</text></g>
   </g>

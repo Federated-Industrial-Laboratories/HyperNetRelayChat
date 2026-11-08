@@ -12,6 +12,11 @@ Create an endpoint profile with the [service and client setup](ConversationSetup
 procedure. Each open client owns that profile's encrypted local state exclusively.
 Use separate enrolled profiles for simultaneous clients or agents.
 
+When the host enables optional [private invitations](SelfServiceInvitations.md),
+choose **Join with a private invitation** and use a fresh private setup folder.
+The desktop completes native admission and HRC registration using locally
+generated keys. The manual setup steps remain available.
+
 ```sh
 hrc gui --profile /absolute/path/to/profile
 hrc tui --profile /absolute/path/to/profile

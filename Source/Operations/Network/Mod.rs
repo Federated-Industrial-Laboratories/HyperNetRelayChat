@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! User-owned HyperNet hosting through pinned native package and consent contracts.
+#[path = "Admission.rs"]
+mod admission;
 #[path = "Bootstrap.rs"]
 mod bootstrap;
 #[path = "Clients.rs"]
@@ -19,7 +21,18 @@ mod services;
 #[path = "Subnets.rs"]
 mod subnets;
 
+pub(crate) use admission::admission_config;
 pub use clients::{enrol_client, invite_client};
+pub(crate) fn replace_companion_target(
+    companion: &std::path::Path,
+    profile: &std::path::Path,
+    service: &str,
+    network: &str,
+    incarnation: &str,
+    source: &std::path::Path,
+) -> Result<()> {
+    companion::replace_target(companion, profile, service, network, incarnation, source)
+}
 pub use configuration::{
     Configuration, Preview, Requirement, Status, local_addresses, valid_host_address,
 };

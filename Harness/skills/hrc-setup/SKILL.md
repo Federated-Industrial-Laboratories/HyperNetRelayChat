@@ -27,6 +27,11 @@ management controls work without this assistant.
    accepted bootstrap fingerprint. Check admission, current application consent,
    service binding and clock observation. Network access and HRC account
    registration are distinct operations; neither is implied by an open socket.
+   HRC 0.2.2 also supports optional private self-service invitations. With an
+   invitation from the intended host, use **Join with a private invitation**.
+   The desktop generates keys locally and retains the exact admission for retry.
+   Read the installed SelfServiceInvitations manual; keep the bearer code private.
+   Manual file exchange remains available.
 6. Present any pending writes with their target and effect. Apply work already
    authorised; ask only for missing choices or authority. Keep optional host
    hardening separate from basic setup.

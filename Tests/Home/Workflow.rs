@@ -1,4 +1,6 @@
 use super::*;
+#[path = "AdmissionRetry.rs"]
+mod admission_retry;
 #[path = "BudgetScreen.rs"]
 mod budget_screen;
 #[path = "../Confidential/Workflow.rs"]
