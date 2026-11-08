@@ -136,6 +136,19 @@ fn until(model: &mut Model, done: impl Fn(&Model) -> bool) {
         thread::sleep(Duration::from_millis(5));
     }
 }
+
+#[test]
+fn explicit_offline_intent_controls_automatic_access_renewal() {
+    let fixture = Fixture::new();
+    let mut model = fixture.open();
+    assert!(!model.online_requested);
+    model.dispatch(Command::Connect);
+    assert!(model.online_requested);
+    model.dispatch(Command::Disconnect);
+    assert!(!model.online_requested);
+    model.save();
+    assert!(!model.online_requested);
+}
 fn committed(model: &mut Model, request: u64, room: RoomId) {
     Arc::make_mut(&mut model.snapshot)
         .deliveries

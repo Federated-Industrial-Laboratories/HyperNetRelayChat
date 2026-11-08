@@ -149,3 +149,36 @@ pub fn enrol(directory: &Path, registration: &Path) -> Result<EndpointActor> {
         .map_err(|_| Error)?;
     Ok(endpoint.acting)
 }
+
+/// Recover an operator-retained invitation after an interrupted output write.
+pub fn invite_exact(
+    directory: &Path,
+    principal: Id,
+    id: Id,
+    expires_ms: u64,
+) -> Result<Invitation> {
+    let (config, mut home) = open(directory)?;
+    home.issue_invitation_exact(
+        id,
+        principal,
+        AccountClass::Human,
+        expires_ms,
+        config.clock.sample().map_err(|_| Error)?,
+    )
+    .map_err(|_| Error)
+}
+
+/// Exact retry returns the historical enrolment result; it never restores revoked authority.
+pub fn enrol_exact(directory: &Path, bytes: &[u8]) -> Result<EndpointActor> {
+    let registration = verify_registration_request(bytes).map_err(|_| Error)?;
+    let (config, mut home) = open(directory)?;
+    if let Some(actor) = home
+        .registration_outcome(&registration)
+        .map_err(|_| Error)?
+    {
+        return Ok(actor);
+    }
+    home.accept_registration(&registration, config.clock.sample().map_err(|_| Error)?)
+        .map(|endpoint| endpoint.acting)
+        .map_err(|_| Error)
+}

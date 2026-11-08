@@ -17,6 +17,8 @@ mod interaction;
 mod onboarding;
 #[path = "Operations/Mod.rs"]
 mod operations;
+#[path = "SelfService/Mod.rs"]
+mod self_service;
 #[path = "Tui/Mod.rs"]
 mod tui;
 use clap::{Args, Parser, Subcommand};
@@ -39,6 +41,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Explicitly enable and administer optional self-service invitations.
+    Admission {
+        #[command(subcommand)]
+        command: self_service::commands::Command,
+    },
     /// Desktop setup and operator actions with structured results.
     Manage {
         #[command(subcommand)]
@@ -428,6 +435,17 @@ fn main() -> ExitCode {
                 return ExitCode::FAILURE;
             }
         },
+        Command::Admission { command } => match self_service::commands::run(command) {
+            Ok(value) => output(&value),
+            Err(message) => {
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "{}",
+                    json!({"status":"Failed","code":"AdmissionRefused","message":message.to_string()})
+                );
+                return ExitCode::FAILURE;
+            }
+        },
         Command::Transport { command } => run(command),
         command => {
             let result = match command {
@@ -450,7 +468,9 @@ fn main() -> ExitCode {
                 Command::Abandon(request) => conversation::abandon(request),
                 Command::Transport { .. } | Command::Gui(_) | Command::Tui(_) => unreachable!(),
                 Command::Bot(_) | Command::Install | Command::SetupBundle(_) => unreachable!(),
-                Command::Manage { .. } | Command::Assistant { .. } => unreachable!(),
+                Command::Manage { .. } | Command::Assistant { .. } | Command::Admission { .. } => {
+                    unreachable!()
+                }
             };
             result.map_err(Failure).and_then(|v| output(&v))
         }

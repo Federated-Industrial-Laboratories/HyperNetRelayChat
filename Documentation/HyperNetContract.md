@@ -51,6 +51,17 @@ When migrating from 0.9.0 to the corrected permission evaluator, the complete au
 
 The additive 0.10.0 check interface needs matching Core endpoints and Suite companions, stopped service replacement and renewed local artifact consent. It does not itself require new grants. Existing 0.9.1 payload-only peers remain compatible but cannot supply the fresh-check capability HRC requires.
 
+## Optional admission artifact exchange
+
+HRC 0.2.2 can expose a separately enabled TLS 1.3 invitation endpoint. It exchanges
+only public admission, registration and route-renewal artifacts before or between
+native connections. A private invitation pins its authority, exact leaf certificate
+and network bootstrap; normal certificate validity and IP checks still apply.
+This endpoint cannot carry chat messages, Pages or arbitrary operator commands.
+All application traffic continues to require native HyperNet transport and current
+authority checks. The manual file exchange remains supported. See
+[private invitations](SelfServiceInvitations.md).
+
 ## Application identity and renewal
 
 An application admission binds its own key, owner and exact grant, with validity at most seven days and within grant validity. Applications have no further delegation authority. Same-rights renewal requires explicit owner/application consent; it does not enlarge rights or permit unattended consent. Withdrawal remains restrictive, and withdrawn application keys cannot be reused. [Application lifecycle](https://github.com/Federated-Industrial-Laboratories/HyperNet/blob/4cf491891e2b2c5a21cba339c3e0dd2730fed370/Documentation/Applications.md)

@@ -437,6 +437,13 @@ pub(crate) fn private_socket(path: &Path) -> Result<()> {
     Ok(())
 }
 
+pub(crate) fn socket_path_valid(path: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    let bytes = path.as_os_str().as_bytes();
+    let address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    bytes.len() < address.sun_path.len() && !bytes.contains(&0)
+}
+
 /// Probe local IPC without blocking on a full listener backlog or deleting stale state.
 pub(crate) fn socket_live(path: &Path) -> Result<bool> {
     use std::os::{
@@ -445,7 +452,7 @@ pub(crate) fn socket_live(path: &Path) -> Result<bool> {
     };
     let bytes = path.as_os_str().as_bytes();
     let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
-    if bytes.len() >= address.sun_path.len() || bytes.contains(&0) {
+    if !socket_path_valid(path) {
         return Err(Error::LocalConfiguration);
     }
     address.sun_family = libc::AF_UNIX as libc::sa_family_t;

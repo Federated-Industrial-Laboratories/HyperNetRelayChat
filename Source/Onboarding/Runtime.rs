@@ -33,6 +33,8 @@ pub struct RuntimeConfig {
     pub network_profile: PathBuf,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub page_browser_profile: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub self_service: Option<PathBuf>,
     pub joined_directory: PathBuf,
     pub companion_directory: PathBuf,
     pub targets_file: PathBuf,
@@ -56,6 +58,7 @@ impl RuntimeConfig {
             core: native::discover("HyperNet"),
             network_profile: root.join("Network/Profile.json"),
             page_browser_profile: None,
+            self_service: None,
             joined_directory: root.join("Network/Connected"),
             companion_directory: root.join("Companion"),
             targets_file: root.join("Network/Targets.json"),
@@ -123,16 +126,20 @@ impl RuntimeConfig {
                 }
             }
         }
-        if let Some(path) = &self.page_browser_profile
-            && (!path.is_absolute()
+        for path in [&self.page_browser_profile, &self.self_service]
+            .into_iter()
+            .flatten()
+        {
+            if !path.is_absolute()
                 || path.components().any(|p| {
                     matches!(
                         p,
                         std::path::Component::ParentDir | std::path::Component::CurDir
                     )
-                }))
-        {
-            return Err(Error::LocalConfiguration);
+                })
+            {
+                return Err(Error::LocalConfiguration);
+            }
         }
         Ok(())
     }
@@ -142,7 +149,7 @@ impl RuntimeConfig {
             monitor_key: self.clock_monitor_key.clone(),
         }
     }
-    fn workspace(&self) -> Result<()> {
+    pub(super) fn workspace(&self) -> Result<()> {
         self.paths()?;
         native::directory(&self.data_directory)?;
         for p in [
@@ -178,6 +185,10 @@ pub(super) enum Task {
     Connect,
     CreateEndpoint,
     Verify,
+    PrivateInvitation {
+        text: String,
+        file: Option<PathBuf>,
+    },
 }
 pub(super) struct Completed {
     pub config: RuntimeConfig,
@@ -188,18 +199,18 @@ pub(super) struct Completed {
 }
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct Prepared {
-    bootstrap_sha256: String,
-    device_key: String,
-    relay_key: String,
-    network: String,
-    incarnation: String,
+pub(super) struct Prepared {
+    pub bootstrap_sha256: String,
+    pub device_key: String,
+    pub relay_key: String,
+    pub network: String,
+    pub incarnation: String,
 }
-fn prepared(c: &RuntimeConfig) -> Result<Prepared> {
+pub(super) fn prepared(c: &RuntimeConfig) -> Result<Prepared> {
     files::json(&c.data_directory.join("PreparedNetwork.json"))
         .map_err(|_| Error::LocalConfiguration)
 }
-fn accepted(c: &RuntimeConfig) -> Result<Bundle> {
+pub(super) fn accepted(c: &RuntimeConfig) -> Result<Bundle> {
     let path = c.data_directory.join("AcceptedSetup.json");
     let bytes =
         files::read(&path, bundle::MAXIMUM_BUNDLE).map_err(|_| Error::LocalConfiguration)?;
@@ -208,7 +219,7 @@ fn accepted(c: &RuntimeConfig) -> Result<Bundle> {
 fn args(parts: &[&str]) -> Vec<String> {
     native::strings(parts)
 }
-fn tools(c: &RuntimeConfig, cancel: &AtomicBool, end: Instant) -> Result<()> {
+pub(super) fn tools(c: &RuntimeConfig, cancel: &AtomicBool, end: Instant) -> Result<()> {
     for (path, name) in [(&c.suite, "HyperNetSuite"), (&c.core, "HyperNet")] {
         let out = native::run(path, &args(&["--version"]), cancel, end)?;
         if !String::from_utf8_lossy(&out).starts_with(name) {
@@ -361,7 +372,7 @@ pub(super) fn recover_clock_identity(c: &mut RuntimeConfig) -> Result<()> {
     c.save()
 }
 
-fn start_clock(c: &mut RuntimeConfig, cancel: &AtomicBool, end: Instant) -> Result<()> {
+pub(super) fn start_clock(c: &mut RuntimeConfig, cancel: &AtomicBool, end: Instant) -> Result<()> {
     if c.clock().sample().is_ok() {
         return Ok(());
     }
@@ -451,7 +462,7 @@ fn start_clock(c: &mut RuntimeConfig, cancel: &AtomicBool, end: Instant) -> Resu
         std::thread::sleep(Duration::from_millis(100));
     }
 }
-fn prepare(
+pub(super) fn prepare(
     c: &RuntimeConfig,
     bootstrap: &Path,
     fingerprint: &str,
@@ -560,7 +571,7 @@ fn prepare(
     )?;
     Ok(request)
 }
-fn import(c: &RuntimeConfig, path: &Path, fingerprint: &str) -> Result<()> {
+pub(super) fn import(c: &RuntimeConfig, path: &Path, fingerprint: &str) -> Result<()> {
     let bundle = Bundle::load(path, fingerprint)?;
     let prepared = prepared(c)?;
     let route = bundle::route(&bundle.application_route.bytes()?, 7)?;
@@ -578,7 +589,7 @@ fn import(c: &RuntimeConfig, path: &Path, fingerprint: &str) -> Result<()> {
         &native::public_file(path, bundle::MAXIMUM_BUNDLE)?,
     )
 }
-fn companion(c: &RuntimeConfig, cancel: &AtomicBool, end: Instant) -> Result<()> {
+pub(super) fn companion(c: &RuntimeConfig, cancel: &AtomicBool, end: Instant) -> Result<()> {
     let expected = prepared(c)?;
     let bundle = accepted(c)?;
     let home = bundle.invitation()?.home;
@@ -649,11 +660,16 @@ fn ensure_companion(
 /// Start only explicitly configured local user services; an externally managed
 /// profile needs no configuration file and remains usable without this launcher.
 pub fn prepare_existing(profile: &Path, offline: bool, cancel: &AtomicBool) -> Result<()> {
+    let seconds = profile
+        .parent()
+        .and_then(|root| RuntimeConfig::load(&root.join("OnboardingRuntime.json")).ok())
+        .filter(|c| c.self_service.is_some())
+        .map_or(30, |_| 120);
     prepare_existing_before(
         profile,
         offline,
         cancel,
-        Instant::now() + Duration::from_secs(30),
+        Instant::now() + Duration::from_secs(seconds),
     )
 }
 fn prepare_existing_before(
@@ -683,6 +699,7 @@ fn prepare_existing_before(
         return Err(Error::LocalConfiguration);
     }
     start_clock(&mut config, cancel, end)?;
+    super::self_service::renew_existing(&config, cancel, end)?;
     ensure_companion(
         &config,
         &loaded.registration.transport_principal.as_hex(),
@@ -752,7 +769,7 @@ fn connect(c: &RuntimeConfig, cancel: &AtomicBool, end: Instant) -> Result<()> {
     )?;
     companion(c, cancel, end)
 }
-fn create_endpoint(c: &RuntimeConfig) -> Result<PathBuf> {
+pub(super) fn create_endpoint(c: &RuntimeConfig) -> Result<PathBuf> {
     let expected = accepted(c)?.invitation()?;
     if c.hrc_profile.exists() {
         let profile =
@@ -781,7 +798,7 @@ fn create_endpoint(c: &RuntimeConfig) -> Result<PathBuf> {
     }
     Ok(c.registration_file.clone())
 }
-fn verify(profile: &Path, cancel: &AtomicBool, end: Instant) -> Result<()> {
+pub(super) fn verify(profile: &Path, cancel: &AtomicBool, end: Instant) -> Result<()> {
     let value = client::Profile::load(profile).map_err(|_| Error::LocalConfiguration)?;
     value.clock.sample().map_err(|_| Error::ClockUnavailable)?;
     let executable = std::env::current_exe().map_err(|_| Error::RuntimeMissing)?;
@@ -792,7 +809,10 @@ fn verify(profile: &Path, cancel: &AtomicBool, end: Instant) -> Result<()> {
         end,
     )
     .map_err(|e| {
-        if matches!(e, Error::Cancelled | Error::Deadline) {
+        if matches!(
+            e,
+            Error::Cancelled | Error::Deadline | Error::RuntimeMissing
+        ) {
             e
         } else {
             Error::ActivationPending
@@ -809,7 +829,12 @@ pub(super) fn perform(
     cancel: &AtomicBool,
 ) -> Result<Completed> {
     // One fixed operation budget; component commands cannot restart it.
-    let end = Instant::now() + Duration::from_secs(120);
+    let seconds = if matches!(&task, Task::PrivateInvitation { .. }) {
+        600
+    } else {
+        120
+    };
+    let end = Instant::now() + Duration::from_secs(seconds);
     native::check(cancel, end)?;
     let mut export = None;
     let mut open = None;
@@ -899,6 +924,14 @@ pub(super) fn perform(
                 offline: false,
             });
             "Authenticated. Ready for chat."
+        }
+        Task::PrivateInvitation { text, file } => {
+            super::self_service::join(&mut config, &text, file.as_deref(), cancel, end)?;
+            open = Some(super::wizard::Selection {
+                profile: config.hrc_profile.clone(),
+                offline: false,
+            });
+            "Private invitation accepted. Ready for chat."
         }
     };
     native::check(cancel, end)?;

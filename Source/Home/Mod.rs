@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Serialized admission, deduplication and durable feature dispatch.
+#[path = "AdmissionRetry.rs"]
+mod admission_retry;
 #[path = "Budgets.rs"]
 mod budgets;
 #[path = "Devices.rs"]

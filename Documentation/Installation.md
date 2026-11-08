@@ -33,7 +33,7 @@ private directory permissions. There is no direct Internet fallback.
 
 Obtain the selected binary archive, source archive, `SHA256SUMS`, its
 `SHA256SUMS.sig` OpenSSH signature, and `PublisherKey.txt` from the
-[v0.2.1 release](https://github.com/Federated-Industrial-Laboratories/HyperNetRelayChat/releases/tag/v0.2.1).
+[v0.2.2 release](https://github.com/Federated-Industrial-Laboratories/HyperNetRelayChat/releases/tag/v0.2.2).
 Source and release packages are public. No repository account is required
 to download them.
 Verify the publisher key against this independently pinned SHA-256 fingerprint:
@@ -91,11 +91,14 @@ packages, kernel support and clock policy remain explicit host prerequisites.
 
 The setup wizard can open an existing profile or guide a new endpoint through
 network admission, invitation import, registration export and activation.
+HRC 0.2.2 also supports an optional [private invitation](SelfServiceInvitations.md)
+that completes admission and registration without a live operator exchange.
+The host must explicitly enable that mode; manual approval remains available.
 Core, Suite, user systemd and an authenticated local chrony source are prerequisites.
-The operator supplies the bootstrap and an independently confirmed fingerprint,
+For manual approval, the operator supplies the bootstrap and an independently confirmed fingerprint,
 then an HRC setup bundle and its separately confirmed SHA-256. `hrc setup-bundle
---help` lists the operator inputs. Keys stay local. The operator must still approve
-network access and enrol the signed HRC registration before online chat is available.
+--help` lists the operator inputs. Keys stay local. In that workflow, the operator approves
+network access and enrols the signed HRC registration before online chat is available.
 
 `OnboardingRuntime.json` records only explicitly selected local tools, paths and
 clock identity. A configured private chrony observer uses `-U -x` and cannot adjust

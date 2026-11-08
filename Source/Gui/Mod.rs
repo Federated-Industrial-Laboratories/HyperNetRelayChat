@@ -67,6 +67,9 @@ impl App {
     pub(crate) fn go_offline(&mut self) {
         self.model.dispatch(Command::Disconnect);
     }
+    pub(crate) fn wants_online(&self) -> bool {
+        self.model.online_requested
+    }
     pub(crate) fn ready_for_setup(&self) -> bool {
         self.setup_requested && self.model.draft_saved()
     }

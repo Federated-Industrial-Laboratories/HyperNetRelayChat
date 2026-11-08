@@ -23,7 +23,7 @@ use std::{
         mpsc,
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 pub const APPLICATION_ID: &str = "com.federatedindustrial.HyperNetRelayChat";
@@ -102,6 +102,8 @@ struct Desktop {
     operations: operations::Workspace,
     browser: browser::Browser,
     browser_settings: browser_settings::Settings,
+    renewal_requested: bool,
+    next_renewal_check: Instant,
 }
 impl Desktop {
     fn new(instance: instance::Instance, mut options: Options, ctx: &egui::Context) -> Self {
@@ -123,6 +125,8 @@ impl Desktop {
             operations: operations::Workspace::default(),
             browser: browser::Browser::default(),
             browser_settings: browser_settings::Settings::default(),
+            renewal_requested: false,
+            next_renewal_check: Instant::now(),
         };
         if !options.setup
             && let Some(profile) = options.profile
@@ -176,6 +180,7 @@ impl Desktop {
         ctx.request_repaint();
     }
     fn setup(&mut self, ctx: &egui::Context) {
+        self.renewal_requested = false;
         self.leave_page_context();
         self.chat = None;
         self.wizard = onboarding::Wizard::new(self.profile.clone());
@@ -188,6 +193,22 @@ impl Desktop {
 }
 impl eframe::App for Desktop {
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        if self.chat.as_ref().is_some_and(gui::App::wants_online)
+            && Instant::now() >= self.next_renewal_check
+        {
+            self.next_renewal_check = Instant::now() + Duration::from_secs(5);
+            if self.profile.as_deref().is_some_and(onboarding::renewal_due)
+                && self.opening.is_none()
+                && self.activation.is_none()
+                && self.next_profile.is_none()
+            {
+                self.leave_page_context();
+                self.renewal_requested = true;
+                if let Some(chat) = &mut self.chat {
+                    chat.prepare_setup();
+                }
+            }
+        }
         if self.first_logic {
             self.show(ctx);
             self.first_logic = false;
@@ -202,6 +223,7 @@ impl eframe::App for Desktop {
             {
                 self.activation = Some(request);
             } else if request.offline {
+                self.renewal_requested = false;
                 if let Some(chat) = &mut self.chat {
                     chat.go_offline();
                 } else if let Some(job) = &self.opening {
@@ -258,7 +280,17 @@ impl eframe::App for Desktop {
                 self.browser_settings.open(profile);
             }
             if chat.ready_for_setup() {
-                self.setup(ctx);
+                if !chat.wants_online() {
+                    self.renewal_requested = false;
+                }
+                if self.renewal_requested {
+                    self.setup(ctx);
+                    if let Some(profile) = self.profile.clone() {
+                        self.open(profile, false, ctx);
+                    }
+                } else {
+                    self.setup(ctx);
+                }
             }
         } else {
             self.wizard.logic(ctx);
@@ -272,6 +304,7 @@ impl eframe::App for Desktop {
             self.error = Some(error.into());
         }
         if std::mem::take(&mut self.operations.join_requested) {
+            self.renewal_requested = false;
             if let Some(chat) = &mut self.chat {
                 chat.prepare_setup();
             } else {
@@ -389,8 +422,12 @@ impl eframe::App for Desktop {
                 ui.horizontal(|ui| {
                     if gui::components::primary(ui, "Continue").clicked() {
                         let request = self.activation.take().expect("activation exists");
+                        self.renewal_requested = false;
                         self.leave_page_context();
                         self.next_profile = Some(request);
+                        if let Some(opening) = &self.opening {
+                            opening.cancel.store(true, Ordering::Release);
+                        }
                         if let Some(chat) = &mut self.chat {
                             chat.prepare_setup();
                         }
