@@ -2,6 +2,8 @@
 //! Desktop lifecycle, profile selection and activation share one native event loop.
 #[path = "Browser.rs"]
 mod browser;
+#[path = "BrowserSettings.rs"]
+mod browser_settings;
 #[path = "Installation.rs"]
 mod installation;
 #[path = "Instance.rs"]
@@ -99,6 +101,7 @@ struct Desktop {
     installed: bool,
     operations: operations::Workspace,
     browser: browser::Browser,
+    browser_settings: browser_settings::Settings,
 }
 impl Desktop {
     fn new(instance: instance::Instance, mut options: Options, ctx: &egui::Context) -> Self {
@@ -119,6 +122,7 @@ impl Desktop {
             installed: installation::is_installed(),
             operations: operations::Workspace::default(),
             browser: browser::Browser::default(),
+            browser_settings: browser_settings::Settings::default(),
         };
         if !options.setup
             && let Some(profile) = options.profile
@@ -131,6 +135,7 @@ impl Desktop {
         if self.opening.is_some() {
             return;
         }
+        self.leave_page_context();
         self.error = None;
         let cancel = Arc::new(AtomicBool::new(false));
         let cancelled = Arc::clone(&cancel);
@@ -171,9 +176,14 @@ impl Desktop {
         ctx.request_repaint();
     }
     fn setup(&mut self, ctx: &egui::Context) {
+        self.leave_page_context();
         self.chat = None;
         self.wizard = onboarding::Wizard::new(self.profile.clone());
         gui::theme::configure(ctx, false, false, 1.0);
+    }
+    fn leave_page_context(&mut self) {
+        self.browser_settings.close();
+        self.browser.cancel_pending();
     }
 }
 impl eframe::App for Desktop {
@@ -235,12 +245,17 @@ impl eframe::App for Desktop {
                     .profile
                     .as_deref()
                     .ok_or("Select a configured chat profile before opening Pages.")
-                    .and_then(|profile| self.browser.open(profile, request))
+                    .and_then(|profile| self.browser.open(profile, request, ctx))
                     .err()
                     .map(str::to_owned);
             }
             if chat.take_operations() {
                 self.operations.visible = true;
+            }
+            if chat.take_page_settings()
+                && let Some(profile) = &self.profile
+            {
+                self.browser_settings.open(profile);
             }
             if chat.ready_for_setup() {
                 self.setup(ctx);
@@ -252,6 +267,7 @@ impl eframe::App for Desktop {
             }
         }
         self.operations.logic(ctx);
+        self.browser_settings.logic(self.profile.as_deref());
         if let Some(error) = self.browser.poll() {
             self.error = Some(error.into());
         }
@@ -365,6 +381,7 @@ impl eframe::App for Desktop {
                     }
                 });
         }
+        self.browser_settings.ui(&ctx);
         if self.activation.is_some() {
             egui::Modal::new(egui::Id::unique("profile-activation")).show(&ctx, |ui| {
                 ui.heading("Switch profile?");
@@ -372,6 +389,7 @@ impl eframe::App for Desktop {
                 ui.horizontal(|ui| {
                     if gui::components::primary(ui, "Continue").clicked() {
                         let request = self.activation.take().expect("activation exists");
+                        self.leave_page_context();
                         self.next_profile = Some(request);
                         if let Some(chat) = &mut self.chat {
                             chat.prepare_setup();

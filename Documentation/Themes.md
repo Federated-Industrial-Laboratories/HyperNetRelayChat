@@ -15,7 +15,8 @@ with the HyperNetSuite graphical browser. HRC writes one private, atomically
 replaced `BrowserTheme.json` beside its desktop preferences. The file contains
 only the palette format below, with no chat content, credentials or network
 configuration. The browser reads it once at launch; an open window keeps that
-palette when HRC's selection changes.
+palette when HRC's selection changes. A separately selected Page reader uses the
+same theme handoff; its network profile does not change the chat appearance.
 
 ## Import a theme
 

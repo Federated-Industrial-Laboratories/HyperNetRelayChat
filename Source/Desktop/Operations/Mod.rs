@@ -9,7 +9,7 @@ mod network_ui;
 #[path = "Packages.rs"]
 mod packages_ui;
 #[path = "Picker.rs"]
-mod picker;
+pub(super) mod picker;
 #[path = "Service.rs"]
 mod service_ui;
 use crate::{assistant, gui::components as c, operations as ops};
