@@ -66,6 +66,13 @@ briefly stops only its own home service when an invitation or registration needs
 exclusive storage access, then restores it. An agent account also names its HRC
 operator. HyperNet grants and HRC agent delegation remain separate permissions.
 
+For a host with owner-created rooms only, set the [room creation policy](Operations.md#restrict-conversation-creation)
+in **Operations > HRC service** before inviting participants. List the owner's
+complete enrolled human account ID. The service then refuses new rooms, private
+groups and direct conversations from other accounts, including bots. Existing
+conversation access and moderation remain unchanged. No Core or Suite update is
+required for this HRC policy.
+
 ## Stop, resume and expiry
 
 Stop and Start act only on the units derived from this hosting configuration.

@@ -155,8 +155,9 @@ impl Workspace {
                         Completion::NetworkStatus => {
                             self.network.status = serde_json::from_value(value.clone()).ok();
                             if let Some(status) = &self.network.status {
-                                self.service.config =
-                                    ops::home::Configuration::at(status.service_directory.clone());
+                                self.service.select_config(ops::home::Configuration::at(
+                                    status.service_directory.clone(),
+                                ));
                             }
                         }
                         Completion::RenewalPreview => {

@@ -3,7 +3,7 @@
 [Project](../README.md) &middot; [Install](Installation.md) &middot;
 [Trust](../README.md#trust-and-operations) &middot; [HyperNet](https://github.com/Federated-Industrial-Laboratories/HyperNet)
 
-These manuals describe HRC 0.2.0. Start with the task you want to complete;
+These manuals describe HRC 0.2.1. Start with the task you want to complete;
 the release notes distinguish current features from earlier qualification evidence.
 
 ## Choose a starting point

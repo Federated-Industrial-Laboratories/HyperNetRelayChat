@@ -7,6 +7,8 @@ mod confidential;
 mod federation;
 #[path = "../Identity/Lifecycle.rs"]
 mod lifecycle;
+#[path = "RoomCreation.rs"]
+mod room_creation;
 #[path = "Search.rs"]
 mod search;
 #[path = "Tail.rs"]

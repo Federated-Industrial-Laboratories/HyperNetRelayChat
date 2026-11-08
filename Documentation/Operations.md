@@ -22,6 +22,47 @@ can require a fresh authorized stream; expired consent requires the HyperNet
 renewal procedure. HRC cannot extend either by retrying or changing its clock.
 Preserve the chosen relay policy when restoring service.
 
+## Restrict conversation creation
+
+The local service operator can restrict new rooms and direct conversations to
+an explicit list of enrolled human accounts. This policy is enforced by the
+service, including requests from older or modified clients. It grants no other
+account or room permissions. An agent cannot use its operator's listed account;
+delegated creation remains refused. Existing rooms, memberships, messages and
+moderator rights remain unchanged.
+
+In **Operations > HRC service > Room creation**, load the current policy, select
+**Only selected human accounts may create conversations**, and enter complete
+account identifiers, one per line. Apply the policy. An empty list disables all
+new conversation creation. At most 32 distinct local human accounts are accepted.
+The managed service briefly stops, updates its private configuration atomically
+and restarts if it was running. A service started outside these managed controls
+must be stopped separately; the exclusive store lease prevents a live update.
+
+The equivalent managed commands are:
+
+```sh
+hrc manage service room-creation --config /private/Home.json
+hrc manage service room-creation --config /private/Home.json --account OWNER_ACCOUNT
+hrc manage service room-creation --config /private/Home.json --deny-all
+```
+
+Repeat `--account` to replace the list with several permitted accounts. With no
+selection flag the command inspects the current policy. `--allow-all` explicitly
+restores the original creation rules. A stopped, directly operated service uses
+the same selections with `hrc service room-creation --directory /private/hrc-home`.
+Use `hrc profile session --profile PROFILE` to obtain an authenticated account ID.
+An account must already be enrolled before it can be listed.
+If an update reports an unconfirmed result, inspect the retained policy before
+retrying. A completed replacement can remain in place after a later I/O error.
+
+Existing configurations default to `all` for compatibility. Configure the policy
+before admitting untrusted participants. Restricting creation also blocks new
+confidential direct conversations and private groups for excluded users. Existing
+conversations remain available under their normal access rules. HRC services
+older than this setting cannot load the updated configuration; do not downgrade
+to bypass the restriction. Core, Suite and the HRC wire format are unchanged.
+
 ## Persistent state and backups
 
 Keep service and client directories on private local storage with the required

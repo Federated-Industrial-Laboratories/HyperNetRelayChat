@@ -33,10 +33,9 @@ private directory permissions. There is no direct Internet fallback.
 
 Obtain the selected binary archive, source archive, `SHA256SUMS`, its
 `SHA256SUMS.sig` OpenSSH signature, and `PublisherKey.txt` from the
-[private v0.2.0 release](https://github.com/Federated-Industrial-Laboratories/HyperNetRelayChat/releases/tag/v0.2.0).
-Access requires an authorized repository account. Repository and
-package distribution remain private; published manuals do not provide public
-download access.
+[v0.2.1 release](https://github.com/Federated-Industrial-Laboratories/HyperNetRelayChat/releases/tag/v0.2.1).
+Source and release packages are public. No repository account is required
+to download them.
 Verify the publisher key against this independently pinned SHA-256 fingerprint:
 
 `SHA256:XaKyGFow6q4DkZee5rQLUXN66AxQogVEtWb1sQS6m24`

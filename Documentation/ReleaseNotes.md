@@ -1,5 +1,22 @@
 # Release notes
 
+## 0.2.1
+
+Service operators can restrict new rooms, private groups and direct conversations
+to an explicit list of enrolled human accounts. An empty list disables creation.
+The service checks the authenticated account, including requests from older
+clients. Agents and delegated actors cannot inherit an allowed operator account.
+Existing conversations and their membership rules remain unchanged.
+
+Operations adds room-creation inspection and controls to the desktop and command
+line. Managed updates stop the owned service, write the reviewed policy atomically
+and restore its prior running state. Existing service configurations retain their
+previous creation policy until an operator changes it.
+
+This HRC-only update retains the Core 0.10.3 and Suite 0.10.2 hosting dependencies.
+No transport protocol or stored conversation schema changes are required.
+See [service permissions](Operations.md) for configuration and restart behaviour.
+
 ## 0.2.0
 
 HRC now includes an application-menu launcher, guided endpoint setup and an

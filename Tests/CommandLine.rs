@@ -1,6 +1,48 @@
 use super::*;
 
 #[test]
+fn room_creation_policy_has_explicit_compatible_operator_commands() {
+    let account = format!(
+        "{}:{}:{}",
+        "01".repeat(32),
+        "02".repeat(32),
+        "03".repeat(32)
+    );
+    for prefix in [
+        vec![
+            "hrc",
+            "service",
+            "room-creation",
+            "--directory",
+            "/private/service",
+        ],
+        vec![
+            "hrc",
+            "manage",
+            "service",
+            "room-creation",
+            "--config",
+            "/private/Service.json",
+        ],
+    ] {
+        assert!(Cli::try_parse_from(prefix.clone()).is_ok());
+        for option in ["--allow-all", "--deny-all"] {
+            let mut args = prefix.clone();
+            args.push(option);
+            assert!(Cli::try_parse_from(args).is_ok());
+        }
+        let mut args = prefix.clone();
+        args.extend(["--account", &account]);
+        assert!(Cli::try_parse_from(args.clone()).is_ok());
+        args.push("--allow-all");
+        assert!(Cli::try_parse_from(args).is_err());
+        let mut args = prefix;
+        args.extend(["--allow-all", "--deny-all"]);
+        assert!(Cli::try_parse_from(args).is_err());
+    }
+}
+
+#[test]
 fn desktop_entry_opens_without_command_line_profile_assembly() {
     assert!(Cli::try_parse_from(["hrc"]).unwrap().command.is_none());
     let cli = Cli::try_parse_from(["hrc", "gui", "--setup"]).unwrap();

@@ -8,6 +8,9 @@ mod devices;
 mod execution;
 #[path = "Retention.rs"]
 mod retention;
+#[path = "RoomCreation.rs"]
+mod room_creation;
+pub use room_creation::RoomCreationPolicy;
 #[path = "Schema.rs"]
 mod schema;
 #[path = "Views.rs"]
@@ -39,6 +42,7 @@ pub struct Home {
     pub(crate) home: ServiceId,
     pub(crate) signer: SigningKey,
     pub(crate) information: ServiceInformation,
+    pub(crate) room_creation: RoomCreationPolicy,
     pub(crate) federation_boot: Id,
 }
 impl Home {
@@ -65,6 +69,7 @@ impl Home {
             home,
             signer,
             information: ServiceInformation::default(),
+            room_creation: RoomCreationPolicy::default(),
             federation_boot: Id::random().map_err(|_| Error::Invalid)?,
         })
     }
@@ -94,11 +99,17 @@ impl Home {
             home,
             signer,
             information: ServiceInformation::default(),
+            room_creation: RoomCreationPolicy::default(),
             federation_boot: Id::random().map_err(|_| Error::Invalid)?,
         })
     }
     pub fn with_motd(mut self, motd: String) -> Result<Self> {
         self.information = ServiceInformation::new(motd)?;
+        Ok(self)
+    }
+    pub fn with_room_creation(mut self, policy: RoomCreationPolicy) -> Result<Self> {
+        policy.validate(self.home.network)?;
+        self.room_creation = policy;
         Ok(self)
     }
     pub fn service_id(&self) -> ServiceId {
