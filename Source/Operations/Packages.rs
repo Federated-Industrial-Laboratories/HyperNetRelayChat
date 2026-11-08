@@ -26,8 +26,8 @@ impl Product {
     }
     pub fn version(self) -> &'static str {
         match self {
-            Self::Core => "0.10.3",
-            Self::Suite => "0.10.2",
+            Self::Core => "0.10.4",
+            Self::Suite => "0.10.3",
         }
     }
     fn contract(self) -> &'static str {

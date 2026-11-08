@@ -144,7 +144,7 @@ impl Workspace {
         c::section(ui, "Native runtime", |ui| {
             path(
                 ui,
-                "Core 0.10.3",
+                "Core 0.10.4",
                 &mut self.network.config.core,
                 &mut self.picker,
                 "network-core",
@@ -152,7 +152,7 @@ impl Workspace {
             );
             path(
                 ui,
-                "Suite 0.10.2",
+                "Suite 0.10.3",
                 &mut self.network.config.suite,
                 &mut self.picker,
                 "network-suite",

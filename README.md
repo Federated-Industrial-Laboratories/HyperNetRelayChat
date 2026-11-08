@@ -29,7 +29,7 @@ explicitly federated rooms.
 > HRC 0.2.1 includes desktop setup, native hosting, model adapters and operator controls.
 > The earlier [bounded native Linux pilot](Documentation/IntegrationProfile.md#8-linux-pilot-qualification)
 > retains its original measured version, topology and workload scope.
-> Core 0.10.3 and Suite 0.10.2 are the supported hosting pair. Source and signed
+> Core 0.10.4 and Suite 0.10.3 are the supported hosting pair. Source and signed
 > release packages are public under Apache-2.0.
 
 ## Capabilities
@@ -71,7 +71,7 @@ Install the application-menu launcher, open **HyperNet Relay Chat**, then select
 an existing profile or follow the setup wizard. **Operations** remains available
 before connecting and while chatting.
 
-Native hosting uses separately verified Core 0.10.3 and Suite 0.10.2 packages.
+Native hosting uses separately verified Core 0.10.4 and Suite 0.10.3 packages.
 Import them through **Operations > Native packages**. Joining an existing network
 requires its operator's admission. The optional assistant harness is installed
 through **Operations > External assistant** and is separate from chat bots.

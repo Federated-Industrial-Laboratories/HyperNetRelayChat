@@ -46,6 +46,12 @@ impl App {
             preferences.palette.clone(),
         );
         egui::ScrollArea::vertical().show(ui, |ui| {
+            components::section(ui, "HyperNet Pages", |ui| {
+                ui.label("Choose a separately admitted reader profile to open Page links while chat stays connected.");
+                if components::button(ui, "Configure reader").clicked() {
+                    self.page_settings_requested = true;
+                }
+            });
             components::section(ui, "Profile", |ui| {
                 components::field(ui, "Nickname", |ui| {
                     ui.horizontal_wrapped(|ui| {

@@ -13,7 +13,13 @@ line. Managed updates stop the owned service, write the reviewed policy atomical
 and restore its prior running state. Existing service configurations retain their
 previous creation policy until an operator changes it.
 
-This HRC-only update retains the Core 0.10.3 and Suite 0.10.2 hosting dependencies.
+HyperNet Page links can use a separately joined reader profile selected in
+**Settings > HyperNet Pages**. HRC verifies its network and distinct identity
+before opening the native browser with the current theme. The chat companion
+keeps its own profile. Each reader profile supports one active browser at a time.
+
+The supported hosting pair is Core 0.10.4 and Suite 0.10.3. These native patches
+correct renewed route admission and updates to approved Pages.
 No transport protocol or stored conversation schema changes are required.
 See [service permissions](Operations.md) for configuration and restart behaviour.
 

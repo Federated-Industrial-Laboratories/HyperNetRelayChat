@@ -73,14 +73,39 @@ original address; **Copy message** preserves the complete original message.
 Hovering does not fetch Page content or contact a publisher.
 
 Click a link to open the existing HyperNetSuite graphical browser. HRC uses the
-Suite executable and joined network profile explicitly retained by this chat
-profile's setup. A profile without that configuration reports the missing setup;
-it does not select another account or an operating-system browser.
+trusted Suite executable retained by this chat profile's setup. A profile without
+that configuration reports the missing setup.
 
-The selected network needs its existing Page route and reader permission. The
-browser verifies the publication and refuses another network without an approved
-route. A chat link does not grant access. A link can be opened while chat is offline;
-that explicit action starts a separate browser connection.
+To browse while chat stays connected, first complete normal native admission for
+a separate Page reader. In **Settings > HyperNet Pages > Configure reader**,
+select **Use a separately admitted Page reader**. Choose its private native
+`Profile.json` with **Browse**, then choose **Check and save**. This selection is
+saved for the current chat profile and survives reopening HRC. It does not stop
+or replace the chat companion. No manual configuration editing is required.
+Entering Setup or switching chat profiles closes reader settings and cancels any
+pending Page launch. Existing browser windows remain open with their own profile.
+
+HRC uses Suite's offline `network inspect` command to verify joined membership,
+the same network, incarnation and accepted bootstrap, and distinct client, device and relay public
+identities. A copied chat profile is refused. HRC checks the saved selection
+again when opening a link. It never copies the reader's keys or requester state.
+Inspection confirms retained membership, not current Page permission; Suite
+checks current authority and verifies the publication when the Page is opened.
+
+The reader needs its own current Page and authority routes and reader grant from
+the network operator. A chat link and this setting grant no access. Close the
+reader's existing browser window before opening another Page: one native network
+profile can serve only one active client. Navigation within that browser remains
+available while chat continues. Another-network link is refused; select the
+corresponding chat and reader profiles explicitly.
+
+Existing runtime configurations keep their original chat-profile default. Clear
+**Use a separately admitted Page reader** and save to restore that default.
+Its native companion must be stopped before the browser can use the same profile;
+disconnecting chat alone does not stop the companion. A missing, invalid or busy
+selected reader reports an error and does not fall back to another identity.
+A link can also be opened from retained chat history while chat is offline; that
+explicit action starts a separate browser connection.
 
 Each new browser window receives the currently selected HRC colour palette and
 outline settings. Existing windows keep their launch palette. Browser text size

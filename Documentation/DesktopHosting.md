@@ -122,7 +122,7 @@ by renewing the host owner's desktop.
 
 ## Pinned native verification
 
-The supported pair is HyperNet Core 0.10.3 and HyperNetSuite 0.10.2. HRC
+The supported pair is HyperNet Core 0.10.4 and HyperNetSuite 0.10.3. HRC
 embeds their released offline Bundle.py and PackageTrust.py helpers, executes them
 with isolated Python, verifies the independently pinned publisher key and checks
 the signed installed manifest and complete file set. It does not accept a matching
@@ -130,8 +130,8 @@ version string as sufficient package identity.
 
 | Source | Pinned release |
 | --- | --- |
-| HyperNet Core | [v0.10.3](https://github.com/Federated-Industrial-Laboratories/HyperNet/releases/tag/v0.10.3) |
-| HyperNetSuite | [v0.10.2](https://github.com/Federated-Industrial-Laboratories/HyperNetSuite/releases/tag/v0.10.2) |
+| HyperNet Core | [v0.10.4](https://github.com/Federated-Industrial-Laboratories/HyperNet/releases/tag/v0.10.4) |
+| HyperNetSuite | [v0.10.3](https://github.com/Federated-Industrial-Laboratories/HyperNetSuite/releases/tag/v0.10.3) |
 
 | Embedded helper | SHA-256 |
 | --- | --- |

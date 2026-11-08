@@ -57,6 +57,7 @@ impl App {
             themes,
             theme_chooser: theme::Chooser::default(),
             page_request: None,
+            page_settings_requested: false,
         }
     }
     pub(crate) fn prepare_setup(&mut self) {
@@ -74,6 +75,9 @@ impl App {
     }
     pub(crate) fn take_page(&mut self) -> Option<page_links::Request> {
         self.page_request.take()
+    }
+    pub(crate) fn take_page_settings(&mut self) -> bool {
+        std::mem::take(&mut self.page_settings_requested)
     }
 }
 pub(crate) struct App {
@@ -100,6 +104,7 @@ pub(crate) struct App {
     themes: theme::Library,
     theme_chooser: theme::Chooser,
     page_request: Option<page_links::Request>,
+    page_settings_requested: bool,
 }
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {

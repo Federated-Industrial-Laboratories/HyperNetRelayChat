@@ -22,7 +22,7 @@ sys.dont_write_bytecode = True
 import PackageTrust
 
 PRODUCT = 'HyperNetSuite'
-VERSION = '0.10.2'
+VERSION = '0.10.3'
 NAMESPACE = 'HyperNetSuiteBundle1'
 PRINCIPAL = 'HyperNetSuitePublisher'
 MAX_ARCHIVE = 512 * 1024 * 1024

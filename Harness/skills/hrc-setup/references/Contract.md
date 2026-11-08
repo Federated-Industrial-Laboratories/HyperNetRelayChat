@@ -36,7 +36,7 @@ their `validate --file PATH` commands check the resulting private file before
 then `preview --config PATH` to validate the selected native prerequisites. There
 is no general JSON-schema command. Read the actual help before choosing flags.
 
-The supported upstream baseline is Core 0.10.3 plus Suite 0.10.2. Refer to those
+The supported upstream baseline is Core 0.10.4 plus Suite 0.10.3. Refer to those
 versions' manuals and actual executable help for network creation, admission and
 stream consent. An unavailable command is a compatibility issue, not permission
 to improvise wire actions or edit authority databases.

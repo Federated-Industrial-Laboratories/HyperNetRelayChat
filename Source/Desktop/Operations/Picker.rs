@@ -3,7 +3,7 @@
 use super::{PathBuf, c, egui};
 use std::os::unix::fs::FileTypeExt;
 #[derive(Default)]
-pub(super) struct Picker {
+pub(in crate::desktop) struct Picker {
     target: Option<&'static str>,
     directory: PathBuf,
     entries: Vec<(PathBuf, bool)>,

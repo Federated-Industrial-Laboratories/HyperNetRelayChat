@@ -31,6 +31,8 @@ pub struct RuntimeConfig {
     pub suite: PathBuf,
     pub core: PathBuf,
     pub network_profile: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_browser_profile: Option<PathBuf>,
     pub joined_directory: PathBuf,
     pub companion_directory: PathBuf,
     pub targets_file: PathBuf,
@@ -53,6 +55,7 @@ impl RuntimeConfig {
             suite: native::discover("HyperNetSuite"),
             core: native::discover("HyperNet"),
             network_profile: root.join("Network/Profile.json"),
+            page_browser_profile: None,
             joined_directory: root.join("Network/Connected"),
             companion_directory: root.join("Companion"),
             targets_file: root.join("Network/Targets.json"),
@@ -119,6 +122,17 @@ impl RuntimeConfig {
                     return Err(Error::LocalConfiguration);
                 }
             }
+        }
+        if let Some(path) = &self.page_browser_profile
+            && (!path.is_absolute()
+                || path.components().any(|p| {
+                    matches!(
+                        p,
+                        std::path::Component::ParentDir | std::path::Component::CurDir
+                    )
+                }))
+        {
+            return Err(Error::LocalConfiguration);
         }
         Ok(())
     }

@@ -22,7 +22,7 @@ use Ubuntu 24.04 with GNU libc 2.39; the current binary requires GNU libc 2.39 o
 later. Those offline checks do not establish full native-load qualification on
 Ubuntu 24.04. Other platforms are not qualified.
 
-The supported hosting pair is Core 0.10.3 and Suite 0.10.2. Use independently
+The supported hosting pair is Core 0.10.4 and Suite 0.10.3. Use independently
 verified binaries matching the [contract map](HyperNetContract.md), with the version-2 application
 companion and `checkAuthority-v2`. Each service and caller needs its own current
 application admission and approved stream configuration. See
