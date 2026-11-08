@@ -391,15 +391,21 @@ impl Budget {
 
 fn load_shared(directory: &Path, stop: Arc<AtomicBool>, diagnostics: bool) -> Result<Shared> {
     let config = Config::load(directory).map_err(|_| Error::Configuration)?;
+    let store = config.store(directory).map_err(|_| Error::State)?;
+    // Policy updates hold the store exclusively. Reload after acquiring it so a
+    // concurrent stopped update cannot leave this process using an old policy.
+    let current = Config::load(directory).map_err(|_| Error::Configuration)?;
+    if current.descriptor.home != config.descriptor.home {
+        return Err(Error::Configuration);
+    }
+    let config = current;
     let signer = files::key(&directory.join("Signing.key")).map_err(|_| Error::Configuration)?;
-    let home = Home::open(
-        config.store(directory).map_err(|_| Error::State)?,
-        config.descriptor.home,
-        signer.clone(),
-    )
-    .map_err(|_| Error::State)?
-    .with_motd(config.motd.clone())
-    .map_err(|_| Error::Configuration)?;
+    let home = Home::open(store, config.descriptor.home, signer.clone())
+        .map_err(|_| Error::State)?
+        .with_motd(config.motd.clone())
+        .map_err(|_| Error::Configuration)?
+        .with_room_creation(config.room_creation.clone())
+        .map_err(|_| Error::Configuration)?;
     config.clock.sample().map_err(|_| Error::Clock)?;
     let companion = Companion::new(&config.companion).map_err(|_| Error::Transport)?;
     let boot = home.federation_boot;

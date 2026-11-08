@@ -5,11 +5,11 @@
 <p align="center">Rooms, private conversations and scoped agents across independently administered HyperNets.</p>
 
 <p align="center">
-  <img src=".github/assets/badges.svg" width="720" alt="Apache 2.0 | Version 0.2.0 | Rust 1.96 | HyperNet transport">
+  <img src=".github/assets/badges.svg" width="720" alt="Apache 2.0 | Version 0.2.1 | Rust 1.96 | HyperNet transport">
 </p>
 
 <p align="center">
-  <a href="https://github.com/Federated-Industrial-Laboratories/HyperNetRelayChat/releases/tag/v0.2.0">Linux 0.2.0</a> &middot;
+  <a href="https://github.com/Federated-Industrial-Laboratories/HyperNetRelayChat/releases/tag/v0.2.1">Linux 0.2.1</a> &middot;
   <a href="Documentation/Installation.md">Install</a> &middot;
   <a href="Documentation/Interfaces.md">Use HRC</a> &middot;
   <a href="Documentation/DesktopHosting.md">Host</a> &middot;
@@ -26,11 +26,11 @@ conversation and permission rules. Chat transport stays on HyperNet, including
 explicitly federated rooms.
 
 > [!NOTE]
-> HRC 0.2.0 includes desktop setup, native hosting, model adapters and operator controls.
+> HRC 0.2.1 includes desktop setup, native hosting, model adapters and operator controls.
 > The earlier [bounded native Linux pilot](Documentation/IntegrationProfile.md#8-linux-pilot-qualification)
 > retains its original measured version, topology and workload scope.
-> Core 0.10.3 and Suite 0.10.2 are the supported hosting pair. Source and release
-> distribution remain private; published manuals do not grant download access.
+> Core 0.10.3 and Suite 0.10.2 are the supported hosting pair. Source and signed
+> release packages are public under Apache-2.0.
 
 ## Capabilities
 
@@ -65,7 +65,7 @@ The assistant does not receive chat access or administrator authority by being i
 
 ## Install
 
-Download the [Linux 0.2.0 release](https://github.com/Federated-Industrial-Laboratories/HyperNetRelayChat/releases/tag/v0.2.0)
+Download the [Linux 0.2.1 release](https://github.com/Federated-Industrial-Laboratories/HyperNetRelayChat/releases/tag/v0.2.1)
 and follow the [signed-package installation guide](Documentation/Installation.md).
 Install the application-menu launcher, open **HyperNet Relay Chat**, then select
 an existing profile or follow the setup wizard. **Operations** remains available
@@ -117,7 +117,7 @@ silently changes to direct Internet transport. See [confidential conversations](
 
 ## Documentation and development
 
-The [release notes](Documentation/ReleaseNotes.md) describe 0.2.0 and its support
+The [release notes](Documentation/ReleaseNotes.md) describe 0.2.1 and its support
 limits. The [documentation index](Documentation/ReadMe.md) separates everyday tasks,
 operations and protocol references. The [product plan](Documentation/ProductPlan.md)
 and [integration profile](Documentation/IntegrationProfile.md) retain scope and

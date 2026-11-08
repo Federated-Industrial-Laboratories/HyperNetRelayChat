@@ -222,6 +222,7 @@ fn dispatch(
     signer: &SigningKey,
     cancel: &Cancellation,
     information: &super::ServiceInformation,
+    room_creation: &super::RoomCreationPolicy,
     context: ExecutionContext<'_>,
 ) -> Domain<Outcome> {
     let action = verified.action();
@@ -269,6 +270,9 @@ fn dispatch(
             ExecutionContext::Local(_) => crate::conversations::operate(db, action, now),
             ExecutionContext::Remote(remote) => crate::federation::list_rooms(db, remote, now),
         },
+        RoomCreate | DirectCreate if !room_creation.permits(&action.actor) => {
+            deny("RoomCreationPolicy")
+        }
         RoomCreate | DirectCreate | RoomInvite | RoomJoin | RoomLeave | RoomSetTopic
         | RoomInspect => crate::conversations::operate(db, action, now),
         MessageSend | MessageReply | MessageAction | HistoryPage | HistoryContext | SearchQuery
@@ -470,6 +474,7 @@ impl Home {
         let home = self.home;
         let signer = &self.signer;
         let information = &self.information;
+        let room_creation = &self.room_creation;
         let response = |outcome| Response {
             home,
             operation_id: action.operation_id,
@@ -529,7 +534,7 @@ impl Home {
                     admitted_permit=Some(grant_permit);
                     match budgets::admit(db,action,now.lower_ms){Ok(true)=>{},Ok(false)=>return commit(refusal(ErrorCode::RateLimited,"OperationBudget")),Err(e)=>return Err(sql_fault(e))}
                     db.execute_batch("SAVEPOINT hrc_domain_effects")?;
-                    match dispatch(db,verified,now,grant_permit,signer,cancel,information,context) {
+                    match dispatch(db,verified,now,grant_permit,signer,cancel,information,room_creation,context) {
                         Ok(outcome)=>{if let ExecutionContext::Remote(remote)=context {crate::federation::record_creation(db,remote,&outcome).map_err(sql_fault)?;}crate::delegation::consume(db,grant_permit)?;db.execute_batch("RELEASE hrc_domain_effects")?;outcome},
                         Err(Fault::Sql(e))=>return Err(e),
                         Err(Fault::Reject(ErrorCode::Unavailable,"OriginIdentityFreshnessUnavailable"))=>{rollback_reason.set(Some("OriginIdentityFreshnessUnavailable"));return Err(rusqlite::Error::InvalidQuery)},

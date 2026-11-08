@@ -3,14 +3,18 @@
 use super::{Config, Descriptor, files};
 use crate::{
     clock,
-    home::{Home, Invitation},
+    home::{Home, Invitation, RoomCreationPolicy, types::decode},
     protocol::*,
     storage,
 };
-use std::path::{Path, PathBuf};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 #[derive(Debug, thiserror::Error)]
-#[error("service administration failed; existing state was preserved")]
+#[error("service administration failed; inspect retained state before retrying")]
 pub struct Error;
 pub type Result<T> = std::result::Result<T, Error>;
 pub fn create(
@@ -39,6 +43,7 @@ pub fn create(
         companion,
         clock,
         motd,
+        room_creation: RoomCreationPolicy::default(),
     };
     let store = storage::Store::create(
         directory.join("Data"),
@@ -62,6 +67,61 @@ fn open(directory: &Path) -> Result<(Config, Home)> {
     )
     .map_err(|_| Error)?;
     Ok((config, home))
+}
+/// Update only while the encrypted service store is exclusively held.
+pub fn room_creation(directory: &Path, policy: RoomCreationPolicy) -> Result<RoomCreationPolicy> {
+    let initial = Config::load(directory).map_err(|_| Error)?;
+    let mut store = initial.store(directory).map_err(|_| Error)?;
+    // A startup or another updater can have read configuration before acquiring the store.
+    let mut config = Config::load(directory).map_err(|_| Error)?;
+    if config.descriptor.home != initial.descriptor.home {
+        return Err(Error);
+    }
+    policy
+        .validate(config.descriptor.home.network)
+        .map_err(|_| Error)?;
+    if let RoomCreationPolicy::AllowList { accounts } = &policy {
+        let human_accounts = store
+            .read(Duration::from_secs(2), |db| {
+                use rusqlite::OptionalExtension;
+                for account in accounts {
+                    let class: Option<Vec<u8>> = db
+                        .query_row(
+                            "SELECT class FROM hrc_accounts WHERE id=?1",
+                            [account.to_string()],
+                            |row| row.get(0),
+                        )
+                        .optional()?;
+                    if class
+                        .as_ref()
+                        .and_then(|bytes| decode::<AccountClass>(bytes).ok())
+                        != Some(AccountClass::Human)
+                    {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            })
+            .map_err(|_| Error)?;
+        if !human_accounts {
+            return Err(Error);
+        }
+    }
+    config.room_creation = policy.clone();
+    let temporary = directory.join(format!(
+        "RoomCreation-{}.json",
+        Id::random().map_err(|_| Error)?
+    ));
+    let result = (|| {
+        files::create_json(&temporary, &config).map_err(|_| Error)?;
+        fs::rename(&temporary, directory.join("Service.json")).map_err(|_| Error)?;
+        fs::File::open(directory)
+            .and_then(|file| file.sync_all())
+            .map_err(|_| Error)?;
+        Ok(policy)
+    })();
+    let _ = fs::remove_file(temporary);
+    result
 }
 pub fn invite(
     directory: &Path,

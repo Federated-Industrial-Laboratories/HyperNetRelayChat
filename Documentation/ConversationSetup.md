@@ -73,6 +73,19 @@ live database files to bypass that lease. The owner recovery key must be stored
 outside the device directory and kept separately; it is not an encryption-history
 backup. New-device encrypted history remains future-only.
 
+Before admitting other participants, the local operator can restrict new rooms
+and direct conversations to selected enrolled human accounts:
+
+```sh
+hrc service room-creation --directory /private/hrc-home --account OWNER_ACCOUNT
+```
+
+Run this while the service is stopped. Repeat `--account` for each permitted
+human account, use `--deny-all` to disable all creation, or omit selection flags
+to inspect the current policy. Existing configurations retain the original
+creation rules until explicitly changed. The [operations guide](Operations.md#restrict-conversation-creation)
+describes managed desktop controls and the effect on direct conversations.
+
 Add `--diagnostics` to `service run` to report fixed lifecycle categories on
 standard error. Diagnostics contain no messages, account identifiers or keys.
 Failed authority observations include fixed disposition categories and monotonic

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Local home-service controls and explicit admission during a bounded maintenance stop.
 use super::{Result, failure, native, private_json, read_json, units};
-use hrc::{protocol::*, service};
+use hrc::{home::RoomCreationPolicy, protocol::*, service};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
@@ -91,7 +91,7 @@ fn maintenance<T>(
         // Cancellation must not strand a previously running home after an admission request.
         let recovery = AtomicBool::new(false);
         if start(config, &recovery).is_err() {
-            return Err("Admission finished or was refused, but the service restart failed. Check the registration outcome and start the service again.".into());
+            return Err("The operation finished or was refused, but the service restart failed. Inspect its outcome and start the service again.".into());
         }
     }
     result
@@ -120,6 +120,50 @@ pub fn enrol(config: &Configuration, registration: &Path, cancel: &AtomicBool) -
         .map(|actor|json!({"status":"EndpointEnrolled","actor":actor}))
         .map_err(|_|"Registration was refused. Check its invitation, principal and expiry; another service process must not own the store.".into())
     })
+}
+
+pub fn room_creation(
+    config: &Configuration,
+    policy: Option<RoomCreationPolicy>,
+    cancel: &AtomicBool,
+) -> Result<Value> {
+    let current = config.validate()?;
+    let policy = match policy {
+        None => current.room_creation,
+        Some(policy) => maintenance(config, cancel, || {
+            service::setup::room_creation(&config.directory, policy).map_err(|_| {
+                "The policy update could not be confirmed. Inspect the current policy. Use at most 32 distinct enrolled human accounts from this service; another process must not own the store.".into()
+            })
+        })?,
+    };
+    Ok(json!({"status":"RoomCreationPolicy","policy":policy}))
+}
+
+#[derive(clap::Args)]
+#[group(multiple = false)]
+pub struct RoomCreationSelection {
+    /// Permit the existing creation rules for all admitted accounts.
+    #[arg(long)]
+    allow_all: bool,
+    /// Refuse every new room and direct conversation.
+    #[arg(long)]
+    deny_all: bool,
+    /// Permit only these enrolled human accounts. Repeat for each account.
+    #[arg(long = "account", value_name = "ACCOUNT")]
+    accounts: Vec<AccountId>,
+}
+impl RoomCreationSelection {
+    pub fn policy(self) -> Option<RoomCreationPolicy> {
+        if self.allow_all {
+            Some(RoomCreationPolicy::All)
+        } else if self.deny_all || !self.accounts.is_empty() {
+            Some(RoomCreationPolicy::AllowList {
+                accounts: self.accounts,
+            })
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(clap::Subcommand)]
@@ -161,6 +205,13 @@ pub enum Command {
         #[arg(long)]
         registration: PathBuf,
     },
+    /// Inspect or change who may create rooms and direct conversations.
+    RoomCreation {
+        #[arg(long)]
+        config: PathBuf,
+        #[command(flatten)]
+        selection: RoomCreationSelection,
+    },
 }
 pub fn run(command: Command, cancel: &AtomicBool) -> Result<Value> {
     match command {
@@ -194,5 +245,8 @@ pub fn run(command: Command, cancel: &AtomicBool) -> Result<Value> {
             config,
             registration,
         } => enrol(&Configuration::load(&config)?, &registration, cancel),
+        Command::RoomCreation { config, selection } => {
+            room_creation(&Configuration::load(&config)?, selection.policy(), cancel)
+        }
     }
 }

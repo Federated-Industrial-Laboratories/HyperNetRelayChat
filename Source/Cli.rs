@@ -86,6 +86,13 @@ pub enum Service {
         #[arg(long)]
         registration: PathBuf,
     },
+    /// Inspect creation policy, or change it while the service is stopped.
+    RoomCreation {
+        #[arg(long)]
+        directory: PathBuf,
+        #[command(flatten)]
+        selection: crate::operations::home::RoomCreationSelection,
+    },
     /// Serve native HRC operations through the configured HyperNet companion.
     Run {
         #[arg(long)]
@@ -405,6 +412,21 @@ pub fn service(command: Service) -> Result<Json, &'static str> {
         } => json_value(
             service::setup::enrol(&directory, &registration).map_err(|_| "EnrolmentFailed")?,
         ),
+        Service::RoomCreation {
+            directory,
+            selection,
+        } => {
+            let policy = match selection.policy() {
+                Some(policy) => service::setup::room_creation(&directory, policy)
+                    .map_err(|_| "RoomCreationPolicyUpdateUnconfirmed")?,
+                None => {
+                    service::Config::load(&directory)
+                        .map_err(|_| "ServiceConfigurationUnavailable")?
+                        .room_creation
+                }
+            };
+            Ok(json!({"status":"RoomCreationPolicy","policy":policy}))
+        }
         Service::Run {
             directory,
             diagnostics,
