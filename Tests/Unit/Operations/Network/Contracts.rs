@@ -129,7 +129,7 @@ fn embedded_verifiers_match_the_supported_released_sources() {
         (
             include_bytes!("../../../../Source/Operations/Network/Package/Core/Bundle.py")
                 .as_slice(),
-            "47f636c1d35df1396ee878c30d3872504f5ee31cf54c6768eaf90b9e62a549e4",
+            "0bbcf290e8667912bf6ac51535f2af92334133f575ad1755402f6a0bff93aae6",
         ),
         (
             include_bytes!("../../../../Source/Operations/Network/Package/Core/PackageTrust.py")
@@ -139,7 +139,7 @@ fn embedded_verifiers_match_the_supported_released_sources() {
         (
             include_bytes!("../../../../Source/Operations/Network/Package/Suite/Bundle.py")
                 .as_slice(),
-            "9c738affdd1843a9969eaa6b0254cd39b685e68998c5ece6462d0a9c61b66dde",
+            "5e5fc31890a927b45156c5495a8bce217b55e5f14a400363903c13e2442965fa",
         ),
         (
             include_bytes!("../../../../Source/Operations/Network/Package/Suite/PackageTrust.py")

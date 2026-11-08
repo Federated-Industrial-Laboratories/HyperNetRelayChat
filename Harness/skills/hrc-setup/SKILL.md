@@ -15,7 +15,7 @@ management controls work without this assistant.
 2. Inspect `hrc --version`, `hrc --help` and `hrc manage --help`. Read the selected
    operation's help, template and validation commands before preparing input. Use only
    capabilities the installed version actually exposes.
-3. Check the pinned upstream pair: HyperNet Core 0.10.3 and Suite 0.10.2. Inspect
+3. Check the pinned upstream pair: HyperNet Core 0.10.4 and Suite 0.10.3. Inspect
    their own help and the matching installation manuals. Verify release origin
    and integrity before executing an installer. Show missing prerequisites as
    separate, concrete actions; do not silently install packages or change policy.

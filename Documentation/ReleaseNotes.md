@@ -18,7 +18,8 @@ HyperNet Page links can use a separately joined reader profile selected in
 before opening the native browser with the current theme. The chat companion
 keeps its own profile. Each reader profile supports one active browser at a time.
 
-This HRC-only update retains the Core 0.10.3 and Suite 0.10.2 hosting dependencies.
+The supported hosting pair is Core 0.10.4 and Suite 0.10.3. These native patches
+correct renewed route admission and updates to approved Pages.
 No transport protocol or stored conversation schema changes are required.
 See [service permissions](Operations.md) for configuration and restart behaviour.
 
