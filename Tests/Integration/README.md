@@ -12,6 +12,12 @@ pause and credential revocation. It leaves the test profiles and encrypted
 results available for inspection. No model runner is used. Compiling this probe
 alone is not native integration evidence.
 
+The existing native fixture can provision these prerequisites itself. Set
+`configuration.externalAgentBinary` or `HRC_NATIVE_EXTERNAL_AGENT` to the exact
+candidate probe. This selects only the external Agent workflow, followed by the
+existing real native revocation check. It is exclusive with load, Controller and
+confidential-only selections; their completed evidence need not be repeated.
+
 `NativeLoad.py` and the `native-load-client` example provide the separate bounded
 pilot/load workflow. Select `configuration.loadOnly=true` or
 `HRC_NATIVE_LOAD_ONLY=1`, and supply `configuration.loadClientBinary` or
