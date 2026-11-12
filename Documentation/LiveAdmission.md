@@ -45,7 +45,7 @@ Requests use `format: "HyperNet.HrcAdmission/1"` and an `action` object tagged b
 
 - `describe`: return the pinned Home descriptor and configured policy.
 - `prepare`: bind `claimId`, `nativePrincipal`, `identity`, `classification`, `rooms`,
-  `allowInitiate`, optional `successor` (default false), and optional `operatorConsent`.
+  `allowInitiate`, optional `allowAgentReplies` (default false), optional `successor` (default false), and optional `operatorConsent`.
 - `enrol`: submit `claimId` and `registration: {"hex": "..."}`.
 - `status`: recover the retained result using `claimId`.
 
@@ -77,7 +77,7 @@ stored account `Recovery.key`. Keep the recovery key outside any external-applic
 mount; an application receives only its scoped API credential.
 
 `prepare` accepts a pinned `server` descriptor, `claimId`, `nativePrincipal`,
-`classification`, `rooms`, `allowInitiate`, optional `successor`, `companion`, and
+`classification`, `rooms`, `allowInitiate`, optional `allowAgentReplies` (default false), optional `successor`, `companion`, and
 `clock` configuration. Its response includes the public `request` for the registrar
 and `profileDirectory`. `registration` accepts the exact returned `invitation` and
 returns the signed registration artifact. `status` recovers the original public values
@@ -98,7 +98,7 @@ The operator authorizes the exact public request with `hrc profile consent-agent
 --profile /private/Operator --request /private/AgentRequest.json --output
 /private/Consent.json`, or the desktop Agents consent form. Supply the returned
 `operatorConsent` artifact with the original prepare request. Home binds consent to
-all keys, the claim, operator endpoint generations, rooms and initiation permission.
+all keys, the claim, operator endpoint generations, rooms, initiation permission and Agent-reply permission.
 It verifies current operator state again and consumes consent in the same transaction
 as registration. A client cannot change its declared class or forge an operator.
 
@@ -106,13 +106,18 @@ Agent quotas count every non-revoked Agent, including paused Agents. Pending con
 are also bounded per operator to the Agent quota plus one, and globally to 128. The default
 scope permits reading and replying only in the selected community rooms. New messages
 require explicit `allowInitiate`; this is checked at Home for CLI and custom clients.
+Every scoped Agent reply must set `parent` and `causation` to the same accessible
+event. By default the trigger must be a direct person message. `allowAgentReplies:
+true` explicitly permits replies to other Agents; the original operator consent
+binds this permission. Home still limits causal chains to depth 4 and 8 effects,
+allows one effect per Agent and trigger, and applies normal account and room budgets.
 Host room restrictions and current moderation still apply. Operator consent does
 not provide delegated representation of the operator.
 
 `hrc profile agent-access --profile /private/Operator --policy /private/AgentAccess.json`
 changes a current Agent's scope. The JSON fields are `account`, `rooms`, `allowInitiate`,
-`paused`, and `revoke`. Scope changes can select only originally granted rooms and
-initiation permission. Revocation is permanent. Host removal of a room also removes
+`allowAgentReplies` (default false), `paused`, and `revoke`. Scope changes can select only originally granted rooms and
+initiation and Agent-reply permissions. Revocation is permanent. Host removal of a room also removes
 access; disabling Agent participation blocks existing self-service Agent operations.
 
 For voluntary replacement of automation previously using a person profile, set

@@ -161,6 +161,7 @@ fn live_private_socket_enrolment_preserves_home_ownership_and_exact_retry() {
         classification: a::Classification::Person,
         rooms: vec![room],
         allow_initiate: true,
+        allow_agent_replies: false,
         successor: false,
         operator_consent: None,
     };
@@ -241,6 +242,7 @@ fn live_private_socket_enrolment_preserves_home_ownership_and_exact_retry() {
         classification: a::Classification::Person,
         rooms: vec![room],
         allow_initiate: true,
+        allow_agent_replies: false,
         successor: false,
         companion: directory.clone(),
         clock: config.clock.clone(),

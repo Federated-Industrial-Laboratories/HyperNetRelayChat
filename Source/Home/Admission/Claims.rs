@@ -177,6 +177,7 @@ fn enrol(
     let scope = Scope {
         rooms: candidate.rooms.clone(),
         allow_initiate: candidate.allow_initiate,
+        allow_agent_replies: candidate.allow_agent_replies,
         paused: false,
         revoked: false,
         successor_of: operator.filter(|_| candidate.successor),

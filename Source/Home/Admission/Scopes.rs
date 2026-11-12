@@ -21,6 +21,26 @@ pub(crate) fn room(db: &Connection, account: AccountId, room: RoomId) -> Domain<
     }
     Ok(())
 }
+/// Scoped external Agents cannot omit causal accounting or silently opt into Agent loops.
+pub(crate) fn reply(
+    db: &Connection,
+    action: &protocol::Action,
+    parent: Id,
+    cause: Option<Id>,
+    trigger: &Actor,
+) -> Domain<()> {
+    if let Actor::IndependentAgent { acting, .. } = &action.actor
+        && let Some(scope) = load(db, acting.account)?
+    {
+        if cause != Some(parent) {
+            return deny("AgentReplyCausation");
+        }
+        if !scope.allow_agent_replies && !matches!(trigger, Actor::Direct { .. }) {
+            return deny("AgentRepliesDisabled");
+        }
+    }
+    Ok(())
+}
 pub(crate) fn authorize(db: &Connection, action: &protocol::Action) -> Domain<()> {
     let Some(scope) = load(db, action.actor.acting().account)? else {
         return Ok(());

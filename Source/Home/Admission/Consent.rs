@@ -213,11 +213,13 @@ pub(crate) fn operate(
                 || update.rooms.windows(2).any(|v| v[0] >= v[1])
                 || update.rooms.iter().any(|r| !original.rooms.contains(r))
                 || update.allow_initiate && !original.allow_initiate
+                || update.allow_agent_replies && !original.allow_agent_replies
             {
                 return deny("AgentOriginalScope");
             }
             scope.rooms = update.rooms;
             scope.allow_initiate = update.allow_initiate;
+            scope.allow_agent_replies = update.allow_agent_replies;
             scope.paused = update.paused;
             scope.revoked = update.revoke;
             db.execute(

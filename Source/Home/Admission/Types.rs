@@ -63,6 +63,8 @@ pub struct Prepare {
     pub rooms: Vec<RoomId>,
     pub allow_initiate: bool,
     #[serde(default)]
+    pub allow_agent_replies: bool,
+    #[serde(default)]
     pub successor: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operator_consent: Option<Artifact>,
@@ -180,6 +182,8 @@ pub struct AgentAccess {
     pub account: AccountId,
     pub rooms: Vec<RoomId>,
     pub allow_initiate: bool,
+    #[serde(default)]
+    pub allow_agent_replies: bool,
     pub paused: bool,
     pub revoke: bool,
 }
@@ -188,6 +192,8 @@ pub struct AgentAccess {
 pub struct Scope {
     pub rooms: Vec<RoomId>,
     pub allow_initiate: bool,
+    #[serde(default)]
+    pub allow_agent_replies: bool,
     pub paused: bool,
     pub revoked: bool,
     pub successor_of: Option<AccountId>,

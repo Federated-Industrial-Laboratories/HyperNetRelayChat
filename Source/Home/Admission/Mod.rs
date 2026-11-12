@@ -105,7 +105,11 @@ fn validate_prepare(db: &Connection, home: ServiceId, p: &Policy, request: &Prep
         }
     }
     match request.classification {
-        Classification::Person if request.operator_consent.is_some() || request.successor => {
+        Classification::Person
+            if request.operator_consent.is_some()
+                || request.successor
+                || request.allow_agent_replies =>
+        {
             invalid("PersonConsent")
         }
         Classification::Agent { operator }
