@@ -9,7 +9,9 @@ mod state;
 #[path = "Transport.rs"]
 mod transport;
 use crate::client;
-pub use configuration::{Configuration, Credential, Scope, initialise, issue, revoke, socket_path};
+pub use configuration::{
+    Configuration, Credential, Scope, credential_scope, initialise, issue, revoke, socket_path,
+};
 use serde_json::{Value, json};
 pub use transport::{request, serve};
 

@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Native conversation interface; effects run through the shared client worker.
+#[path = "AgentApi.rs"]
+mod agent_api;
 #[path = "Agents.rs"]
 mod agents;
 #[path = "Components.rs"]

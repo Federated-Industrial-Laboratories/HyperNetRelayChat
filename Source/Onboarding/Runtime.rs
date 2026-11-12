@@ -166,6 +166,7 @@ impl RuntimeConfig {
 
 #[derive(Clone)]
 pub(super) enum Task {
+    HostDesktop,
     Browse(PathBuf),
     SimpleJoin {
         location: Option<String>,
@@ -850,6 +851,10 @@ pub(super) fn perform(
     let mut open = None;
     let mut listing = None;
     let notice = match task {
+        Task::HostDesktop => {
+            super::simple::host_desktop(&config.suite, cancel)?;
+            "Host window closed; saved hosting settings remain in HyperNet"
+        }
         Task::Browse(path) => {
             let path = path.canonicalize().map_err(|_| Error::LocalConfiguration)?;
             let mut entries = Vec::new();

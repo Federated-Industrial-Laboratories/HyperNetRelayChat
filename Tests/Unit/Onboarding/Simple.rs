@@ -53,6 +53,10 @@ elif args[:2]==['join','pages']:
     assert location.startswith('hypernet://')
     assert location not in args
     print('{"status":"Opened"}')
+elif args[:2]==['join','host-desktop']:
+    assert args[2]=='--hrc-executable'
+    assert len(args)==4
+    print('{"status":"Closed"}')
 else: sys.exit(2)
 "##,
         )
@@ -126,6 +130,17 @@ fn saved_server_desire_persists_and_wrong_profile_cannot_change_it() {
         "c".repeat(32)
     );
     simple::pages(&f.binding, Some(&location), &cancel).unwrap();
+}
+#[test]
+fn shared_host_window_close_is_success_without_a_profile_or_credentials_handoff() {
+    let f = Fixture::new();
+    simple::host_desktop(&f.binding.suite, &AtomicBool::new(false)).unwrap();
+    assert_eq!(f.calls().len(), 1);
+    assert_eq!(
+        &f.calls()[0][..3],
+        &["join", "host-desktop", "--hrc-executable"]
+    );
+    assert!(f.profile.join("SimpleServer.json").exists());
 }
 #[test]
 fn simple_server_marker_rejects_public_permissions_and_relative_bindings() {

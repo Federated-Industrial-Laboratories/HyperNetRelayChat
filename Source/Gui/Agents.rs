@@ -5,6 +5,7 @@ use hrc::delegation::{self, Mode};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub(super) struct GrantForm {
+    pub(super) api: super::agent_api::Form,
     pub(super) simple: super::simple_agents::Form,
     admission_request: String,
     agent: Option<EndpointActor>,
@@ -22,6 +23,7 @@ pub(super) struct GrantForm {
 impl Default for GrantForm {
     fn default() -> Self {
         Self {
+            api: Default::default(),
             simple: Default::default(),
             admission_request: String::new(),
             agent: None,
@@ -63,6 +65,7 @@ impl App {
                 ui.collapsing("New room grant", |ui| self.grant_form(ui));
             });
             components::section(ui,"Add an external Agent",|ui|self.simple_agent_form(ui));
+            components::section(ui,"Connect an Agent application",|ui|self.agent_api_form(ui));
             ui.collapsing("Manual Agent request and consent exchange",|ui|self.admission_form(ui));
             for agent in &snapshot.inspection.agents {
                 if let Some(scope)=&agent.admission_scope {

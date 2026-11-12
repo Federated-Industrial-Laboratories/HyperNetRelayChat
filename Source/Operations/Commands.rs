@@ -9,6 +9,11 @@ use std::{
 
 #[derive(clap::Subcommand)]
 pub enum Command {
+    /// Configure and run a separately keyed external Agent API without a model.
+    Agent {
+        #[command(subcommand)]
+        command: super::participants::Command,
+    },
     /// Create, preview and operate a finite-consent native HyperNet.
     Network {
         #[command(subcommand)]
@@ -183,13 +188,14 @@ pub fn run(command: Command) -> Result<Value> {
         }
     };
     let result = match command {
+        Command::Agent { command } => super::participants::run(command, &cancel),
         Command::Network { command } => network_run(command, &cancel),
         Command::Service { command } => home::run(command, &cancel),
         Command::Bot { command } => super::bots::run(command, &cancel),
         Command::Model { command } => super::models::run(command, &cancel),
         Command::Package { command } => super::packages::run(command, &cancel),
         Command::Capabilities => Ok(
-            json!({"schema":1,"operations":["network","service","model","bot"],"transport":"HyperNetOnly","nativePackages":{"core":super::packages::Product::Core.version(),"suite":super::packages::Product::Suite.version()},"hostChanges":"NoAutomaticPackagesFirewallOrSudo","modelEndpoints":"LoopbackOnly","consentRenewal":"ExplicitPreviewRequired","assistantAuthority":"InheritedFromInvokingUser"}),
+            json!({"schema":1,"operations":["network","service","model","bot","agent"],"transport":"HyperNetOnly","nativePackages":{"core":super::packages::Product::Core.version(),"suite":super::packages::Product::Suite.version()},"hostChanges":"NoAutomaticPackagesFirewallOrSudo","modelEndpoints":"LoopbackOnly","consentRenewal":"ExplicitPreviewRequired","assistantAuthority":"InheritedFromInvokingUser"}),
         ),
     };
     signal_hook::low_level::unregister(interrupt);

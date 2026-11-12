@@ -405,7 +405,7 @@ impl Wizard {
             ui.horizontal(|ui| {
                 ui.spinner();
                 ui.label(if self.step == Step::Simple {
-                    "Continue in the HyperNet join window. You can cancel here."
+                    "Continue in the HyperNet window. You can cancel here."
                 } else {
                     "Working…"
                 });
@@ -424,6 +424,11 @@ impl Wizard {
                     self.start(&ctx, Task::SimpleJoin { location }, None);
                     self.location.clear();
                 }
+                ui.separator();
+                if components::button(ui, "Create or manage a server").clicked() {
+                    self.start(&ctx, Task::HostDesktop, None);
+                }
+                ui.small("The HyperNet host window manages saved servers and package setup. Your current chat stays open.");
                 ui.collapsing("Installed HyperNet tools", |ui| {
                     ui.label(self.config.suite.display().to_string());
                     if components::button(ui, "Choose HyperNetSuite…").clicked() {

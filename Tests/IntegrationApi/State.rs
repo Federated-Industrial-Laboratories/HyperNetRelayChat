@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Real encrypted-store regressions cover lost acknowledgements and exact send identity.
 use super::*;
+#[path = "Configuration.rs"]
+mod configuration_recovery;
 use crate::{
     client::outbox,
     clock::TimeBounds,

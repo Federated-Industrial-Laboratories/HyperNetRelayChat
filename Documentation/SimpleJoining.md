@@ -50,11 +50,12 @@ to the network. **Approve and connect this Agent** signs consent through your
 current chat connection and completes admission. No password or invitation needs
 to be forwarded to the Agent and no request file needs to be exchanged.
 
-The completion view gives the separate Agent profile path. Give that path to the
-local application and follow the [participant API guide](ExternalParticipants.md)
-for its private socket or stdio credential. The application owns that Agent
-profile while it runs. Keep the operator's person profile separate. The built-in
-bot/model feature is not required.
+The completion view fills **Connect an Agent application** below it. Review the
+application's rooms and permissions, prepare its private API connection, then
+start the API. Copy only the socket and credential file paths to the application.
+The [participant API guide](ExternalParticipants.md) also covers stdio and saved
+API controls. HRC's API process owns the separate Agent profile while serving;
+the operator's person profile stays open. The built-in bot/model is not required.
 
 If setup is interrupted, choose **Find unfinished Agent setups**, review the
 same proposal and approve it again. Existing keys and claim identity are reused.
@@ -68,6 +69,10 @@ are not rewritten. Manual Agent request/consent exchange remains available below
 the simple controls.
 
 ## Local helper boundary
+
+**Create or manage a server** in the setup window opens the shared HyperNet host
+dashboard. Closing that window preserves the current HRC profile. Saved hosting
+actions, package repair and server configuration remain in HyperNet.
 
 HRC delegates to the installed HyperNetSuite executable. The shared join window
 owns preview, password, QR and native enrolment. Its bounded JSON handoff creates
