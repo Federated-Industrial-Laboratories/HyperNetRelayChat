@@ -25,13 +25,31 @@ assistant.
    for llama.cpp. Leave CUDA devices empty to inherit the local selection, or
    enter the intended device list. An explicit shared-library folder is available
    for installations that require one.
-4. Select **Save model**. For a managed runtime, select **Start**, then **Probe**
-   after the model has loaded. An existing endpoint can be probed immediately.
+4. Select **Save model**. For a managed runtime, select **Start**. HRC waits for
+   a successful synthetic inference check and shows the current loading/checking
+   phase, attempts and elapsed time. An existing endpoint uses **Probe**.
 
 The probe sends a short synthetic availability request, without conversation
 content, and reports whether the backend produced a usable response. A running
 process is not the same as a successful inference probe. Cold model loading can
-take longer than a status check.
+take longer than a status check. **Startup readiness wait** defaults to 900 seconds
+and accepts 30-3,600 seconds. It bounds the readiness operation, not the model's
+lifetime. Timeout leaves the process running so it can finish loading; use Status,
+Probe or Stop. Cancel stops only a model created by that Start operation. Cancelling
+a probe or a check of an already-running model leaves its process alone.
+
+**Reply deadline** defaults to 60 seconds and accepts 10-240 seconds for both
+memory compaction and reply generation together. The five-minute signed history
+certificate prevents a larger value. **Reply characters** defaults to 1,000 and
+accepts 128-2,000; HRC also enforces its 8,192-byte message limit. Context accepts
+2,048-131,072 tokens, and reply tokens 128-8,192 with at least 1,025 context tokens
+left for input. Set the backend's actual context consistently. Token exhaustion,
+message length, context fit and request timeout have separate diagnostics.
+
+CLI definitions expose `requestSeconds`, `replyCharacters` and `startupSeconds`.
+Older definitions load their compatible defaults. Model status includes the last
+readiness observation and last successful check time. These are historical facts,
+not a guarantee that an external process is still available.
 
 HRC accepts loopback endpoints only. It does not download models, install backend
 packages or expose inference ports. Managed llama.cpp uses a local GGUF file,
@@ -101,7 +119,11 @@ Delegated participation uses the represented user's membership and grant.
 
 The process status reports whether the owned service is running. The
 `initialConnectionVerified` field records an authenticated initial history catch-up
-in that process invocation. It is not a permanent online indicator. Verify a fresh
+in that process invocation. It is not a permanent online indicator. The status view
+also shows the latest observed phase, separate current and historical failures,
+retry delay, last successful service cycle and last generated model reply. Recovery
+clears the current connection error; old failures remain labelled as history.
+Stopped or stale observations are explicitly historical. Verify a fresh
 reply from a separate human endpoint when testing end-to-end availability.
 
 Only one process can own the agent profile. Stop its GUI before running the bot,

@@ -1,10 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Saved local inference definitions and explicitly owned runtime lifecycles.
+#[path = "ModelReadiness.rs"]
+mod readiness;
 use super::{Result, bots, failure, native, private_json, read_json, root, units};
 use hrc::{
     bot::{Adapter, LocalModel},
     protocol::Id,
 };
+pub(crate) use readiness::{Progress, progress};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
@@ -55,9 +58,18 @@ pub(crate) struct Config {
     pub curl: PathBuf,
     pub context_tokens: u32,
     pub output_tokens: u32,
+    #[serde(default = "hrc::bot::default_request_seconds")]
+    pub request_seconds: u32,
+    #[serde(default = "hrc::bot::default_reply_characters")]
+    pub reply_characters: u32,
+    #[serde(default = "default_startup_seconds")]
+    pub startup_seconds: u32,
     pub backend: Backend,
     pub library_directory: Option<PathBuf>,
     pub limits: units::Limits,
+}
+fn default_startup_seconds() -> u32 {
+    900
 }
 impl Config {
     pub fn new() -> Result<Self> {
@@ -71,6 +83,9 @@ impl Config {
             curl: native::discover("curl"),
             context_tokens: 4096,
             output_tokens: 512,
+            request_seconds: 60,
+            reply_characters: 1000,
+            startup_seconds: 900,
             backend: Backend::External,
             library_directory: None,
             limits: units::Limits {
@@ -90,6 +105,8 @@ impl Config {
             adapter: self.adapter,
             context_tokens: self.context_tokens,
             output_tokens: self.output_tokens,
+            request_seconds: self.request_seconds,
+            reply_characters: self.reply_characters,
         }
     }
     pub fn validate(&self) -> Result<()> {
@@ -97,6 +114,21 @@ impl Config {
             return Err("Unsupported model definition version.".into());
         }
         name(&self.name)?;
+        if !(10..=240).contains(&self.request_seconds) {
+            return Err("Reply requests must be 10 to 240 seconds so the complete reply, including memory compaction, fits within the existing 5-minute history certificate. This does not limit the bot's lifetime.".into());
+        }
+        if !(30..=3600).contains(&self.startup_seconds) {
+            return Err("Choose a startup readiness wait from 30 to 3600 seconds. This does not stop a running model when it expires.".into());
+        }
+        if !(128..=2000).contains(&self.reply_characters) {
+            return Err("Choose 128 to 2000 reply characters within HRC's message limit.".into());
+        }
+        if self.output_tokens.saturating_add(1024) >= self.context_tokens {
+            return Err(
+                "Reply tokens must leave at least 1025 Context tokens for the prompt and template."
+                    .into(),
+            );
+        }
         self.local_model("!model", false)
             .validate()
             .map_err(failure)?;
@@ -168,6 +200,7 @@ pub(crate) struct Summary {
 pub(crate) struct Status {
     pub managed: bool,
     pub runtime: Option<units::Status>,
+    pub readiness: Option<Progress>,
 }
 
 pub(crate) fn name(value: &str) -> Result<()> {
@@ -300,10 +333,12 @@ fn status_config(config: &Config, cancel: &AtomicBool) -> Result<Status> {
         Backend::External => Ok(Status {
             managed: false,
             runtime: None,
+            readiness: readiness::for_config(config)?,
         }),
         _ => Ok(Status {
             managed: true,
             runtime: Some(units::status(&units::name("model", config.id), cancel)?),
+            readiness: readiness::for_config(config)?,
         }),
     }
 }
@@ -311,13 +346,17 @@ pub fn status(id: Id, cancel: &AtomicBool) -> Result<Status> {
     status_config(&load(id)?, cancel)
 }
 pub fn probe(id: Id, cancel: &AtomicBool) -> Result<Value> {
+    let _lock = mutation_lock()?;
     let config = load(id)?;
     config.validate()?;
-    let ready = config
-        .local_model("!model", false)
-        .probe(cancel)
-        .map_err(failure)?;
-    Ok(json!({"id":id,"ready":ready,"scope":"SyntheticLocalInference","conversationContent":false}))
+    readiness::wait(&config, cancel)?;
+    Ok(
+        json!({"id":id,"ready":true,"scope":"SyntheticLocalInference","conversationContent":false,"readiness":readiness::for_config(&config)?}),
+    )
+}
+
+pub(crate) fn wait_ready(config: &Config, cancel: &AtomicBool) -> Result<()> {
+    readiness::wait(config, cancel)
 }
 type Launch = (PathBuf, Vec<String>, Vec<(String, String)>);
 fn launch(config: &Config) -> Result<Launch> {
@@ -390,23 +429,27 @@ pub fn start(id: Id, cancel: &AtomicBool) -> Result<Status> {
     let (program, args, environment) = launch(&config)?;
     let old = status_config(&config, cancel)?;
     if old.runtime.as_ref().is_some_and(running) {
-        return Ok(old);
+        readiness::wait(&config, cancel)?;
+        return status_config(&config, cancel);
     }
     if TcpStream::connect_timeout(&config.endpoint, Duration::from_millis(250)).is_ok() {
         return Err("The selected endpoint already has a listener. Keep it as an external endpoint or choose a free port.".into());
     }
-    let runtime = units::start(
+    let started = units::start(
         &units::name("model", id),
         &program,
         &args,
         &environment,
         &config.limits,
         cancel,
-    )?;
-    Ok(Status {
-        managed: true,
-        runtime: Some(runtime),
-    })
+    );
+    let ready = started.and_then(|_| readiness::wait(&config, cancel));
+    if cancel.load(std::sync::atomic::Ordering::Acquire) {
+        // Cancel owns only the process this Start created, never an already-running/external model.
+        units::stop(&units::name("model", id), &AtomicBool::new(false))?;
+    }
+    ready?;
+    status_config(&config, cancel)
 }
 pub fn stop(id: Id, cancel: &AtomicBool) -> Result<Status> {
     let _lock = mutation_lock()?;
@@ -415,9 +458,12 @@ pub fn stop(id: Id, cancel: &AtomicBool) -> Result<Status> {
         return Err("This endpoint is externally managed; HRC cannot stop it.".into());
     }
     bots::ensure_model_idle(id, cancel)?;
+    let runtime = units::stop(&units::name("model", id), cancel)?;
+    readiness::stopped(&config)?;
     Ok(Status {
         managed: true,
-        runtime: Some(units::stop(&units::name("model", id), cancel)?),
+        runtime: Some(runtime),
+        readiness: readiness::for_config(&config)?,
     })
 }
 

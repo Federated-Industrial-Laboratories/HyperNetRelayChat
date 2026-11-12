@@ -10,9 +10,12 @@ mod model;
 mod runtime;
 #[path = "State.rs"]
 mod state;
-use crate::{client, protocol::*};
+#[path = "Status.rs"]
+mod status;
+use crate::{client, protocol::*, storage};
 pub use memory::Policy as MemoryPolicy;
-pub use model::{Adapter, LocalModel};
+pub use model::{Adapter, LocalModel, default_reply_characters, default_request_seconds};
+pub use status::{Failure, Observation, Phase};
 use std::{
     path::PathBuf,
     sync::{Arc, atomic::AtomicBool},
@@ -41,6 +44,13 @@ pub enum Error {
     AgentRequired,
     #[error("bot state or exact outbox is unavailable")]
     State,
+    #[error("bot {operation} failed: {source}")]
+    Storage {
+        operation: &'static str,
+        source: storage::Error,
+    },
+    #[error("bot state validation failed: {0}")]
+    InvalidState(&'static str),
     #[error("the selected bot grant is unavailable or requires message approval")]
     Grant,
     #[error("the retained cursor requires explicit resynchronisation")]
@@ -57,6 +67,12 @@ pub enum Error {
     ModelTimeout,
     #[error("the local model returned invalid or excessive output")]
     ModelResponse,
+    #[error("the local model exhausted its reply token allowance")]
+    ModelIncomplete,
+    #[error("the local model reply exceeded the configured message length")]
+    ModelReplyLimit,
+    #[error("the prompt does not fit the selected model context")]
+    ModelContext,
     #[error(transparent)]
     Client(#[from] client::Error),
 }
@@ -103,10 +119,43 @@ pub fn run(config: Config, stop: Arc<AtomicBool>) -> Result<()> {
 /// Emit one historical initialization event after authenticated catch-up and startup resolution.
 /// The callback does not assert continuing connectivity after the instant it runs.
 pub fn run_observed(config: Config, stop: Arc<AtomicBool>, on_ready: impl FnOnce()) -> Result<()> {
-    config.validate()?;
-    runtime::run(config, stop, on_ready)
+    run_reporting(config, stop, on_ready, |_| {})
 }
 
 #[cfg(test)]
 #[path = "../../Tests/Bot/Workflow.rs"]
 mod tests;
+
+/// Structured observations contain fixed diagnostic codes and timestamps, never chat or keys.
+pub fn run_reporting(
+    config: Config,
+    stop: Arc<AtomicBool>,
+    on_ready: impl FnOnce(),
+    mut observer: impl FnMut(&Observation),
+) -> Result<()> {
+    config.validate()?;
+    runtime::run(config, stop, on_ready, &mut observer)
+}
+impl Error {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Configuration => "InvalidBotConfiguration",
+            Self::AgentRequired => "BotAgentRequired",
+            Self::State => "BotStateUnavailable",
+            Self::InvalidState(code) => code,
+            Self::Storage { source, .. } => source.code(),
+            Self::Grant => "BotGrantUnavailable",
+            Self::ResynchronisationRequired => "BotResynchronisationRequired",
+            Self::PendingOutcome => "BotOutcomeUnknown",
+            Self::Denied => "BotPermissionDenied",
+            Self::RetryLater { .. } => "BotTemporarilyUnavailable",
+            Self::ModelUnavailable => "BotModelUnavailable",
+            Self::ModelTimeout => "BotModelTimeout",
+            Self::ModelResponse => "BotModelInvalidResponse",
+            Self::ModelIncomplete => "BotModelReplyTokensExhausted",
+            Self::ModelReplyLimit => "BotModelReplyTooLong",
+            Self::ModelContext => "BotModelContextTooSmall",
+            Self::Client(error) => error.code(),
+        }
+    }
+}

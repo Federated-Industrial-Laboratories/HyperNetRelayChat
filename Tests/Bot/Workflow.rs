@@ -301,7 +301,7 @@ fn model_failure_notice_commits_progress_and_does_not_poison_the_next_trigger() 
     let notice = runtime::reply_message(id(12), Err(Error::ModelResponse))
         .unwrap()
         .unwrap();
-    assert!(notice.text.contains("could not produce a complete reply"));
+    assert!(notice.text.contains("invalid response"));
     crate::text::message(&notice.text).unwrap();
     let notice = sign(id(11), &notice);
     state::advance(
@@ -386,9 +386,12 @@ fn only_inference_errors_become_notices_and_cancellation_has_no_effect() {
         Error::ModelUnavailable,
         Error::ModelTimeout,
         Error::ModelResponse,
+        Error::ModelIncomplete,
+        Error::ModelReplyLimit,
+        Error::ModelContext,
     ] {
         let message = runtime::reply_message(id(12), Err(error)).unwrap().unwrap();
-        assert!(message.text.len() <= 128);
+        assert!(message.text.len() <= 256);
         assert_eq!(message.parent, Some(id(12)));
         assert_eq!(message.causation, Some(id(12)));
         crate::text::message(&message.text).unwrap();
@@ -554,6 +557,8 @@ fn model_modes_keep_help_and_human_replies_but_reject_agents_causation_and_multi
         adapter: Adapter::LlamaCpp,
         context_tokens: 4096,
         output_tokens: 512,
+        request_seconds: 60,
+        reply_characters: 1000,
     });
     config.validate().unwrap();
     let action = reply(&RetryWindow {

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Filtered human messages feed bounded replies; durable plans survive interrupted submission.
-use super::{Config, Error, Result, context, memory, state};
+use super::{Config, Error, Observation, Phase, Result, context, memory, state, status::Reporter};
 use crate::{
     client::{self, Client, outbox},
     delegation, home, messaging,
@@ -16,7 +16,26 @@ use std::{
     time::{Duration, Instant},
 };
 
-pub(super) fn run(config: Config, stop: Arc<AtomicBool>, on_ready: impl FnOnce()) -> Result<()> {
+pub(super) fn run(
+    config: Config,
+    stop: Arc<AtomicBool>,
+    on_ready: impl FnOnce(),
+    observer: &mut dyn FnMut(&Observation),
+) -> Result<()> {
+    let mut reporter = Reporter::new(observer);
+    let result = run_inner(config, stop, on_ready, &mut reporter);
+    match &result {
+        Ok(()) => reporter.phase(Phase::Stopped),
+        Err(error) => reporter.failure(error, Phase::Failed, None),
+    }
+    result
+}
+fn run_inner(
+    config: Config,
+    stop: Arc<AtomicBool>,
+    on_ready: impl FnOnce(),
+    reporter: &mut Reporter<'_>,
+) -> Result<()> {
     let mut client = Client::open_offline(&config.profile)?;
     let AccountClass::Agent { operator } = client.profile.registration.classification else {
         return Err(Error::AgentRequired);
@@ -52,7 +71,9 @@ pub(super) fn run(config: Config, stop: Arc<AtomicBool>, on_ready: impl FnOnce()
                 client.disconnect();
             }
             if client.session().is_err() {
+                reporter.phase(Phase::Connecting);
                 client.connect()?;
+                reporter.phase(Phase::CatchingUp);
                 startup.connected();
                 let ready = &client.session()?.ready;
                 if ready.classification != (AccountClass::Agent { operator }) {
@@ -84,13 +105,14 @@ pub(super) fn run(config: Config, stop: Arc<AtomicBool>, on_ready: impl FnOnce()
                         },
                         duration_ms: 60000,
                     })
-                    .map_err(|_| Error::State)?,
+                    .map_err(|_| Error::InvalidState("BotProtocolInvariant"))?,
                 )?;
                 let bytes = client.sign(&action)?;
                 let key =
                     VerifyingKey::from_bytes(client.profile.registration.endpoint_key.as_bytes())
-                        .map_err(|_| Error::State)?;
-                let verified = verify_action(&bytes, &key).map_err(|_| Error::State)?;
+                        .map_err(|_| Error::InvalidState("BotProtocolInvariant"))?;
+                let verified = verify_action(&bytes, &key)
+                    .map_err(|_| Error::InvalidState("BotProtocolInvariant"))?;
                 let window = client.session()?.ready.window.clone();
                 state::presence(&mut client.store, &verified, &window, now)?;
                 resolve_plan(&mut client, &config, &stop)?;
@@ -98,7 +120,15 @@ pub(super) fn run(config: Config, stop: Arc<AtomicBool>, on_ready: impl FnOnce()
             let (actor, grant) = actor(&mut client, config.grant)?;
             let room = config.rooms[room_index % config.rooms.len()];
             room_index = room_index.wrapping_add(1);
-            let at_head = pull(&mut client, &config, room, actor, grant.as_ref(), &stop)?;
+            let at_head = pull(
+                &mut client,
+                &config,
+                room,
+                actor,
+                grant.as_ref(),
+                &stop,
+                reporter,
+            )?;
             if !stop.load(Ordering::Acquire) {
                 resolve_plan(&mut client, &config, &stop)?;
                 startup.observe(
@@ -113,20 +143,19 @@ pub(super) fn run(config: Config, stop: Arc<AtomicBool>, on_ready: impl FnOnce()
         match step {
             Ok(()) => {
                 failures = 0;
+                reporter.success(startup.reached.len() == config.rooms.len());
                 wait(&stop, Duration::from_millis(config.poll_interval_ms));
             }
             Err(error) if retry_delay(&error).is_some() => {
                 client.disconnect();
                 failures = failures.saturating_add(1);
                 let mut jitter = [0u8; 1];
-                getrandom::fill(&mut jitter).map_err(|_| Error::State)?;
-                wait(
-                    &stop,
-                    Duration::from_millis(
-                        ((1000u64 << failures.min(5)).min(30000) + u64::from(jitter[0]) * 4)
-                            .max(retry_delay(&error).unwrap_or(0)),
-                    ),
-                );
+                getrandom::fill(&mut jitter)
+                    .map_err(|_| Error::InvalidState("BotEntropyUnavailable"))?;
+                let delay = ((1000u64 << failures.min(5)).min(30000) + u64::from(jitter[0]) * 4)
+                    .max(retry_delay(&error).unwrap_or(0));
+                reporter.failure(&error, Phase::Retrying, Some(delay));
+                wait(&stop, Duration::from_millis(delay));
             }
             Err(error) => {
                 client.disconnect();
@@ -175,11 +204,8 @@ impl<F: FnOnce()> Startup<F> {
         at_head: bool,
         stopped: bool,
     ) -> Result<()> {
-        if self.notify.is_none() {
-            return Ok(());
-        }
         if !self.rooms.contains(&room) {
-            return Err(Error::State);
+            return Err(Error::InvalidState("BotProtocolInvariant"));
         }
         if at_head {
             self.reached.insert(room);
@@ -198,7 +224,11 @@ impl<F: FnOnce()> Startup<F> {
 }
 pub(super) fn retry_delay(error: &Error) -> Option<u64> {
     match error {
-        Error::Client(client::Error::Clock) => Some(0),
+        Error::Client(client::Error::Clock | client::Error::ReadDeadlineExpired) => Some(0),
+        Error::Storage {
+            source: crate::storage::Error::Busy | crate::storage::Error::Deadline,
+            ..
+        } => Some(1000),
         Error::Client(client::Error::Network(error)) if error.retryable_session() => Some(0),
         Error::Client(client::Error::Refused {
             code: ErrorCode::Unavailable | ErrorCode::RateLimited | ErrorCode::Overloaded,
@@ -269,7 +299,7 @@ fn actor(client: &mut Client, grant: Option<Id>) -> Result<(Actor, Option<delega
         )?;
         let page: home::InspectionPage<delegation::Grant> = accepted(response)?
             .deserialized()
-            .map_err(|_| Error::State)?;
+            .map_err(|_| Error::InvalidState("BotProtocolInvariant"))?;
         if let Some(grant) = page.items.into_iter().find(|g| g.reference.id == id) {
             if grant.scope.agent != client.session()?.ready.acting
                 || grant.scope.mode != delegation::Mode::Autonomous
@@ -291,7 +321,7 @@ fn actor(client: &mut Client, grant: Option<Id>) -> Result<(Actor, Option<delega
             return Err(Error::Grant);
         }
         if page.next == after {
-            return Err(Error::State);
+            return Err(Error::InvalidState("BotProtocolInvariant"));
         }
         after = page.next;
     }
@@ -396,7 +426,10 @@ pub(super) fn reply_message(
         Ok(text) => text,
         Err(Error::ModelUnavailable) => Some("Local model unavailable. Please try again later.".into()),
         Err(Error::ModelTimeout) => Some("Local model timed out. Please try a shorter message.".into()),
-        Err(Error::ModelResponse) => Some("Local model could not produce a complete reply within its limits. Please try a shorter request.".into()),
+        Err(Error::ModelResponse) => Some("Local model returned an invalid response. The operator can inspect the bot diagnostics.".into()),
+        Err(Error::ModelIncomplete) => Some("Local model reached its reply token allowance. The operator can increase Reply tokens in model settings.".into()),
+        Err(Error::ModelReplyLimit) => Some("Local model reply exceeded the message length setting. Ask for a shorter answer or adjust Reply characters in model settings.".into()),
+        Err(Error::ModelContext) => Some("This request does not fit the model context. Shorten it or ask the operator to increase Context tokens.".into()),
         Err(error) => return Err(error),
     };
     Ok(text.map(|text| messaging::Send {
@@ -439,6 +472,7 @@ fn pull(
     actor: Actor,
     grant: Option<&delegation::Grant>,
     stop: &AtomicBool,
+    reporter: &mut Reporter<'_>,
 ) -> Result<bool> {
     let prior = state::room(&mut client.store, room)?;
     let reading = if config.memory.is_some() && prior.cursor.is_none() {
@@ -480,8 +514,9 @@ fn pull(
         return Ok(false);
     }
     let key = VerifyingKey::from_bytes(client.profile.active_server().signing_key.as_bytes())
-        .map_err(|_| Error::State)?;
-    let cursor = verify_cursor(&page.cursor.0, &key).map_err(|_| Error::State)?;
+        .map_err(|_| Error::InvalidState("BotProtocolInvariant"))?;
+    let cursor = verify_cursor(&page.cursor.0, &key)
+        .map_err(|_| Error::InvalidState("BotProtocolInvariant"))?;
     let now = client
         .profile
         .clock
@@ -493,7 +528,7 @@ fn pull(
         || now.upper_ms >= cursor.value().expires_ms
         || page.events.len() > 32
     {
-        return Err(Error::State);
+        return Err(Error::InvalidState("BotCursorBinding"));
     }
     let mut previous = 0;
     for event in &page.events {
@@ -502,12 +537,13 @@ fn pull(
             || event.sequence <= previous
             || event.sequence > cursor.value().sequence
         {
-            return Err(Error::State);
+            return Err(Error::InvalidState("BotHistoryOrder"));
         }
         previous = event.sequence;
     }
     if let Some(old) = &prior.cursor {
-        let old = verify_cursor(&old.0, &key).map_err(|_| Error::State)?;
+        let old =
+            verify_cursor(&old.0, &key).map_err(|_| Error::InvalidState("BotProtocolInvariant"))?;
         if old.value().sequence > cursor.value().sequence
             || old.value().access_digest != cursor.value().access_digest
         {
@@ -560,6 +596,10 @@ fn pull(
             }
             return Err(error);
         }
+        let is_model = matches!(reply, Reply::Model(_));
+        if is_model {
+            reporter.phase(Phase::Generating);
+        }
         let generated = if let Some(context) = context.as_mut() {
             context.generate(config, event, reply, stop)
         } else {
@@ -568,6 +608,9 @@ fn pull(
                 _ => Err(Error::Configuration),
             }
         };
+        if is_model {
+            reporter.model(&generated);
+        }
         let Some(message) = reply_message(event.event, generated)? else {
             return Ok(false);
         };
@@ -642,18 +685,27 @@ fn pull(
                     b"HRC.BotObserve.1".to_vec(),
                 ))
             })
-            .map_err(|_| Error::State)?;
+            .map_err(|source| Error::Storage {
+                operation: "Observe",
+                source,
+            })?;
     }
     Ok(!page.has_more)
 }
 fn settle_local(client: &mut Client) -> Result<()> {
     let plans = state::plans(&mut client.store)?;
     if plans.len() > 1 {
-        return Err(Error::State);
+        return Err(Error::InvalidState("BotPlanCount"));
     }
     for plan in plans {
         if let Some(outcome) = outbox::outcome(&mut client.store, plan.operation, plan.digest)
-            .map_err(|_| Error::State)?
+            .map_err(|error| match error {
+                outbox::Error::Storage(source) => Error::Storage {
+                    operation: "OutboxOutcome",
+                    source,
+                },
+                outbox::Error::Invalid => Error::InvalidState("BotOutboxBinding"),
+            })?
         {
             state::complete(&mut client.store, &plan, &outcome)?;
             if context::revision_conflict(&outcome) {
@@ -678,7 +730,7 @@ fn settle_local(client: &mut Client) -> Result<()> {
 fn resolve_plan(client: &mut Client, config: &Config, stop: &AtomicBool) -> Result<()> {
     let plans = state::plans(&mut client.store)?;
     if plans.len() > 1 {
-        return Err(Error::State);
+        return Err(Error::InvalidState("BotPlanCount"));
     }
     for plan in plans {
         if stop.load(Ordering::Acquire) {
@@ -690,11 +742,12 @@ fn resolve_plan(client: &mut Client, config: &Config, stop: &AtomicBool) -> Resu
         let response = client.retry_pending(plan.operation, plan.digest)?;
         let outcome = match response.outcome {
             Outcome::Result { body } => {
-                let resolved: home::ResolveResult =
-                    body.deserialized().map_err(|_| Error::State)?;
+                let resolved: home::ResolveResult = body
+                    .deserialized()
+                    .map_err(|_| Error::InvalidState("BotProtocolInvariant"))?;
                 if resolved.operation_id != plan.operation || resolved.action_digest != plan.digest
                 {
-                    return Err(Error::State);
+                    return Err(Error::InvalidState("BotResolutionBinding"));
                 }
                 resolved.outcome
             }

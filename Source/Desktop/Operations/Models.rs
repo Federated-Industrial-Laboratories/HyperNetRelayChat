@@ -362,10 +362,22 @@ impl Workspace {
                 );
                 ui.horizontal(|ui| {
                     ui.label("Context tokens");
-                    ui.add(egui::DragValue::new(&mut config.context_tokens).range(2048..=32768));
+                    ui.add(egui::DragValue::new(&mut config.context_tokens).range(2048..=131072));
                     ui.label("Reply tokens");
-                    ui.add(egui::DragValue::new(&mut config.output_tokens).range(128..=2048));
+                    ui.add(egui::DragValue::new(&mut config.output_tokens).range(128..=8192));
                 });
+                ui.horizontal(|ui| {
+                    ui.label("Reply characters");
+                    ui.add(egui::DragValue::new(&mut config.reply_characters).range(128..=2000));
+                    ui.label("Reply deadline (seconds)");
+                    ui.add(egui::DragValue::new(&mut config.request_seconds).range(10..=240));
+                });
+                ui.label("The complete reply, including memory compaction, must fit within the 5-minute history certificate. HRC messages allow 2000 characters and 8192 UTF-8 bytes.");
+                ui.horizontal(|ui| {
+                    ui.label("Startup readiness wait (seconds)");
+                    ui.add(egui::DragValue::new(&mut config.startup_seconds).range(30..=3600));
+                });
+                ui.label("Startup and reply deadlines bound individual operations. They do not limit the bot or model lifetime. Cancel stops a model only when that Start operation created it.");
             });
             c::section(ui, "Runtime", |ui| {
                 let current = match config.backend {
@@ -849,5 +861,18 @@ impl Workspace {
                 "Resynchronise on next start (reset stale cursor and context)",
             );
         });
+    }
+}
+
+impl Workspace {
+    pub(super) fn model_progress(&self) -> ops::Result<Option<ops::models::Progress>> {
+        let id = match self.page {
+            Page::Models => self.model.config.as_ref().map(|c| c.id),
+            Page::Bots => self.bot.config.as_ref().and_then(|c| c.model_id),
+            _ => None,
+        };
+        id.map(ops::models::progress)
+            .transpose()
+            .map(Option::flatten)
     }
 }

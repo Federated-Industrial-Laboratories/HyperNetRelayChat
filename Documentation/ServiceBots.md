@@ -178,20 +178,57 @@ they cannot grant tools, credentials or broader HRC permissions.
 Both adapters use nonstreaming text generation with thinking disabled where the
 model template supports it. Requests are bounded to 128 KiB, responses to 256 KiB,
 and each call to 66 chat messages. Output must be one complete assistant text
-reply, at most 4,096 bytes and within normal protocol text limits. Tool calls,
+reply within the configured character allowance and normal protocol limits of
+2,000 Unicode graphemes and 8,192 UTF-8 bytes. Tool calls,
 truncated generation, invalid text and excessive output are rejected.
 
-Each generation has a 60-second deadline covering its backend checks and HTTP
-requests, with a two-second connection limit. A reply that first compacts older
-memory can require a separate bounded summary generation. If summarisation
-fails, the bot continues with the context that still fits. Stop requests cancel
-and reap curl without creating a reply plan.
+`--model-request-seconds` sets a 10-240 second deadline (default 60) for the
+complete reply attempt, including backend checks, HTTP requests and optional
+memory compaction. The two-second connection limit remains. Compaction and the
+reply share this deadline. The maximum leaves room within the existing five-minute
+signed history certificate; configuration rejects larger values. If summarisation
+fails, the bot uses the context that still fits and the remaining request time.
+Stop requests cancel and reap curl without creating a reply plan.
 
-A model connection failure, timeout or invalid response produces a short fixed
+`--model-context-tokens` accepts 2,048-131,072 tokens; the selected backend must
+support the chosen value. `--model-output-tokens` accepts 128-8,192 tokens, and
+must leave more than 1,024 context tokens for input. `--model-reply-characters`
+accepts 128-2,000 Unicode graphemes (default 1,000). The protocol message ceiling
+still applies. Larger token allowances cannot expand that message ceiling.
+These settings bound individual work; they do not create a bot or model shutdown
+timer and do not change GPU configuration.
+
+A model connection failure, timeout, exhausted reply-token allowance, oversized
+reply, insufficient context or invalid response produces a distinct short fixed
 failure notice. That notice uses the same attributed reply, permission checks,
 rate limit and durable outbox as a successful answer. Reconnect resolves a stored
 reply without rerunning inference. Configuration, authority and storage failures
-remain terminal. HRC does not write prompt or response bodies to diagnostics.
+remain terminal except bounded retries for transient storage busy/deadline failures.
+Continuity, quota, fenced or malformed state never triggers an automatic reset.
+HRC does not write prompt or response bodies to diagnostics.
+
+The CLI emits bounded `BotStatus` JSON observations alongside the compatible
+`BotReady` startup event. Each observation records its phase, latest authenticated
+service cycle, latest successful model generation, current operation/model failures,
+retry delay and historical last failure. Successful recovery clears current
+connection failure without erasing history. A successful service poll does not
+clear a failed model attempt; a successful generation does. Model success means
+text was generated, not that the exact outbox send has already committed.
+
+Storage failures retain their category and local operation, such as
+`StorageQuota` at `State.advance`, rather than collapsing into `BotStateUnavailable`.
+Cursor, context and exact-outbox validation failures have separate diagnostic codes.
+Inspect permissions, quota, current membership and pending outcomes before changing
+state. The cause of an old generic `BotStateUnavailable` incident cannot be recovered
+from that code alone. Diagnostics do not establish that a model was hung.
+
+Managed bot status reads observations from the current process invocation's journal.
+After a process exits, the latest retained unit observation is historical.
+`botObservationCurrent` is false for stopped processes or observations older than
+five minutes; `observedMs` is the observation time, not a continuous connectivity
+promise. Journal retention is controlled by the host. Direct CLI users may retain
+these JSON lines in a private log. Unread diagnostic output cannot hold the profile
+lock indefinitely: bounded bot status writes fail instead of blocking.
 
 Changing model settings requires no pending plan and resets catch-up, like other
 bot configuration changes. Presence identifies a local model bot independently

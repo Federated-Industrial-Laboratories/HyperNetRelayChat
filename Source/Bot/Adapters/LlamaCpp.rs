@@ -20,7 +20,7 @@ pub(super) fn generate(
     let context = available.min(u64::from(model.context_tokens));
     let budget = context
         .checked_sub(u64::from(model.output_tokens) + 128)
-        .ok_or(Error::ModelResponse)?;
+        .ok_or(Error::ModelContext)?;
     loop {
         let Some(rendered) = http::json(
             model,
@@ -53,7 +53,7 @@ pub(super) fn generate(
             break;
         }
         if !drop_oldest(&mut messages) {
-            return Err(Error::ModelResponse);
+            return Err(Error::ModelContext);
         }
     }
     let Some(value) = http::json(
@@ -74,6 +74,9 @@ pub(super) fn generate(
 }
 pub(super) fn response(value: &Value) -> Result<String> {
     let choices = value["choices"].as_array().ok_or(Error::ModelResponse)?;
+    if choices.len() == 1 && choices[0]["finish_reason"] == "length" {
+        return Err(Error::ModelIncomplete);
+    }
     if choices.len() != 1 || choices[0]["finish_reason"] != "stop" {
         return Err(Error::ModelResponse);
     }

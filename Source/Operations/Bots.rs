@@ -206,6 +206,10 @@ fn arguments(
             model.context_tokens.to_string(),
             "--model-output-tokens".into(),
             model.output_tokens.to_string(),
+            "--model-request-seconds".into(),
+            model.request_seconds.to_string(),
+            "--model-reply-characters".into(),
+            model.reply_characters.to_string(),
         ]);
         if config.all_human_messages {
             args.push("--all-human-messages".into());
@@ -305,13 +309,7 @@ pub fn start_with(id: Id, resynchronise: bool, cancel: &AtomicBool) -> Result<un
         if status.managed && status.runtime.as_ref().is_none_or(|s| !s.active) {
             return Err("Start the selected model runtime before starting this bot.".into());
         }
-        if !definition
-            .local_model(&config.prefix, config.all_human_messages)
-            .probe(cancel)
-            .map_err(failure)?
-        {
-            return Err("The local model probe was cancelled or returned no reply.".into());
-        }
+        models::wait_ready(&definition, cancel)?;
     }
     crate::onboarding::prepare_existing(&config.profile, false, cancel).map_err(failure)?;
     let program = std::env::current_exe().map_err(failure)?;
