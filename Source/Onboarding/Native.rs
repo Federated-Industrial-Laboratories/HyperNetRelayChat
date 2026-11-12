@@ -4,7 +4,7 @@ use super::{Error, Result};
 use hrc::service::files;
 use std::{
     fs::{self, OpenOptions},
-    io::Read,
+    io::{Read, Write},
     os::{
         fd::AsRawFd,
         unix::{
@@ -117,10 +117,23 @@ pub(crate) fn check(cancel: &AtomicBool, end: Instant) -> Result<()> {
     }
     Ok(())
 }
-struct OwnedChild(Child);
+struct OwnedChild(Child, bool);
 impl Drop for OwnedChild {
     fn drop(&mut self) {
         if !matches!(self.0.try_wait(), Ok(Some(_))) {
+            // Interactive Suite helpers get a short opportunity to retain resumable state.
+            if self.1 {
+                unsafe {
+                    libc::kill(-(self.0.id() as i32), libc::SIGTERM);
+                }
+                let end = Instant::now() + Duration::from_secs(2);
+                while Instant::now() < end {
+                    if matches!(self.0.try_wait(), Ok(Some(_))) {
+                        return;
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            }
             // Only the process group created below belongs to this command.
             unsafe {
                 libc::kill(-(self.0.id() as i32), libc::SIGKILL);
@@ -185,7 +198,47 @@ pub(crate) fn run_diagnostic(
     cancel: &AtomicBool,
     end: Instant,
 ) -> std::result::Result<Vec<u8>, Failure> {
-    check(cancel, end)?;
+    run_input_diagnostic(program, args, None, cancel, Some(end))
+}
+/// Fixed local helpers receive bounded JSON on stdin, including private join locations.
+/// Interactive helpers have cancellation but no arbitrary human-interaction deadline.
+pub(crate) fn input_json<T: serde::Serialize, R: serde::de::DeserializeOwned>(
+    program: &Path,
+    args: &[String],
+    value: &T,
+    cancel: &AtomicBool,
+    end: Option<Instant>,
+) -> Result<R> {
+    let mut input =
+        zeroize::Zeroizing::new(serde_json::to_vec(value).map_err(|_| Error::LocalConfiguration)?);
+    input.push(b'\n');
+    if input.len() > 65536 {
+        return Err(Error::OutputLimit);
+    }
+    let output =
+        run_input_diagnostic(program, args, Some(&input), cancel, end).map_err(|e| e.category)?;
+    if output.len() > 65536 {
+        return Err(Error::OutputLimit);
+    }
+    serde_json::from_slice(&output).map_err(|_| Error::NativeRefused)
+}
+fn run_input_diagnostic(
+    program: &Path,
+    args: &[String],
+    input: Option<&[u8]>,
+    cancel: &AtomicBool,
+    end: Option<Instant>,
+) -> std::result::Result<Vec<u8>, Failure> {
+    let check = || {
+        if let Some(end) = end {
+            self::check(cancel, end)
+        } else if cancel.load(Ordering::Acquire) {
+            Err(Error::Cancelled)
+        } else {
+            Ok(())
+        }
+    };
+    check()?;
     executable(program)?;
     let mut command = Command::new(program);
     if program == Path::new("/usr/bin/podman") {
@@ -193,11 +246,23 @@ pub(crate) fn run_diagnostic(
     }
     command
         .args(args)
-        .stdin(Stdio::null())
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .process_group(0);
-    let mut child = OwnedChild(command.spawn().map_err(|_| Error::NativeRefused)?);
+    let mut child = OwnedChild(
+        command.spawn().map_err(|_| Error::NativeRefused)?,
+        input.is_some(),
+    );
+    let mut stdin = child.0.stdin.take();
+    if let Some(pipe) = &stdin {
+        nonblocking(pipe)?;
+    }
+    let mut written = 0;
     let mut stdout = child.0.stdout.take().ok_or(Error::NativeRefused)?;
     let mut stderr = child.0.stderr.take().ok_or(Error::NativeRefused)?;
     nonblocking(&stdout)?;
@@ -205,14 +270,38 @@ pub(crate) fn run_diagnostic(
     let mut out = Vec::new();
     let mut err = Vec::new();
     loop {
-        check(cancel, end)?;
-        let out_done = drain(&mut stdout, &mut out, 2 * 1024 * 1024)?;
+        check()?;
+        if let Some(pipe) = stdin.as_mut() {
+            let input = input.unwrap_or_default();
+            match pipe.write(&input[written..]) {
+                Ok(0) if written < input.len() => return Err(Error::NativeRefused.into()),
+                Ok(n) => written += n,
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                    ) => {}
+                Err(_) => return Err(Error::NativeRefused.into()),
+            }
+            if written == input.len() {
+                stdin = None;
+            }
+        }
+        let out_done = drain(
+            &mut stdout,
+            &mut out,
+            if input.is_some() {
+                65536
+            } else {
+                2 * 1024 * 1024
+            },
+        )?;
         let err_done = drain(&mut stderr, &mut err, 65536)?;
         if let Some(status) = child.0.try_wait().map_err(|_| Error::NativeRefused)?
             && out_done
             && err_done
         {
-            check(cancel, end)?;
+            check()?;
             return if status.success() {
                 Ok(out)
             } else {

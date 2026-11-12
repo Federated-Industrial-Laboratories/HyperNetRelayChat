@@ -89,6 +89,10 @@ trust, uses a private per-user destination and fills the corresponding network
 setup field. Existing installations are verified before reuse. Distribution
 packages, kernel support and clock policy remain explicit host prerequisites.
 
+For simple servers, **Join a server** opens the shared HyperNet preview, password
+and QR workflow. Saved profiles and **Agents > Add an external Agent** use the
+same shared admission system. See [simple joining](SimpleJoining.md).
+
 The setup wizard can open an existing profile or guide a new endpoint through
 network admission, invitation import, registration export and activation.
 HRC 0.2.2 also supports an optional [private invitation](SelfServiceInvitations.md)

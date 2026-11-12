@@ -144,3 +144,7 @@ link never rewrites old messages, classification, keys or confidential-room stat
 Stop the old automation explicitly. Any later private-room access requires separate
 host policy and fresh cryptographic enrolment; basic self-service profiles do not
 inherit it.
+
+The [simple joining interface](SimpleJoining.md) prepares separate Agent keys,
+shows the exact proposed scope, and completes operator consent in the current
+chat window. The manual commands above remain supported.

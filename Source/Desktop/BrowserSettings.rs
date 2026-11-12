@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 #[derive(Default)]
 pub(super) struct Settings {
     visible: bool,
+    simple: Option<crate::onboarding::simple::Binding>,
     profile: Option<PathBuf>,
     expected: Option<Value>,
     separate: bool,
@@ -30,6 +31,10 @@ impl Settings {
         self.reader.clear();
         self.message = None;
         self.picker = Picker::default();
+        self.simple = crate::onboarding::simple::load(profile).ok().flatten();
+        if self.simple.is_some() {
+            return;
+        }
         match browser::configuration(profile) {
             Ok(config) => {
                 self.separate = config.page_browser_profile.is_some();
@@ -75,6 +80,14 @@ impl Settings {
             .default_width(660.0)
             .resizable(true)
             .show(ctx, |ui| {
+                if let Some(binding) = &self.simple {
+                    ui.label("HyperNet manages this saved server's separate Page reader.");
+                    if let Some(profile) = &binding.page_profile {
+                        ui.add(egui::Label::new(profile.display().to_string()).wrap().selectable(true));
+                        ui.small("Page links open through this reader while chat stays connected. Close its browser window before starting another one.");
+                    } else { ui.label("This server has not provided a Page reader."); }
+                    return;
+                }
                 ui.label("A separate reader profile lets native Page links open while chat stays connected.");
                 ui.small("Complete normal native reader admission first. This setting selects its private Profile.json; it does not create membership, copy keys or grant Page access.");
                 if let Some(profile) = &self.profile {

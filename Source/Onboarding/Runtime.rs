@@ -167,6 +167,9 @@ impl RuntimeConfig {
 #[derive(Clone)]
 pub(super) enum Task {
     Browse(PathBuf),
+    SimpleJoin {
+        location: Option<String>,
+    },
     Existing {
         profile: PathBuf,
         offline: bool,
@@ -660,11 +663,15 @@ fn ensure_companion(
 /// Start only explicitly configured local user services; an externally managed
 /// profile needs no configuration file and remains usable without this launcher.
 pub fn prepare_existing(profile: &Path, offline: bool, cancel: &AtomicBool) -> Result<()> {
-    let seconds = profile
-        .parent()
-        .and_then(|root| RuntimeConfig::load(&root.join("OnboardingRuntime.json")).ok())
-        .filter(|c| c.self_service.is_some())
-        .map_or(30, |_| 120);
+    let seconds = if super::simple::load(profile)?.is_some() {
+        120
+    } else {
+        profile
+            .parent()
+            .and_then(|root| RuntimeConfig::load(&root.join("OnboardingRuntime.json")).ok())
+            .filter(|c| c.self_service.is_some())
+            .map_or(30, |_| 120)
+    };
     prepare_existing_before(
         profile,
         offline,
@@ -680,6 +687,9 @@ fn prepare_existing_before(
 ) -> Result<()> {
     native::check(cancel, end)?;
     let loaded = client::Profile::load(profile).map_err(|_| Error::LocalConfiguration)?;
+    if let Some(binding) = super::simple::load(profile)? {
+        return super::simple::prepare(&binding, profile, offline, cancel, end);
+    }
     if offline {
         return Ok(());
     }
@@ -858,9 +868,19 @@ pub(super) fn perform(
             listing = Some((path, entries));
             "Choose a local file or folder"
         }
+        Task::SimpleJoin { location } => {
+            let joined = super::simple::join(&config.suite, location.as_deref(), cancel)?;
+            open = Some(super::wizard::Selection {
+                profile: joined.hrc_profile,
+                offline: false,
+            });
+            "Server joined"
+        }
         Task::Existing { profile, offline } => {
-            prepare_existing_before(&profile, offline, cancel, end)?;
+            // The desktop can open retained history even if Suite is unavailable.
+            // It reports any failure to persist Offline beside the opened history.
             if !offline {
+                prepare_existing_before(&profile, false, cancel, end)?;
                 verify(&profile, cancel, end)?;
             }
             open = Some(super::wizard::Selection { profile, offline });

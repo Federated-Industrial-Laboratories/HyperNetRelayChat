@@ -12,6 +12,8 @@ use std::{
 #[serde(deny_unknown_fields)]
 struct Preferences {
     profile: PathBuf,
+    #[serde(default)]
+    profiles: Vec<PathBuf>,
 }
 
 pub(super) fn user_directory(variable: &str, fallback: &str) -> Result<PathBuf, &'static str> {
@@ -42,13 +44,34 @@ pub(super) fn last_profile() -> Option<PathBuf> {
     let preferences: Preferences = files::json(&config).ok()?;
     files::directory(&preferences.profile, false).ok()
 }
+pub(super) fn saved_profiles() -> Vec<PathBuf> {
+    let Some(config) = directory().ok().map(|p| p.join("Desktop.json")) else {
+        return vec![];
+    };
+    let Ok(mut preferences) = files::json::<Preferences>(&config) else {
+        return vec![];
+    };
+    preferences.profiles.insert(0, preferences.profile);
+    let mut profiles = Vec::new();
+    for profile in preferences.profiles.into_iter().take(65) {
+        if !profiles.contains(&profile) && files::directory(&profile, false).is_ok() {
+            profiles.push(profile);
+        }
+    }
+    profiles.truncate(64);
+    profiles
+}
 pub(super) fn remember_profile(profile: &Path) -> Result<(), &'static str> {
     let profile = files::directory(profile, false).map_err(|_| "InvalidProfileDirectory")?;
     let directory = directory()?;
     let mut nonce = [0; 8];
     getrandom::fill(&mut nonce).map_err(|_| "ConfigurationUnavailable")?;
     let temporary = directory.join(format!(".Desktop-{}", hex::encode(nonce)));
-    files::create_json(&temporary, &Preferences { profile })
+    let mut profiles = saved_profiles();
+    profiles.retain(|p| p != &profile);
+    profiles.insert(0, profile.clone());
+    profiles.truncate(64);
+    files::create_json(&temporary, &Preferences { profile, profiles })
         .map_err(|_| "ConfigurationUnavailable")?;
     let result = fs::rename(&temporary, directory.join("Desktop.json"))
         .and_then(|()| fs::File::open(&directory)?.sync_all());

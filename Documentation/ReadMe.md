@@ -67,3 +67,5 @@ private paths and identifiers from the selected deployment. Uppercase placeholde
 are not literal identifiers. Use the installed command's `--help` and supported
 template and validation commands when preparing management input. Never place passwords or private keys in
 commands, exported diagnostics or assistant prompts.
+
+- [Simple joining, saved servers and external Agent setup](SimpleJoining.md)

@@ -97,6 +97,7 @@ struct Opened {
 pub(super) struct Browser {
     children: Vec<Opened>,
     opening: Option<Job<Launch>>,
+    simple: Option<crate::onboarding::simple::Job<()>>,
 }
 pub(super) fn configuration(profile: &Path) -> Result<RuntimeConfig, &'static str> {
     let path = profile
@@ -294,6 +295,7 @@ fn write_palette(path: &Path, bytes: &[u8]) -> Result<(), &'static str> {
 impl Browser {
     pub(super) fn cancel_pending(&mut self) {
         self.opening = None;
+        self.simple = None;
     }
     pub(super) fn open(
         &mut self,
@@ -301,6 +303,17 @@ impl Browser {
         request: gui::page_links::Request,
         ctx: &egui::Context,
     ) -> Result<(), &'static str> {
+        if let Some(binding) = crate::onboarding::simple::load(profile).map_err(|_| SETUP)? {
+            if self.simple.is_some() {
+                return Err("A Page browser is already starting.");
+            }
+            gui::page_links::Address::parse(&request.address)
+                .ok_or("Invalid HyperNet Page address.")?;
+            self.simple = Some(crate::onboarding::simple::Job::start(ctx, move |cancel| {
+                crate::onboarding::simple::pages(&binding, Some(&request.address), cancel)
+            }));
+            return Ok(());
+        }
         if self.children.len() >= 4 {
             return Err(
                 "Close a browser window before opening another Page; four windows are already open.",
@@ -367,6 +380,18 @@ impl Browser {
     }
     pub(super) fn poll(&mut self) -> Option<&'static str> {
         let mut error = None;
+        if let Some(result) = self
+            .simple
+            .as_ref()
+            .and_then(crate::onboarding::simple::Job::result)
+        {
+            self.simple = None;
+            if result.is_err() {
+                error = Some(
+                    "HyperNet could not open the saved Page reader. Check this server's Page access and close its existing browser before retrying.",
+                );
+            }
+        }
         self.children
             .retain_mut(|opened| match opened.child.try_wait() {
                 Ok(Some(status)) => {
