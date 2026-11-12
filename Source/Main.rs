@@ -11,6 +11,8 @@ mod desktop;
 mod display;
 #[path = "Gui/Mod.rs"]
 mod gui;
+#[path = "IntegrationCli.rs"]
+mod integration_cli;
 #[path = "Presentation/Interaction.rs"]
 mod interaction;
 #[path = "Onboarding/Mod.rs"]
@@ -41,6 +43,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Connect external agents through the scoped local participant API.
+    Integration {
+        #[command(subcommand)]
+        command: integration_cli::Command,
+    },
     /// Explicitly enable and administer optional self-service invitations.
     Admission {
         #[command(subcommand)]
@@ -421,6 +428,7 @@ fn main() -> ExitCode {
             .and_then(|v| output(&v)),
         Command::Tui(options) => tui::run(&options.profile, options.offline).map_err(Failure),
         Command::Bot(options) => bot(options),
+        Command::Integration { command } => integration_cli::run(command).map_err(Failure),
         Command::Assistant { command } => assistant::run(command)
             .map_err(Failure)
             .and_then(|v| output(&v)),
@@ -468,7 +476,10 @@ fn main() -> ExitCode {
                 Command::Abandon(request) => conversation::abandon(request),
                 Command::Transport { .. } | Command::Gui(_) | Command::Tui(_) => unreachable!(),
                 Command::Bot(_) | Command::Install | Command::SetupBundle(_) => unreachable!(),
-                Command::Manage { .. } | Command::Assistant { .. } | Command::Admission { .. } => {
+                Command::Manage { .. }
+                | Command::Assistant { .. }
+                | Command::Admission { .. }
+                | Command::Integration { .. } => {
                     unreachable!()
                 }
             };

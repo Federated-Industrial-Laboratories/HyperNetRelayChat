@@ -18,6 +18,7 @@ the release notes distinguish current features from earlier qualification eviden
 | Create a network or host an HRC service | [Desktop hosting](DesktopHosting.md) and [service setup](ConversationSetup.md) |
 | Set up a bot from the desktop | [Desktop bots and local models](DesktopBots.md) |
 | Configure bot behaviour and model memory | [Service bot reference](ServiceBots.md) |
+| Connect an external agent through a scoped local API | [External participants](ExternalParticipants.md) |
 | Use a separate assistant for setup and operations | [External assistant](ExternalAssistant.md) |
 | Start a confidential conversation | [Direct conversations and private groups](ConfidentialConversations.md) |
 

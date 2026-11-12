@@ -17,6 +17,8 @@ pub enum Error {
     Configuration,
     #[error("client storage is unavailable")]
     Storage,
+    #[error("the encrypted profile already has an active owner")]
+    ProfileInUse,
     #[error("current clock observation is unavailable")]
     Clock,
     #[error("invalid operation request")]
@@ -45,6 +47,7 @@ impl Error {
         match self {
             Self::Configuration => "ClientConfigurationUnavailable",
             Self::Storage => "ClientStorageUnavailable",
+            Self::ProfileInUse => "ProfileInUse",
             Self::Clock => "ClockUnavailable",
             Self::Input => "InvalidOperation",
             Self::Network(error) => error.code(),
@@ -142,7 +145,10 @@ impl Client {
     pub fn open_offline(directory: &Path) -> Result<Self> {
         let profile = Profile::load(directory).map_err(|_| Error::Configuration)?;
         let key = files::key(&directory.join("Endpoint.key")).map_err(|_| Error::Configuration)?;
-        let store = profile.store(directory).map_err(|_| Error::Storage)?;
+        let store = profile.store(directory).map_err(|e| match e {
+            crate::storage::Error::Busy => Error::ProfileInUse,
+            _ => Error::Storage,
+        })?;
         let mut client = Self {
             profile,
             store,

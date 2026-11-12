@@ -206,10 +206,12 @@ class Conversation:
             self.stopped_upgrade(*upgrade)
             return
         load_only = self.config.get('loadOnly', False)
+        external = self.config.get('externalAgentBinary') or os.environ.get('HRC_NATIVE_EXTERNAL_AGENT')
         assert isinstance(load_only, bool), 'loadOnly must be boolean'
         load_setting = os.environ.get('HRC_NATIVE_LOAD_ONLY', '0')
         assert load_setting in ('0', '1'), 'Invalid load workflow selection'
         if load_only or load_setting == '1':
+            assert not external, 'Select one independent workflow'
             assert not (self.config.get('localClientOnly', False) or
                         self.config.get('confidentialClientOnly', False) or
                         os.environ.get('HYPERNET_HRC_LOCAL_CLIENT_ONLY', '0') == '1' or
@@ -235,6 +237,16 @@ class Conversation:
         assert confidential_setting in ('0', '1'), 'Invalid confidential workflow selection'
         only_confidential = only_confidential or confidential_setting == '1'
         assert not (only_local and only_confidential), 'Select one independent client workflow'
+        if external:
+            assert not (only_local or only_confidential), 'Select one independent client workflow'
+            self.outcome(self.cli('ExternalAgentJoined','room','join','--profile',self.profiles['Agent'],
+                                  '--room',address(room)))
+            self.external_agent(room, external)
+            self.authority_refusal(room)
+            self.record(dict(case='NativeExternalAgentWorkflow',passed=True,protocol='hrc/1',
+                             realCliProvisioning=True,conversationBaselineIncluded=False,
+                             externalAgentIncluded=True,noDirectFallback=True))
+            return
         if only_local or only_confidential:
             binary = self.confidential_client_binary() if only_confidential else self.local_client_binary()
             assert binary, 'Independent client workflow requires its executable'
@@ -346,6 +358,26 @@ class Conversation:
 
     def local_client_binary(self):
         return self.config.get('localClientBinary') or os.environ.get('HYPERNET_HRC_LOCAL_CLIENT')
+
+    def external_agent(self, room, binary):
+        binary = Path(binary).resolve(strict=True)
+        assert binary.is_file() and os.access(binary, os.X_OK), 'External Agent probe unavailable'
+        maximum = min(180, int(self.deadline - time.monotonic()) - 2)
+        assert maximum >= 30, 'Insufficient remaining external Agent budget'
+        # The native fixture path can exceed sun_path; keep only the owned IPC work path short.
+        import tempfile
+        with tempfile.TemporaryDirectory(prefix='HrcApi') as base:
+            work = Path(base) / 'Api'
+            result = subprocess.run([str(binary), '--person', str(self.profiles['Alice']),
+                '--agent', str(self.profiles['Agent']), '--room', address(room), '--work', str(work),
+                '--maximum-seconds', str(maximum)], capture_output=True, timeout=maximum+1)
+            assert len(result.stdout) <= 65536 and len(result.stderr) <= 65536, 'External Agent output bound'
+            self.record(dict(case='NativeExternalAgentProcess',exitCode=result.returncode,
+                stdout=result.stdout.decode(errors='replace'),stderr=result.stderr.decode(errors='replace')))
+            assert result.returncode == 0, 'External Agent workflow failed'
+            evidence = json.loads(result.stdout)
+            assert evidence['status'] == 'Passed' and evidence['replyEffects'] == 1
+            self.record(evidence)
 
     def local_client(self, room):
         binary = self.local_client_binary()

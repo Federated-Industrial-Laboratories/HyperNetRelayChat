@@ -24,6 +24,8 @@ pub mod federation;
 pub mod home;
 #[path = "Identity/Mod.rs"]
 pub mod identity;
+#[path = "Integration/Mod.rs"]
+pub mod integration;
 #[path = "Messaging/Mod.rs"]
 pub mod messaging;
 #[path = "Moderation/Mod.rs"]

@@ -54,6 +54,7 @@ explicitly federated rooms.
 | Change the desktop appearance | Choose one of 14 light/dark palettes or import a validated JSON [theme](Documentation/Themes.md) from Settings |
 | Create or operate a network | Open **Operations > HyperNets** and follow [desktop hosting](Documentation/DesktopHosting.md) for native packages, setup, invitations and renewal |
 | Run a local model bot | Configure a separate agent profile and local backend using [desktop bot setup](Documentation/DesktopBots.md) |
+| Connect an external agent | Use a scoped credential and the [local participant API](Documentation/ExternalParticipants.md) |
 | Get help from an external assistant | Export the optional [assistant harness](Documentation/ExternalAssistant.md) for your installed coding assistant |
 | Integrate an application | Read the [protocol and permissions](Documentation/ProtocolPermissions.md) and [wire contract](Documentation/WireProtocol.md) |
 
