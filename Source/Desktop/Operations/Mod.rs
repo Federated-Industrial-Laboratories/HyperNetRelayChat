@@ -254,7 +254,7 @@ impl Workspace {
                                     .as_millis() as u64;
                                 ui.label(format!(
                                     "Model: {} · attempt {} · {} s elapsed",
-                                    progress.phase,
+                                    progress.label(),
                                     progress.attempt,
                                     now.saturating_sub(progress.started_ms) / 1000
                                 ));
@@ -373,6 +373,57 @@ fn limits(ui: &mut egui::Ui, value: &mut ops::units::Limits) {
     }
 }
 fn result(ui: &mut egui::Ui, value: &Value) {
+    if let Ok(progress) =
+        serde_json::from_value::<ops::models::Progress>(value["readiness"].clone())
+    {
+        c::section(ui, "Model readiness", |ui| {
+            ui.label(progress.label());
+            ui.label(format!(
+                "Last checked {} · {} attempts",
+                observed_age(progress.observed_ms),
+                progress.attempt
+            ));
+            if let Some(runtime) = value.get("runtime").filter(|v| !v.is_null()) {
+                ui.label(if runtime["active"] == true {
+                    "The managed process is running."
+                } else {
+                    "The managed process is not running."
+                });
+            }
+            if let Some(error) = &progress.current_failure {
+                ui.label(format!("Latest check: {error}"));
+                if error == "ModelStartupTimeout" {
+                    ui.label("The process was left running. Check its status, allow more startup time or stop it.");
+                } else {
+                    ui.label(
+                        hrc::bot::Failure {
+                            code: error.clone(),
+                            operation: None,
+                            observed_ms: progress.observed_ms,
+                        }
+                        .guidance(),
+                    );
+                }
+            }
+            if let Some(error) = &progress.last_failure {
+                ui.label(format!("Last recorded readiness failure: {error}"));
+            }
+            match progress.last_success_ms {
+                Some(time) => {
+                    ui.label(format!(
+                        "Last successful readiness check: {}",
+                        observed_age(time)
+                    ));
+                }
+                None => {
+                    ui.label("No successful readiness check recorded.");
+                }
+            }
+            ui.weak(
+                "This is a synthetic inference check, separate from the bot's chat connection.",
+            );
+        });
+    }
     if let Ok(observation) =
         serde_json::from_value::<hrc::bot::Observation>(value["botObservation"].clone())
     {

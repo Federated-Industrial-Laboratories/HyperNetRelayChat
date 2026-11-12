@@ -18,6 +18,21 @@ pub(crate) struct Progress {
     pub last_failure: Option<String>,
     pub last_success_ms: Option<u64>,
 }
+impl Progress {
+    pub fn label(&self) -> &'static str {
+        match self.phase.as_str() {
+            "checking" => "Checking readiness",
+            "loadingOrChecking" => "Loading or checking the model",
+            "waiting" => "Waiting before retrying",
+            "ready" => "Ready at the last check",
+            "timedOut" => "Readiness wait expired",
+            "cancelled" => "Readiness check cancelled",
+            "failed" => "Readiness check failed",
+            "stopped" => "Model stopped",
+            _ => "Readiness status unavailable",
+        }
+    }
+}
 fn now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
