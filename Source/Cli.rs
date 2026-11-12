@@ -53,6 +53,11 @@ pub fn outbox(profile: &Path) -> Result<Json, &'static str> {
 
 #[derive(Subcommand)]
 pub enum Service {
+    /// Compose HRC Home, owner and room with Suite's certified native host runtime.
+    HostRequest {
+        #[arg(long)]
+        directory: PathBuf,
+    },
     /// Process one bounded private Suite registrar request from standard input.
     AdmissionRequest {
         #[arg(long)]
@@ -397,6 +402,9 @@ fn call<T: serde::Serialize>(
 }
 pub fn service(command: Service) -> Result<Json, &'static str> {
     match command {
+        Service::HostRequest { directory } => json_value(
+            service::host::request(&directory, bounded_input()?).map_err(|error| error.code())?,
+        ),
         Service::AdmissionRequest { config } => json_value(
             service::live_admission::request(&config, &bounded_input()?)
                 .map_err(|_| "AdmissionUnavailable")?,

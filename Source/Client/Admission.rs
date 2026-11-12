@@ -71,11 +71,25 @@ fn saved(directory: &Path) -> files::Result<Pending> {
     Ok(saved)
 }
 pub fn prepare(directory: &Path, mut options: Options) -> files::Result<Pending> {
+    options.rooms.sort();
+    options.rooms.dedup();
+    if options.rooms.is_empty() {
+        return Err(files::Invalid);
+    }
+    prepare_local(directory, options)
+}
+/// Bootstrap only: the local host owner predates the first room and is not a scoped member.
+pub(crate) fn prepare_owner(directory: &Path, options: Options) -> files::Result<Pending> {
+    if options.classification != Classification::Person || !options.rooms.is_empty() {
+        return Err(files::Invalid);
+    }
+    prepare_local(directory, options)
+}
+fn prepare_local(directory: &Path, mut options: Options) -> files::Result<Pending> {
     options.server.validate()?;
     options.rooms.sort();
     options.rooms.dedup();
-    if options.rooms.is_empty()
-        || options.rooms.len() > 16
+    if options.rooms.len() > 16
         || options.rooms.iter().any(|r| r.home != options.server.home)
         || !options.companion.is_absolute()
     {

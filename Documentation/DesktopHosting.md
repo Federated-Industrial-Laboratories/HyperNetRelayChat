@@ -1,5 +1,10 @@
 # Create and operate a HyperNet host
 
+The shared Suite host workflow can compose HRC through the
+[private HRC hosting adapter](SharedHosting.md). It supplies certified native
+connections, while HRC creates its owner, restricted room policy and general
+room. The finite/manual HRC workflow documented below remains available.
+
 HRC's desktop hosting workflow prepares a user-owned HyperNet and an HRC home
 service. The first topology runs four separately keyed authority replicas, a
 relay, an attached authority endpoint and an attached HRC endpoint on one Linux

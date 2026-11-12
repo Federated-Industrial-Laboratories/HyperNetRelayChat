@@ -6,6 +6,8 @@ mod admission;
 pub mod federation;
 #[path = "Files.rs"]
 pub mod files;
+#[path = "Host/Mod.rs"]
+pub mod host;
 #[path = "Io.rs"]
 pub mod io;
 #[path = "LiveAdmission.rs"]

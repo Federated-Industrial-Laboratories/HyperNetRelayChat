@@ -4,6 +4,8 @@
 pub mod admission;
 #[path = "ConversationRead.rs"]
 mod conversation_read;
+#[path = "HostSetup.rs"]
+mod host_setup;
 pub use conversation_read::ConversationPage;
 #[path = "Approvals.rs"]
 mod approvals;

@@ -39,6 +39,9 @@ pub(crate) enum Control {
     Configure {
         policy: Policy,
     },
+    ConfigureHost {
+        policy: Policy,
+    },
     LegacyInvite {
         principal: Id,
         id: Id,
@@ -239,6 +242,16 @@ fn owner(directory: &Path) -> files::Result<(Binding, SigningKey)> {
 pub fn configure(directory: &Path, policy: Policy) -> files::Result<()> {
     let (binding, key) = owner(directory)?;
     if call(&binding, &key, Control::Configure { policy })?
+        != serde_json::json!({"configured":true})
+    {
+        return Err(files::Invalid);
+    }
+    Ok(())
+}
+/// Bootstrap receipt is atomic with policy; retry never restores later disabled admission.
+pub(crate) fn configure_host(directory: &Path, policy: Policy) -> files::Result<()> {
+    let (binding, key) = owner(directory)?;
+    if call(&binding, &key, Control::ConfigureHost { policy })?
         != serde_json::json!({"configured":true})
     {
         return Err(files::Invalid);
