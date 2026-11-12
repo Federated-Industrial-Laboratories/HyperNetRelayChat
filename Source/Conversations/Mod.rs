@@ -46,6 +46,8 @@ pub struct Summary {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Member {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub successor_of: Option<AccountId>,
     pub account: AccountId,
     pub nickname: String,
     pub classification: AccountClass,
@@ -56,8 +58,11 @@ pub(crate) fn members(db: &Connection, room: RoomId, now: TimeBounds) -> Domain<
     let mut stmt=db.prepare("SELECT a.account,a.nickname,a.class,m.moderator,EXISTS(SELECT 1 FROM hrc_presence p WHERE p.account=a.id AND p.expires>?2) FROM hrc_members m JOIN hrc_accounts a ON a.id=m.account WHERE m.room=?1 AND m.active=1 ORDER BY a.id LIMIT 32")?;
     let result = stmt
         .query_map(params![room.to_string(), now.upper_ms], |r| {
+            let account = decode(&r.get::<_, Vec<u8>>(0)?)?;
             Ok(Member {
-                account: decode(&r.get::<_, Vec<u8>>(0)?)?,
+                successor_of: crate::home::admission::scopes::load(db, account)?
+                    .and_then(|s| s.successor_of),
+                account,
                 nickname: r.get(1)?,
                 classification: decode(&r.get::<_, Vec<u8>>(2)?)?,
                 moderator: r.get(3)?,
@@ -109,6 +114,7 @@ pub(crate) fn restriction(
 }
 pub(crate) fn access(db: &Connection, action: &Action, now: TimeBounds) -> Domain<Access> {
     let room = target(action)?;
+    crate::home::admission::scopes::room(db, action.actor.acting().account, room)?;
     crate::federation::actor_admitted(db, action.actor.acting(), room, now)?;
     let data: Option<(u64, u64, u64, u8)> = db
         .query_row(
@@ -462,7 +468,9 @@ pub(crate) fn list_bounded(
     for row in rows {
         let (room, name, topic, revision, sequence, joined, read, history_from, mode, invited) =
             row?;
-        match room_access(room) {
+        match crate::home::admission::scopes::room(db, action.actor.acting().account, room)
+            .and_then(|()| room_access(room))
+        {
             Ok(()) => {}
             Err(Fault::Reject(..)) => continue,
             Err(e) => return Err(e),

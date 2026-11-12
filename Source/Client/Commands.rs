@@ -289,6 +289,27 @@ impl Worker {
                 self.effect(op, Target::Room(room), &restriction)?;
             }
             Inspect => return self.inspect(),
+            ConsentAgent(request) => {
+                if request.successor && !self.client.pending()?.is_empty() {
+                    return Err(Error::Input);
+                }
+                let body = self.effect(
+                    Operation::AgentConsent,
+                    Target::Account(self.snapshot.account),
+                    &home::admission::Consent { request },
+                )?;
+                self.snapshot.inspection.admission_consent =
+                    Some(body.deserialized().map_err(|_| Error::Input)?);
+                return Ok(());
+            }
+            AgentAccess(body) => {
+                self.effect(
+                    Operation::AgentSetAccess,
+                    Target::Account(self.snapshot.account),
+                    &body,
+                )?;
+                return self.inspect();
+            }
             CreateGrant(body) => {
                 self.effect(
                     Operation::DelegationCreate,

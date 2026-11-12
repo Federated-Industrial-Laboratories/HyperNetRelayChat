@@ -101,6 +101,8 @@ impl Queued {
                     | Command::SetFilter { .. }
                     | Command::SetRestriction { .. }
                     | Command::CreateGrant(_)
+                    | Command::ConsentAgent(_)
+                    | Command::AgentAccess(_)
                     | Command::ChangeGrant { .. }
                     | Command::DecideApproval { .. }
                     | Command::SubmitCandidate(_)
@@ -338,6 +340,8 @@ fn bounded(c: &Command) -> bool {
                 && s.cursor.as_ref().is_none_or(|c| c.0.len() <= 4096)
         }
         Command::CreateGrant(g) => bounded_scope(g),
+        Command::ConsentAgent(r) => r.rooms.len() <= 16 && r.operator_consent.is_none(),
+        Command::AgentAccess(r) => r.rooms.len() <= 16,
         Command::SetPresence(p) => p.status.len() <= 128,
         Command::SetRestriction { restriction, .. } => restriction.reason.len() <= 256,
         Command::SetPreferences(p) => cache::validate_preferences(p),

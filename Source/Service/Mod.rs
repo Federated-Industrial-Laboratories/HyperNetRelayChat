@@ -8,6 +8,8 @@ pub mod federation;
 pub mod files;
 #[path = "Io.rs"]
 pub mod io;
+#[path = "LiveAdmission.rs"]
+pub mod live_admission;
 #[path = "Runtime.rs"]
 pub mod runtime;
 #[path = "Setup.rs"]

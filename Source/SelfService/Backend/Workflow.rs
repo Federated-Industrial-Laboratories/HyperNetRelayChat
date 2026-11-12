@@ -308,7 +308,16 @@ pub(crate) fn issue(
         )?;
     }
     let invitation_path = chat_folder.join("HrcInvitation.json");
-    let invitation = native.home(&work.join("HrcInvitation"), |home| {
+    let invitation = native.home(&work.join("HrcInvitation"), |home, active| {
+        if active {
+            return hrc::service::live_admission::legacy_invite(
+                home,
+                admission.chat.principal.parse().map_err(|_| Error::State)?,
+                admission.invitation_id.parse().map_err(|_| Error::State)?,
+                admission.invitation_expires_ms,
+            )
+            .map_err(|_| Error::Native);
+        }
         hrc::service::setup::invite_exact(
             home,
             admission.chat.principal.parse().map_err(|_| Error::State)?,
@@ -547,7 +556,11 @@ pub(crate) fn enrol(
         return Ok(());
     }
     let native = native::Native::new(config, cancel, end);
-    let actor = native.home(&work.join("HrcEnrolment"), |home| {
+    let actor = native.home(&work.join("HrcEnrolment"), |home, active| {
+        if active {
+            return hrc::service::live_admission::legacy_enrol(home, bytes)
+                .map_err(|_| Error::Native);
+        }
         hrc::service::setup::enrol_exact(home, bytes).map_err(|_| Error::Native)
     })?;
     state::save(

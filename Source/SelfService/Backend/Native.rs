@@ -248,7 +248,11 @@ impl<'a> Native<'a> {
         }
         Ok(result)
     }
-    pub fn home<T>(&self, work: &Path, operation: impl FnOnce(&Path) -> Result<T>) -> Result<T> {
+    pub fn home<T>(
+        &self,
+        work: &Path,
+        operation: impl FnOnce(&Path, bool) -> Result<T>,
+    ) -> Result<T> {
         state::directory(work)?;
         let config = crate::operations::home::Configuration::load(&self.config.home_config)
             .map_err(|_| Error::State)?;
@@ -259,18 +263,7 @@ impl<'a> Native<'a> {
         let active = crate::operations::home::status(&config, self.cancel)
             .map_err(|_| Error::Native)?
             .active;
-        let restore = work.join("RestoreService.json");
-        if active {
-            state::save(&restore, &json!({"restorePreviouslyRunningService":true}))?;
-        }
-        if active {
-            crate::operations::home::stop(&config, self.cancel).map_err(|_| Error::Native)?;
-        }
-        let result = operation(&config.directory);
-        if restore.exists() {
-            let recovery = AtomicBool::new(false);
-            crate::operations::home::start(&config, &recovery).map_err(|_| Error::Native)?;
-        }
-        result
+        // The running Home owns its store. A failed live request never stops or opens it.
+        operation(&config.directory, active)
     }
 }

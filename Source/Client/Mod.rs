@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Shared persistent client state for CLI, terminal, GUI and agents.
+#[path = "Admission.rs"]
+pub mod admission;
 #[path = "ConversationRead.rs"]
 mod conversation_read;
 pub use conversation_read::ConversationPage;

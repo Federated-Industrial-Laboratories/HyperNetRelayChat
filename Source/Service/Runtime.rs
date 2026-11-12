@@ -16,6 +16,8 @@ use std::{
     thread,
     time::Duration,
 };
+#[path = "AdmissionControl.rs"]
+mod admission_control;
 #[path = "Devices.rs"]
 mod devices;
 #[path = "FederationGateway.rs"]
@@ -445,6 +447,7 @@ pub fn run_with_ready(
     if !status.check_authority().supported() || !status.check_authority().endpoint_ready() {
         return Err(Error::Authority);
     }
+    let _admission = admission_control::Server::start(directory, Arc::clone(&shared))?;
     ready(&shared.config.descriptor)?;
     let _federation = federation_origin::Maintenance::start(Arc::clone(&shared))?;
     let mut connections: Vec<(Arc<Stream>, thread::JoinHandle<()>)> = Vec::new();

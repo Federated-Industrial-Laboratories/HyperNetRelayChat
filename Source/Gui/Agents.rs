@@ -5,6 +5,7 @@ use hrc::delegation::{self, Mode};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub(super) struct GrantForm {
+    admission_request: String,
     agent: Option<EndpointActor>,
     mode: Mode,
     hours: u32,
@@ -20,6 +21,7 @@ pub(super) struct GrantForm {
 impl Default for GrantForm {
     fn default() -> Self {
         Self {
+            admission_request: String::new(),
             agent: None,
             mode: Mode::Draft,
             hours: 1,
@@ -58,6 +60,20 @@ impl App {
                 ui.set_width(ui.available_width());
                 ui.collapsing("New room grant", |ui| self.grant_form(ui));
             });
+            components::section(ui,"External Agent onboarding",|ui|self.admission_form(ui));
+            for agent in &snapshot.inspection.agents {
+                if let Some(scope)=&agent.admission_scope {
+                    components::section(ui,&hrc::text::identity_display(&agent.nickname),|ui|{
+                        ui.label(if scope.revoked {"Access revoked"} else if scope.paused {"Access paused"} else {"External Agent access active"});
+                        ui.weak(if scope.allow_initiate {"May start messages in its selected rooms"} else {"Replies only in its selected rooms"});
+                        if let Some(old)=scope.successor_of {ui.label(format!("Successor to {old}"));}
+                        if !scope.revoked {ui.horizontal(|ui|{
+                            if components::button(ui,if scope.paused {"Resume access"} else {"Pause access"}).clicked(){self.model.dispatch(Command::AgentAccess(hrc::home::admission::AgentAccess{account:agent.actor.account,rooms:scope.rooms.clone(),allow_initiate:scope.allow_initiate,paused:!scope.paused,revoke:false}));}
+                            let revoke=components::button(ui,"Revoke access…");egui::Popup::menu(&revoke).show(|ui|{ui.label("Permanently revoke this Agent's Home access?");if components::button(ui,"Revoke Agent access").clicked(){self.model.dispatch(Command::AgentAccess(hrc::home::admission::AgentAccess{account:agent.actor.account,rooms:scope.rooms.clone(),allow_initiate:false,paused:true,revoke:true}));ui.close();}});
+                        });}
+                    });
+                }
+            }
             ui.add_space(10.0);
             if snapshot.inspection.grants.is_empty() {
                 components::section(ui, "Grants", |ui| { ui.weak("No grants in this inspection"); });
@@ -163,6 +179,62 @@ impl App {
         });
     }
 
+    fn admission_form(&mut self, ui: &mut egui::Ui) {
+        ui.label("Paste the public request from a new external Agent. The Agent keeps its own private keys and uses the API or CLI.");
+        ui.add(
+            egui::TextEdit::multiline(&mut self.grant.admission_request)
+                .char_limit(16384)
+                .desired_rows(4)
+                .desired_width(ui.available_width()),
+        );
+        if let Ok(request) =
+            serde_json::from_str::<hrc::home::admission::Prepare>(&self.grant.admission_request)
+        {
+            ui.label(format!("New Agent: {}", request.identity.account));
+            ui.label(format!("Native principal: {}", request.native_principal));
+            ui.label(if request.allow_initiate {
+                "Permission: read, reply and start messages"
+            } else {
+                "Permission: read and reply"
+            });
+            for room in &request.rooms {
+                let name = self
+                    .model
+                    .snapshot
+                    .rooms
+                    .iter()
+                    .find(|r| r.room == *room)
+                    .map(|r| r.name.as_str())
+                    .unwrap_or("Unlisted room");
+                ui.label(format!("{name} · {room}"));
+            }
+            if request.successor {
+                ui.label("Create a visible successor to this account. Resolve pending sends and stop the old automation first. Old messages and keys remain unchanged.");
+            }
+            let own = request.classification
+                == hrc::home::admission::Classification::Agent {
+                    operator: self.model.snapshot.account,
+                }
+                && request.operator_consent.is_none();
+            if ui
+                .add_enabled_ui(own, |ui| {
+                    components::primary(ui, "Authorize this exact Agent")
+                })
+                .inner
+                .clicked()
+            {
+                self.model.dispatch(Command::ConsentAgent(request));
+            }
+        }
+        if let Some(consent) = &self.model.snapshot.inspection.admission_consent {
+            ui.label("Consent issued. Return this receipt to the join workflow before it expires.");
+            if let Ok(json) = serde_json::to_string_pretty(consent)
+                && components::button(ui, "Copy consent receipt").clicked()
+            {
+                ui.ctx().copy_text(json);
+            }
+        }
+    }
     fn grant_form(&mut self, ui: &mut egui::Ui) {
         let snapshot = self.model.snapshot.clone();
         let Some(room) = &snapshot.selected else {

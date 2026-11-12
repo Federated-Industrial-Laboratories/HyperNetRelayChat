@@ -12,6 +12,8 @@ pub struct AccountView {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentEndpoint {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admission_scope: Option<crate::home::admission::Scope>,
     pub actor: EndpointActor,
     pub nickname: String,
 }
@@ -53,6 +55,7 @@ pub(crate) fn read_bounded(db: &Connection, action: &Action, bytes: usize) -> Do
             result.push((
                 r.get(4)?,
                 AgentEndpoint {
+                    admission_scope: crate::home::admission::scopes::load(db, actor.account)?,
                     actor,
                     nickname: r.get(2)?,
                 },
