@@ -135,7 +135,7 @@ fn send(db: &Transaction<'_>, action: &Action, now: TimeBounds, permit: Permit) 
     if conversations::restriction(db, access.room, &action.actor, 1, now)? {
         return deny("RoomSilenced");
     }
-    let accessible = |id: Id| -> Domain<(Option<String>, u8)> {
+    let accessible = |id: Id| -> Domain<(Option<String>, u8, Actor)> {
         let row:Option<(Vec<u8>,Option<String>,u8)>=db.query_row("SELECT event,causal_root,causal_depth FROM hrc_events WHERE id=?1 AND room=?2 AND created>=?3 AND created<=?4",params![id.as_hex(),access.room.to_string(),access.history_from.max(permit.history_from).max(now.upper_ms.saturating_sub(RETENTION)),permit.history_until.min(i64::MAX as u64)],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
         let Some((bytes, root, depth)) = row else {
             return deny("ReferencedEvent");
@@ -144,17 +144,18 @@ fn send(db: &Transaction<'_>, action: &Action, now: TimeBounds, permit: Permit) 
         if crate::moderation::ignored(db, action.actor.represented(), &event.actor)? {
             return deny("ReferencedEvent");
         }
-        Ok((root, depth))
+        Ok((root, depth, event.actor))
     };
     if let Some(parent) = parent {
-        accessible(parent)?;
+        let (_, _, trigger) = accessible(parent)?;
+        home::admission::scopes::reply(db, action, parent, cause, &trigger)?;
     }
     let mut causality = None;
     if let Some(cause) = cause {
         if matches!(action.actor, Actor::Direct { .. }) {
             return invalid("HumanCausation");
         }
-        let (root, depth) = accessible(cause)?;
+        let (root, depth, _) = accessible(cause)?;
         let root = root.unwrap_or_else(|| cause.as_hex());
         if depth >= 4 {
             return deny("AgentDepth");

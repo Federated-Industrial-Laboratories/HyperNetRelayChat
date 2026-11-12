@@ -42,6 +42,7 @@ fn snapshot() -> Snapshot {
             content: std::collections::BTreeMap::new(),
             summary,
             members: vec![hrc::conversations::Member {
+                successor_of: None,
                 account,
                 nickname: "Alice".into(),
                 classification: AccountClass::Human,

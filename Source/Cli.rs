@@ -53,6 +53,18 @@ pub fn outbox(profile: &Path) -> Result<Json, &'static str> {
 
 #[derive(Subcommand)]
 pub enum Service {
+    /// Process one bounded private Suite registrar request from standard input.
+    AdmissionRequest {
+        #[arg(long)]
+        config: PathBuf,
+    },
+    /// Enable or update live admission on the running Home with an explicit policy file.
+    AdmissionConfigure {
+        #[arg(long)]
+        directory: PathBuf,
+        #[arg(long)]
+        policy: PathBuf,
+    },
     /// Create a new home service. Existing directories are never reset.
     Init {
         #[arg(long)]
@@ -123,6 +135,27 @@ impl Connection {
 }
 #[derive(Subcommand)]
 pub enum Profile {
+    /// Generate local participant keys or sign the exact returned invitation.
+    AdmissionRequest {
+        #[arg(long)]
+        directory: PathBuf,
+    },
+    /// Authorize the exact external Agent request using the currently admitted operator.
+    ConsentAgent {
+        #[arg(long)]
+        profile: PathBuf,
+        #[arg(long)]
+        request: PathBuf,
+        #[arg(long)]
+        output: PathBuf,
+    },
+    /// Pause, narrow or permanently revoke an independently keyed Agent's Home scope.
+    AgentAccess {
+        #[arg(long)]
+        profile: PathBuf,
+        #[arg(long)]
+        policy: PathBuf,
+    },
     /// Enrol, inspect and recover account endpoints without an administrator override.
     Identity {
         #[command(subcommand)]
@@ -364,6 +397,18 @@ fn call<T: serde::Serialize>(
 }
 pub fn service(command: Service) -> Result<Json, &'static str> {
     match command {
+        Service::AdmissionRequest { config } => json_value(
+            service::live_admission::request(&config, &bounded_input()?)
+                .map_err(|_| "AdmissionUnavailable")?,
+        ),
+        Service::AdmissionConfigure { directory, policy } => {
+            service::live_admission::configure(
+                &directory,
+                service::files::json(&policy).map_err(|_| "AdmissionPolicy")?,
+            )
+            .map_err(|_| "AdmissionConfigurationUnconfirmed")?;
+            Ok(json!({"configured":true}))
+        }
         Service::Init {
             directory,
             network,
@@ -464,6 +509,34 @@ pub fn service(command: Service) -> Result<Json, &'static str> {
 }
 pub fn profile(command: Profile) -> Result<Json, &'static str> {
     match command {
+        Profile::AdmissionRequest { directory } => json_value(
+            client::admission::request(&directory, bounded_input()?)
+                .map_err(|_| "ParticipantUnavailable")?,
+        ),
+        Profile::ConsentAgent {
+            profile,
+            request,
+            output,
+        } => {
+            let request = service::files::json(&request).map_err(|_| "AgentRequest")?;
+            let mut c = client::Client::open(&profile).map_err(|_| "ProfileUnavailable")?;
+            c.connect().map_err(|_| "ConnectionUnavailable")?;
+            let receipt = c.consent_agent(request).map_err(|_| "ConsentUnconfirmed")?;
+            service::files::create_json(&output, &receipt)
+                .map_err(|_| "ConsentOutputUnconfirmed")?;
+            json_value(receipt)
+        }
+        Profile::AgentAccess { profile, policy } => {
+            let body: home::admission::AgentAccess =
+                service::files::json(&policy).map_err(|_| "AgentPolicy")?;
+            let mut c = client::Client::open(&profile).map_err(|_| "ProfileUnavailable")?;
+            c.connect().map_err(|_| "ConnectionUnavailable")?;
+            let account = c.profile.registration.account;
+            json_value(
+                c.call(Operation::AgentSetAccess, Target::Account(account), &body)
+                    .map_err(|_| "AgentPolicyUnconfirmed")?,
+            )
+        }
         Profile::Identity { command } => identity_cli::run(command),
         Profile::Nickname { profile, nickname } => {
             let mut c = open(&profile)?;
@@ -868,4 +941,17 @@ pub fn abandon(request: Abandon) -> Result<Json, &'static str> {
     Ok(
         json!({"status":"RetryStoppedOutcomeUnknown","operationId":operation_id,"actionDigest":request.action_digest,"abandoned":true}),
     )
+}
+
+fn bounded_input<T: serde::de::DeserializeOwned>() -> Result<T, &'static str> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    std::io::stdin()
+        .take(home::admission::MAXIMUM as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "AdmissionInput")?;
+    if bytes.len() > home::admission::MAXIMUM {
+        return Err("AdmissionInputSize");
+    }
+    serde_json::from_slice(&bytes).map_err(|_| "AdmissionInput")
 }

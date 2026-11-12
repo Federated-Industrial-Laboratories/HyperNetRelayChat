@@ -245,6 +245,7 @@ fn dispatch(
         | AccountContinuity
         | AccountLifecycleOutcome => crate::identity::lifecycle::operate(db, verified, now),
         AccountPublicIdentity => crate::identity::public::read(db, action, now),
+        AgentConsent | AgentSetAccess => super::admission::operate(db, action, now),
         CryptoEnrolEndpoint
         | CryptoPublishKeyPackage
         | CryptoPropose
@@ -522,6 +523,7 @@ impl Home {
             if used>HISTORY_QUOTA-CRYPTO_FRAME_BYTES as u64&&!read_operation(action.operation){return commit(refusal(ErrorCode::Overloaded,"HistoryQuota"));}
             let admitted=(||->Domain<crate::delegation::Permit>{
                 expected(db,action)?;
+                super::admission::scopes::authorize(db,action)?;
                 if !matches!(action.actor,Actor::Delegated{..})&&action.approval.is_some(){return invalid("UnexpectedApproval");}
                 let p=crate::delegation::authorize(db,action,now,verified.digest())?;
                 match context { ExecutionContext::Local(_)=>Ok(p), ExecutionContext::Remote(remote)=>crate::federation::constrain(db,remote,p,now) }

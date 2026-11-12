@@ -444,6 +444,9 @@ impl App {
                         )
                         .show(|ui| {
                             ui.label(member.account.to_string());
+                            if let Some(old) = member.successor_of {
+                                ui.label(format!("Successor to {old}"));
+                            }
                             if ui
                                 .add_enabled(
                                     self.model.composer_enabled(),

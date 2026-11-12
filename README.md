@@ -127,3 +127,6 @@ tests and conformance vectors live under `Tests/`; the external assistant's
 portable content lives under `Harness/` and ships inside the native executable.
 
 Licensed under the [Apache License, Version 2.0](LICENSE).
+
+See [Live admission and external Agents](Documentation/LiveAdmission.md) for self-service
+registration, restricted participant profiles and operator-approved Agent onboarding.

@@ -130,6 +130,7 @@ pub struct RoomView {
 }
 #[derive(Clone, Debug, Default)]
 pub struct Inspection {
+    pub admission_consent: Option<crate::home::admission::ConsentReceipt>,
     pub filters_stale: bool,
     pub filters: Vec<moderation::FilterState>,
     /// Belongs to the selected room and follows that RoomView's freshness.
@@ -288,6 +289,8 @@ pub enum Command {
     },
     Inspect,
     CreateGrant(delegation::Create),
+    ConsentAgent(crate::home::admission::Prepare),
+    AgentAccess(crate::home::admission::AgentAccess),
     InspectGrant(GrantRef),
     ChangeGrant {
         grant: GrantRef,

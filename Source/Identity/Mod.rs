@@ -128,13 +128,20 @@ pub(crate) fn register(
     verified: &Verified<AccountRegistration>,
     now: TimeBounds,
 ) -> rusqlite::Result<Commit<std::result::Result<EndpointRecord, &'static str>>> {
+    Ok(Commit::new(
+        register_in(db, home, signer, verified, now)?,
+        verified.digest().as_bytes().to_vec(),
+    ))
+}
+pub(crate) fn register_in(
+    db: &Transaction<'_>,
+    home: ServiceId,
+    signer: &SigningKey,
+    verified: &Verified<AccountRegistration>,
+    now: TimeBounds,
+) -> rusqlite::Result<std::result::Result<EndpointRecord, &'static str>> {
     let r = verified.value();
-    let refusal = |reason| {
-        Ok(Commit::new(
-            Err(reason),
-            verified.digest().as_bytes().to_vec(),
-        ))
-    };
+    let refusal = |reason| Ok(Err(reason));
     if r.home != home
         || r.account.origin != home.network
         || verified.signer_key() != r.endpoint_key
@@ -237,16 +244,13 @@ pub(crate) fn register(
         [now.lower_ms],
     )?;
     continuity::anchor(db, home, r.account, Some(verified.signed_bytes()))?;
-    Ok(Commit::new(
-        Ok(EndpointRecord {
-            acting,
-            key,
-            principal: r.transport_principal,
-            classification: r.classification.clone(),
-            revision: 1,
-        }),
-        verified.digest().as_bytes().to_vec(),
-    ))
+    Ok(Ok(EndpointRecord {
+        acting,
+        key,
+        principal: r.transport_principal,
+        classification: r.classification.clone(),
+        revision: 1,
+    }))
 }
 pub(crate) fn operate(db: &Transaction<'_>, action: &Action, now: TimeBounds) -> Domain<Outcome> {
     if !matches!(

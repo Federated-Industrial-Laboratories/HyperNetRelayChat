@@ -122,6 +122,7 @@ fn export_offline_presentation_fixture() {
     };
     let members = vec![
         Member {
+            successor_of: None,
             account,
             nickname: "Reader".into(),
             classification: AccountClass::Human,
@@ -129,6 +130,7 @@ fn export_offline_presentation_fixture() {
             moderator: true,
         },
         Member {
+            successor_of: None,
             account: reader,
             nickname: "林".into(),
             classification: AccountClass::Human,
@@ -136,6 +138,7 @@ fn export_offline_presentation_fixture() {
             moderator: false,
         },
         Member {
+            successor_of: None,
             account: agent,
             nickname: "Archivist".into(),
             classification: AccountClass::Agent { operator: account },

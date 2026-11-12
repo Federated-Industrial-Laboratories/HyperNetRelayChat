@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Serialized admission, deduplication and durable feature dispatch.
+#[path = "Admission/Mod.rs"]
+pub mod admission;
 #[path = "AdmissionRetry.rs"]
 mod admission_retry;
 #[path = "Budgets.rs"]
@@ -63,6 +65,7 @@ impl Home {
             Ok(Commit::new((), encode(&("HRC.Schema", 1u64, home, key))?))
         })?;
         crate::identity::continuity::initialize(&mut store, home)?;
+        admission::initialize(&mut store)?;
         crate::confidential::initialize(&mut store)?;
         crate::federation::initialize(&mut store)?;
         crate::federation::reset_freshness(&mut store)?;
@@ -85,7 +88,7 @@ impl Home {
                 [],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )?;
-            Ok(version == 1
+            Ok(matches!(version, 1 | 2)
                 && decode::<ServiceId>(&saved)? == home
                 && key == signer.verifying_key().to_bytes())
         })?;
@@ -93,6 +96,7 @@ impl Home {
             return Err(Error::Invalid);
         }
         crate::identity::continuity::initialize(&mut store, home)?;
+        admission::initialize(&mut store)?;
         crate::confidential::initialize(&mut store)?;
         crate::federation::initialize(&mut store)?;
         crate::federation::reset_freshness(&mut store)?;

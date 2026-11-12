@@ -69,6 +69,7 @@ fn fixture() -> (Context, Config) {
     memory.observed = 9;
     let members = [20, 30, 40]
         .map(|n| Member {
+            successor_of: None,
             account: account(n),
             nickname: "Member".into(),
             classification: AccountClass::Human,
