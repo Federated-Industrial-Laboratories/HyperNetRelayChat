@@ -124,14 +124,20 @@ fn oversized_or_corrupt_rows_are_errors_instead_of_a_silent_memory_reset() {
             Ok(Commit::new((), b"oversized derived record".to_vec()))
         })
         .unwrap();
-    assert!(matches!(load(&mut store, room()), Err(Error::State)));
+    assert!(matches!(
+        load(&mut store, room()),
+        Err(Error::InvalidState(_))
+    ));
     store
         .write(|db| {
             db.execute("UPDATE bot_memory SET payload=?1", [b"{invalid".as_slice()])?;
             Ok(Commit::new((), b"corrupt derived record".to_vec()))
         })
         .unwrap();
-    assert!(matches!(load(&mut store, room()), Err(Error::State)));
+    assert!(matches!(
+        load(&mut store, room()),
+        Err(Error::InvalidState(_))
+    ));
 }
 
 #[test]

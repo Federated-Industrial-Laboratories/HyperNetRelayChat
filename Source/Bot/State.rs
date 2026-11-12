@@ -43,7 +43,10 @@ pub(super) fn exists(store: &mut Store) -> Result<bool> {
                 |row| row.get(0),
             )
         })
-        .map_err(|_| Error::State)
+        .map_err(|source| Error::Storage {
+            operation: "State.exists",
+            source,
+        })
 }
 pub(super) fn initialise(store: &mut Store, config: &Config) -> Result<()> {
     let identity = if let Some(model) = &config.model {
@@ -58,7 +61,7 @@ pub(super) fn initialise(store: &mut Store, config: &Config) -> Result<()> {
         // Preserve existing deterministic bots' cursor and exact-outbox identity.
         encode(&("HRC.HelpBot.1", &config.rooms, &config.help, config.grant))
     }
-    .map_err(|_| Error::State)?;
+    .map_err(|_| Error::InvalidState("BotConfigurationEncoding"))?;
     let identity = digest(&identity);
     let existing = store
         .read(READ, |db| {
@@ -77,15 +80,31 @@ pub(super) fn initialise(store: &mut Store, config: &Config) -> Result<()> {
                 Ok(None)
             }
         })
-        .map_err(|_| Error::State)?;
+        .map_err(|source| Error::Storage {
+            operation: "State.initialise",
+            source,
+        })?;
     if existing.as_ref().is_some_and(|(version, _)| *version != 1) {
-        return Err(Error::State);
+        return Err(Error::InvalidState("BotStateSchema"));
     }
     let changed = existing
         .as_ref()
         .is_some_and(|(_, saved)| saved != identity.as_bytes());
     if existing.is_some() && !changed && !config.resynchronise {
         return Ok(());
+    }
+    if changed {
+        let pending: u64 = store
+            .read(READ, |db| {
+                db.query_row("SELECT count(*) FROM bot_plans", [], |r| r.get(0))
+            })
+            .map_err(|source| Error::Storage {
+                operation: "State.configuration_pending",
+                source,
+            })?;
+        if pending != 0 {
+            return Err(Error::PendingOutcome);
+        }
     }
     store
         .write(|db| {
@@ -131,7 +150,10 @@ pub(super) fn initialise(store: &mut Store, config: &Config) -> Result<()> {
                 encode(&("HRC.HelpBot.Configure", identity, config.resynchronise))?,
             ))
         })
-        .map_err(|_| Error::State)
+        .map_err(|source| Error::Storage {
+            operation: "State.initialise",
+            source,
+        })
 }
 pub(super) fn room(store: &mut Store, room: RoomId) -> Result<Room> {
     store
@@ -147,7 +169,10 @@ pub(super) fn room(store: &mut Store, room: RoomId) -> Result<Room> {
                 },
             )
         })
-        .map_err(|_| Error::State)
+        .map_err(|source| Error::Storage {
+            operation: "State.room",
+            source,
+        })
 }
 pub(super) fn next_reply(store: &mut Store) -> Result<u64> {
     store
@@ -158,7 +183,10 @@ pub(super) fn next_reply(store: &mut Store) -> Result<u64> {
                 |r| r.get(0),
             )
         })
-        .map_err(|_| Error::State)
+        .map_err(|source| Error::Storage {
+            operation: "State.next_reply",
+            source,
+        })
 }
 pub(super) fn restart_room(store: &mut Store, room: RoomId) -> Result<()> {
     store
@@ -172,7 +200,10 @@ pub(super) fn restart_room(store: &mut Store, room: RoomId) -> Result<()> {
             }
             Ok(Commit::new((), encode(&("HRC.BotRestartContext", room))?))
         })
-        .map_err(|_| Error::State)
+        .map_err(|source| Error::Storage {
+            operation: "State.restart_room",
+            source,
+        })
 }
 pub(super) fn plans(store: &mut Store) -> Result<Vec<Plan>> {
     store
@@ -194,7 +225,7 @@ pub(super) fn plans(store: &mut Store) -> Result<Vec<Plan>> {
             })?
             .collect()
         })
-        .map_err(|_| Error::State)
+        .map_err(|source| Error::Storage { operation: "State.plans", source })
 }
 pub(super) struct Advance<'a> {
     pub room: RoomId,
@@ -221,7 +252,10 @@ pub(super) fn advance(store: &mut Store, a: Advance<'_>) -> Result<()> {
                 ))?,
             ))
         })
-        .map_err(|_| Error::State)
+        .map_err(|source| Error::Storage {
+            operation: "State.advance",
+            source,
+        })
 }
 pub(super) fn advance_in(db: &rusqlite::Transaction<'_>, a: &Advance<'_>) -> rusqlite::Result<()> {
     let now = a.now.refresh().map_err(|_| rusqlite::Error::InvalidQuery)?;
@@ -325,7 +359,10 @@ pub(super) fn complete(store: &mut Store, plan: &Plan, outcome: &Outcome) -> Res
                 ))?,
             ))
         })
-        .map_err(|_| Error::State)
+        .map_err(|source| Error::Storage {
+            operation: "State.complete",
+            source,
+        })
 }
 pub(super) fn abandoned(store: &mut Store, plan: &Plan) -> Result<()> {
     store
@@ -343,7 +380,10 @@ pub(super) fn abandoned(store: &mut Store, plan: &Plan) -> Result<()> {
                 encode(&("HRC.HelpBot.RetryAbandoned", plan.operation, plan.digest))?,
             ))
         })
-        .map_err(|_| Error::State)
+        .map_err(|source| Error::Storage {
+            operation: "State.abandoned",
+            source,
+        })
 }
 
 pub(super) fn presence_due(store: &mut Store, now: u64) -> Result<bool> {
@@ -355,7 +395,10 @@ pub(super) fn presence_due(store: &mut Store, now: u64) -> Result<bool> {
                 |r| r.get(0),
             )
         })
-        .map_err(|_| Error::State)
+        .map_err(|source| Error::Storage {
+            operation: "State.presence_due",
+            source,
+        })
 }
 pub(super) fn presence(
     store: &mut Store,
@@ -396,5 +439,8 @@ pub(super) fn presence(
                 encode(&("HRC.HelpBot.Presence", action.digest()))?,
             ))
         })
-        .map_err(|_| Error::State)
+        .map_err(|source| Error::Storage {
+            operation: "State.presence",
+            source,
+        })
 }

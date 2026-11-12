@@ -243,9 +243,27 @@ impl Workspace {
             )
             .show(ui, |ui| {
                 if let Some(job) = &self.job {
+                    let model_progress = self.model_progress().ok().flatten();
                     c::section(ui, &job.label, |ui| {
                         ui.horizontal(|ui| {
                             ui.spinner();
+                            if let Some(progress) = &model_progress {
+                                let now = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_millis() as u64;
+                                ui.label(format!(
+                                    "Model: {} · attempt {} · {} s elapsed",
+                                    progress.phase,
+                                    progress.attempt,
+                                    now.saturating_sub(progress.started_ms) / 1000
+                                ));
+                                if let Some(reason) = &progress.current_failure {
+                                    ui.label(reason);
+                                }
+                                ui.ctx()
+                                    .request_repaint_after(std::time::Duration::from_secs(1));
+                            }
                             if matches!(job.completion, Completion::NetworkStatus)
                                 && c::button(ui, "Current step").clicked()
                             {
@@ -355,6 +373,55 @@ fn limits(ui: &mut egui::Ui, value: &mut ops::units::Limits) {
     }
 }
 fn result(ui: &mut egui::Ui, value: &Value) {
+    if let Ok(observation) =
+        serde_json::from_value::<hrc::bot::Observation>(value["botObservation"].clone())
+    {
+        c::section(ui, "Bot observation", |ui| {
+            ui.label(format!(
+                "{} (observed {})",
+                observation.phase.label(),
+                observed_age(observation.observed_ms)
+            ));
+            if value["botObservationCurrent"] != true {
+                ui.label("Historical observation; the process is stopped or this report is stale.");
+            }
+            if let Some(error) = &observation.current_failure {
+                ui.label(format!(
+                    "Current operation: {} ({})",
+                    error.code,
+                    error.operation.as_deref().unwrap_or("dependency")
+                ));
+                ui.label(error.guidance());
+            }
+            if let Some(error) = &observation.model_failure {
+                ui.label(format!("Latest model attempt: {}", error.code));
+                ui.label(error.guidance());
+            }
+            if let Some(error) = &observation.last_failure {
+                ui.label(format!(
+                    "Last recorded failure: {} ({})",
+                    error.code,
+                    observed_age(error.observed_ms)
+                ));
+            }
+            if let Some(last) = observation.last_success_ms {
+                ui.label(format!(
+                    "Last authenticated service cycle: {}",
+                    observed_age(last)
+                ));
+            }
+            if let Some(last) = observation.last_model_success_ms {
+                ui.label(format!(
+                    "Last model reply generated: {}",
+                    observed_age(last)
+                ));
+            }
+            if let Some(delay) = observation.retry_in_ms {
+                ui.label(format!("Retry delay: {delay} ms"));
+            }
+        });
+    }
+
     c::section(ui, "Result", |ui| {
         for key in [
             "status",
@@ -390,4 +457,18 @@ fn result(ui: &mut egui::Ui, value: &Value) {
             result(ui, runtime);
         }
     });
+}
+
+fn observed_age(time: u64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    let secs = now.saturating_sub(time) / 1000;
+    match secs {
+        0..=1 => "just now".into(),
+        2..=59 => format!("{secs} seconds ago"),
+        60..=3599 => format!("{} minutes ago", secs / 60),
+        _ => format!("{} hours ago", secs / 3600),
+    }
 }

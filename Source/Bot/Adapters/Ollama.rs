@@ -50,6 +50,9 @@ pub(super) fn generate(
     response(&value).map(Some)
 }
 pub(super) fn response(value: &Value) -> Result<String> {
+    if local(value) && value["done"] == true && value["done_reason"] == "length" {
+        return Err(Error::ModelIncomplete);
+    }
     if !local(value) || value["done"] != true || value["done_reason"] != "stop" {
         return Err(Error::ModelResponse);
     }

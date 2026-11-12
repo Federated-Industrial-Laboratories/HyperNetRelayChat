@@ -51,6 +51,9 @@ pub(crate) struct Status {
     pub pid: u32,
     pub exit_code: i32,
     pub initial_connection_verified: bool,
+    pub bot_observation: Option<hrc::bot::Observation>,
+    /// False for stopped processes and observations older than one bounded reply attempt.
+    pub bot_observation_current: bool,
 }
 pub(crate) fn name(kind: &str, id: hrc::protocol::Id) -> String {
     format!("hrc-managed-{kind}-{}", id.as_hex())
@@ -102,11 +105,20 @@ pub(crate) fn status(name: &str, cancel: &AtomicBool) -> Result<Status> {
             .and_then(|v| v.parse().ok())
             .unwrap_or(0),
         initial_connection_verified: false,
+        bot_observation: None,
+        bot_observation_current: false,
     };
     if fields.get("LoadState") == Some(&"not-found") {
         result.state = "stopped".into();
     }
-    if active && invocation.len() == 32 && invocation.bytes().all(|b| b.is_ascii_hexdigit()) {
+    {
+        let current_invocation =
+            invocation.len() == 32 && invocation.bytes().all(|b| b.is_ascii_hexdigit());
+        let selector = if current_invocation {
+            format!("_SYSTEMD_INVOCATION_ID={invocation}")
+        } else {
+            format!("_SYSTEMD_USER_UNIT={name}.service")
+        };
         let logs = native::run(
             Path::new("/usr/bin/journalctl"),
             &native::strings(&[
@@ -114,14 +126,29 @@ pub(crate) fn status(name: &str, cancel: &AtomicBool) -> Result<Status> {
                 "--no-pager",
                 "--output=cat",
                 "--lines=16",
-                &format!("_SYSTEMD_INVOCATION_ID={invocation}"),
+                &selector,
             ]),
             cancel,
             Instant::now() + Duration::from_secs(5),
         );
         if let Ok(logs) = logs {
-            result.initial_connection_verified =
-                String::from_utf8_lossy(&logs).lines().any(|line| {
+            result.bot_observation = observation(&logs);
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            result.bot_observation_current = active
+                && current_invocation
+                && result.bot_observation.as_ref().is_some_and(|v| {
+                    v.observed_ms <= now
+                        && now.saturating_sub(v.observed_ms) <= 300_000
+                        && !matches!(v.phase, hrc::bot::Phase::Failed | hrc::bot::Phase::Stopped)
+                });
+            result.initial_connection_verified = result
+                .bot_observation
+                .as_ref()
+                .is_some_and(|v| v.initial_connection_verified)
+                || String::from_utf8_lossy(&logs).lines().any(|line| {
                     serde_json::from_str::<serde_json::Value>(line)
                         .is_ok_and(|v| v["status"] == "BotReady")
                 });
@@ -233,3 +260,16 @@ pub(crate) fn stop(name: &str, cancel: &AtomicBool) -> Result<Status> {
 #[cfg(test)]
 #[path = "../../Tests/Unit/Operations/Units.rs"]
 mod tests;
+
+fn observation(logs: &[u8]) -> Option<hrc::bot::Observation> {
+    String::from_utf8_lossy(logs)
+        .lines()
+        .filter_map(|line| {
+            let value: serde_json::Value = serde_json::from_str(line).ok()?;
+            if value["status"] != "BotStatus" {
+                return None;
+            }
+            serde_json::from_value(value["observation"].clone()).ok()
+        })
+        .next_back()
+}

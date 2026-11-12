@@ -97,14 +97,22 @@ pub(super) fn request(
         "0",
         "--connect-timeout",
         "2",
-        "--max-time",
-        "60",
         "--max-filesize",
         "262144",
         "--header",
         "Content-Type: application/json",
         "--write-out",
         "\n%{http_code}",
+    ]);
+    command.args([
+        "--max-time",
+        &format!(
+            "{:.3}",
+            deadline
+                .saturating_duration_since(Instant::now())
+                .as_secs_f64()
+                .max(0.001)
+        ),
     ]);
     if body.is_some() {
         command.args(["--data-binary", "@-"]);

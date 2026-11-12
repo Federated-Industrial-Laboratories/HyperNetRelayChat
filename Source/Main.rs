@@ -185,10 +185,16 @@ struct Bot {
     #[arg(long, value_enum, default_value = "llama-cpp")]
     model_adapter: ModelAdapter,
     /// Total model context, including its reply allowance.
-    #[arg(long, default_value_t = 4096)]
+    #[arg(long, default_value_t = 4096, value_parser=clap::value_parser!(u32).range(2048..=131072))]
     model_context_tokens: u32,
-    #[arg(long, default_value_t = 512)]
+    #[arg(long, default_value_t = 512, value_parser=clap::value_parser!(u32).range(128..=8192))]
     model_output_tokens: u32,
+    /// Complete reply deadline in seconds (10..240), including memory compaction; not a service lifetime.
+    #[arg(long, default_value_t = 60, value_parser=model_request_seconds)]
+    model_request_seconds: u32,
+    /// Reply length in Unicode characters (128..2000), within the HRC message limit.
+    #[arg(long, default_value_t = 1000, value_parser=clap::value_parser!(u32).range(128..=2000))]
+    model_reply_characters: u32,
     /// Disable retained conversation context for model replies.
     #[arg(long)]
     no_memory: bool,
@@ -204,6 +210,9 @@ enum ModelAdapter {
     LlamaCpp,
     Ollama,
 }
+fn model_request_seconds(value: &str) -> Result<u32, String> {
+    value.parse::<u32>().ok().filter(|v| (10..=240).contains(v)).ok_or_else(|| "Use 10 to 240 seconds so the complete reply fits within the 5-minute history certificate; this is not a service lifetime.".into())
+}
 fn bot(options: Bot) -> Result<(), Failure> {
     let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let interrupt = signal_hook::flag::register(signal_hook::consts::SIGINT, stop.clone())
@@ -215,6 +224,9 @@ fn bot(options: Bot) -> Result<(), Failure> {
             return Err(Failure("SignalControlUnavailable"));
         }
     };
+    let output_failed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let ready_failed = output_failed.clone();
+    let status_failed = output_failed.clone();
     let ready_stop = stop.clone();
     let memory = (options.model_endpoint.is_some() && !options.no_memory).then_some(
         hrc::bot::MemoryPolicy {
@@ -222,7 +234,8 @@ fn bot(options: Bot) -> Result<(), Failure> {
             max_bytes: options.memory_bytes,
         },
     );
-    let result = hrc::bot::run_observed(
+    let status_stop = stop.clone();
+    let result = hrc::bot::run_reporting(
         hrc::bot::Config {
             profile: options.profile,
             rooms: options.room,
@@ -245,37 +258,36 @@ fn bot(options: Bot) -> Result<(), Failure> {
                     },
                     context_tokens: options.model_context_tokens,
                     output_tokens: options.model_output_tokens,
+                    request_seconds: options.model_request_seconds,
+                    reply_characters: options.model_reply_characters,
                 }),
             memory,
         },
         stop,
         move || {
-            if output(&json!({"status":"BotReady","meaning":"InitialAuthorisedCatchUpComplete"}))
-                .is_err()
+            if bot_output(
+                &json!({"status":"BotReady","meaning":"InitialAuthorisedCatchUpComplete"}),
+            )
+            .is_err()
             {
+                ready_failed.store(true, std::sync::atomic::Ordering::Release);
                 ready_stop.store(true, std::sync::atomic::Ordering::Release);
+            }
+        },
+        move |observation| {
+            if bot_output(&json!({"status":"BotStatus","observation":observation})).is_err() {
+                status_failed.store(true, std::sync::atomic::Ordering::Release);
+                status_stop.store(true, std::sync::atomic::Ordering::Release);
             }
         },
     );
     signal_hook::low_level::unregister(interrupt);
     signal_hook::low_level::unregister(terminate);
-    result.map_err(|error| {
-        Failure(match error {
-            hrc::bot::Error::Configuration => "InvalidBotConfiguration",
-            hrc::bot::Error::AgentRequired => "BotAgentRequired",
-            hrc::bot::Error::State => "BotStateUnavailable",
-            hrc::bot::Error::Grant => "BotGrantUnavailable",
-            hrc::bot::Error::ResynchronisationRequired => "BotResynchronisationRequired",
-            hrc::bot::Error::PendingOutcome => "BotOutcomeUnknown",
-            hrc::bot::Error::Denied => "BotPermissionDenied",
-            hrc::bot::Error::Client(error) => error.code(),
-            hrc::bot::Error::RetryLater { .. } => "BotTemporarilyUnavailable",
-            hrc::bot::Error::ModelUnavailable => "BotModelUnavailable",
-            hrc::bot::Error::ModelTimeout => "BotModelTimeout",
-            hrc::bot::Error::ModelResponse => "BotModelInvalidResponse",
-        })
-    })?;
-    output(&json!({"status":"BotStopped"}))
+    if output_failed.load(std::sync::atomic::Ordering::Acquire) {
+        return Err(Failure("OutputFailed"));
+    }
+    result.map_err(|error| Failure(error.code()))?;
+    bot_output(&json!({"status":"BotStopped"}))
 }
 
 #[derive(Subcommand)]
@@ -332,6 +344,28 @@ impl From<hrc::hypernet::Error> for Failure {
     fn from(error: hrc::hypernet::Error) -> Self {
         Self(error.code())
     }
+}
+
+// Bot observations must never hold the profile lock behind an unread diagnostic pipe.
+fn bot_output(value: &Value) -> Result<(), Failure> {
+    bot_output_to(libc::STDOUT_FILENO, value)
+}
+fn bot_output_to(fd: std::os::fd::RawFd, value: &Value) -> Result<(), Failure> {
+    let mut bytes = serde_json::to_vec(value).map_err(|_| Failure("OutputFailed"))?;
+    bytes.push(b'\n');
+    if bytes.len() > 4096 {
+        return Err(Failure("OutputFailed"));
+    }
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+        return Err(Failure("OutputFailed"));
+    }
+    let count = unsafe { libc::write(fd, bytes.as_ptr().cast(), bytes.len()) };
+    let restored = unsafe { libc::fcntl(fd, libc::F_SETFL, flags) };
+    if count != bytes.len() as isize || restored < 0 {
+        return Err(Failure("OutputFailed"));
+    }
+    Ok(())
 }
 
 fn output(value: &Value) -> Result<(), Failure> {
@@ -489,6 +523,10 @@ fn main() -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
+            // stderr may share the same full pipe as stdout; do not block while reporting output failure.
+            if error.0 == "OutputFailed" {
+                return ExitCode::FAILURE;
+            }
             // No peer prose, paths, payload or operating-system diagnostics reach the terminal.
             let _ = writeln!(
                 std::io::stderr().lock(),

@@ -11,7 +11,10 @@ use crate::{
     delegation, messaging,
     protocol::*,
 };
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::{
+    sync::atomic::{AtomicBool, Ordering},
+    time::{Duration, Instant},
+};
 
 pub(super) struct Context {
     pub memory: Memory,
@@ -49,7 +52,7 @@ impl Context {
         audience.sort();
         audience.dedup();
         if audience.len() != page.members.len() || audience.is_empty() {
-            return Err(Error::State);
+            return Err(Error::InvalidState("BotContextBinding"));
         }
         let inspection: crate::conversations::Inspection = client.read_as(
             Operation::RoomInspect,
@@ -95,9 +98,11 @@ impl Context {
             audience,
             &crypto,
         ))
-        .map_err(|_| Error::State)?;
-        let fingerprint =
-            digest(&canonical_encode(&binding, CRYPTO_FRAME_BYTES).map_err(|_| Error::State)?);
+        .map_err(|_| Error::InvalidState("BotContextBinding"))?;
+        let fingerprint = digest(
+            &canonical_encode(&binding, CRYPTO_FRAME_BYTES)
+                .map_err(|_| Error::InvalidState("BotContextBinding"))?,
+        );
         let policy = config.memory.clone().unwrap_or_default();
         let enabled = config.memory.is_some();
         let mut memory = if enabled {
@@ -150,8 +155,9 @@ impl Context {
     ) -> Result<()> {
         let page = client.history_tail(room, 1, grant)?;
         let key = VerifyingKey::from_bytes(client.profile.active_server().signing_key.as_bytes())
-            .map_err(|_| Error::State)?;
-        let cursor = verify_cursor(&page.cursor.0, &key).map_err(|_| Error::State)?;
+            .map_err(|_| Error::InvalidState("BotContextBinding"))?;
+        let cursor = verify_cursor(&page.cursor.0, &key)
+            .map_err(|_| Error::InvalidState("BotContextBinding"))?;
         if cursor.value().room != room
             || page.room_revision != self.guard.room_revision
             || cursor.value().filter_revision != self.guard.filter_revision
@@ -210,11 +216,14 @@ impl Context {
             }
             Reply::Model(prompt) => {
                 let model = config.model.as_ref().ok_or(Error::Configuration)?;
-                // Leave room for two bounded model calls; derived context never renews source expiry.
+                // Compaction and reply share one configured request budget; source expiry never renews.
+                let deadline =
+                    Instant::now() + Duration::from_secs(u64::from(model.request_seconds));
                 let now = self.sampled.refresh().map_err(|_| client::Error::Clock)?;
                 let lifetime = self.policy.lifetime(self.encrypted);
                 self.memory.prune(
-                    now.upper_ms.saturating_add(120_000),
+                    now.upper_ms
+                        .saturating_add(u64::from(model.request_seconds) * 1000),
                     lifetime,
                     self.policy.max_bytes,
                 );
@@ -233,13 +242,18 @@ impl Context {
                         .memory
                         .compaction(model.input_budget_bytes(), event.sequence)
                 {
-                    match model.generate(&compaction.messages, stop) {
+                    match model.generate_until(&compaction.messages, stop, deadline) {
                         Ok(Some(summary)) => {
                             let _ = self.memory.compacted(&compaction, &summary);
                         }
                         Ok(None) => return Ok(None),
                         Err(
-                            Error::ModelResponse | Error::ModelTimeout | Error::ModelUnavailable,
+                            Error::ModelResponse
+                            | Error::ModelTimeout
+                            | Error::ModelUnavailable
+                            | Error::ModelIncomplete
+                            | Error::ModelReplyLimit
+                            | Error::ModelContext,
                         ) => {}
                         Err(error) => return Err(error),
                     }
@@ -255,9 +269,10 @@ impl Context {
                     assistant: event.actor.acting().account == self.own_account,
                     text: prompt,
                 };
-                model.generate(
+                model.generate_until(
                     &self.memory.prompt(&current, model.input_budget_bytes()),
                     stop,
+                    deadline,
                 )
             }
         }

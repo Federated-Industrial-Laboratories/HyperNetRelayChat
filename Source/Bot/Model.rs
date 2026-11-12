@@ -12,15 +12,14 @@ use serde_json::Value;
 use std::{
     net::SocketAddr,
     path::PathBuf,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::atomic::AtomicBool,
     time::{Duration, Instant},
 };
 
 const INPUT_BYTES: usize = 128 * 1024;
-const OUTPUT_BYTES: usize = 4096;
+const OUTPUT_BYTES: usize = 8192;
 const RESPONSE_BYTES: usize = 256 * 1024;
 const MAX_MESSAGES: usize = 66;
-const DEADLINE: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "camelCase")]
@@ -49,6 +48,18 @@ fn default_output() -> u32 {
     512
 }
 
+pub fn default_request_seconds() -> u32 {
+    60
+}
+pub fn default_reply_characters() -> u32 {
+    1000
+}
+fn default_request(value: &u32) -> bool {
+    *value == default_request_seconds()
+}
+fn default_characters(value: &u32) -> bool {
+    *value == default_reply_characters()
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LocalModel {
@@ -65,6 +76,17 @@ pub struct LocalModel {
     pub context_tokens: u32,
     #[serde(default = "default_output")]
     pub output_tokens: u32,
+    /// One complete reply attempt, including optional memory compaction, within the 5-minute history certificate.
+    #[serde(
+        default = "default_request_seconds",
+        skip_serializing_if = "default_request"
+    )]
+    pub request_seconds: u32,
+    #[serde(
+        default = "default_reply_characters",
+        skip_serializing_if = "default_characters"
+    )]
+    pub reply_characters: u32,
 }
 impl LocalModel {
     pub fn validate(&self) -> Result<()> {
@@ -85,8 +107,10 @@ impl LocalModel {
                 .prefix
                 .chars()
                 .any(|c| c.is_whitespace() || c.is_control())
-            || !(2048..=32768).contains(&self.context_tokens)
-            || !(128..=2048).contains(&self.output_tokens)
+            || !(2048..=131072).contains(&self.context_tokens)
+            || !(128..=8192).contains(&self.output_tokens)
+            || !(10..=240).contains(&self.request_seconds)
+            || !(128..=2000).contains(&self.reply_characters)
             || self.output_tokens.saturating_add(1024) >= self.context_tokens
         {
             return Err(Error::Configuration);
@@ -95,7 +119,14 @@ impl LocalModel {
     }
     /// Test the configured local backend without disclosing conversation content.
     pub fn probe(&self, stop: &AtomicBool) -> Result<bool> {
-        self.generate(
+        self.probe_for(stop, Duration::from_secs(u64::from(self.request_seconds)))
+    }
+    /// A synthetic readiness check has no room certificate or conversation content.
+    pub fn probe_for(&self, stop: &AtomicBool, timeout: Duration) -> Result<bool> {
+        if timeout.is_zero() || timeout > Duration::from_secs(3600) {
+            return Err(Error::Configuration);
+        }
+        self.generate_until(
             &[
                 ChatMessage {
                     role: Role::System,
@@ -109,6 +140,7 @@ impl LocalModel {
                 },
             ],
             stop,
+            Instant::now() + timeout,
         )
         .map(|reply| reply.is_some())
     }
@@ -134,21 +166,49 @@ impl LocalModel {
             Adapter::Ollama => available.min(INPUT_BYTES / 2),
         }
     }
+    #[cfg(test)]
     pub(super) fn generate(
         &self,
         messages: &[ChatMessage],
         stop: &AtomicBool,
     ) -> Result<Option<String>> {
         self.validate()?;
-        if stop.load(Ordering::Acquire) {
+        if stop.load(std::sync::atomic::Ordering::Acquire) {
             return Ok(None);
         }
-        let deadline = Instant::now() + DEADLINE;
-        let messages = fit_messages(messages, self.input_budget_bytes())?;
-        match self.adapter {
+        self.generate_until(
+            messages,
+            stop,
+            Instant::now() + Duration::from_secs(u64::from(self.request_seconds)),
+        )
+    }
+    pub(super) fn generate_until(
+        &self,
+        messages: &[ChatMessage],
+        stop: &AtomicBool,
+        deadline: Instant,
+    ) -> Result<Option<String>> {
+        self.validate()?;
+        if stop.load(std::sync::atomic::Ordering::Acquire) {
+            return Ok(None);
+        }
+        if messages.first().is_none_or(|m| m.role != Role::System) {
+            return Err(Error::ModelResponse);
+        }
+        let mut messages = messages.to_vec();
+        messages[0].content.push_str(&format!("\nReply in at most {} characters. The chat message limit is 2000 characters and 8192 UTF-8 bytes.", self.reply_characters));
+        let messages = fit_messages(&messages, self.input_budget_bytes())?;
+        let generated = match self.adapter {
             Adapter::LlamaCpp => llama_cpp::generate(self, messages, stop, deadline),
             Adapter::Ollama => ollama::generate(self, messages, stop, deadline),
+        }?;
+        if generated.as_ref().is_some_and(|reply| {
+            unicode_segmentation::UnicodeSegmentation::graphemes(reply.as_str(), true).count()
+                > self.reply_characters as usize
+        }) {
+            return Err(Error::ModelReplyLimit);
         }
+        Ok(generated)
     }
 }
 
@@ -171,7 +231,7 @@ fn fit_messages(messages: &[ChatMessage], budget: usize) -> Result<Vec<ChatMessa
     // Include a per-turn allowance in addition to the provider's fixed template reserve.
     while fitted.iter().map(|m| m.content.len() + 32).sum::<usize>() > budget {
         if !drop_oldest(&mut fitted) {
-            return Err(Error::ModelResponse);
+            return Err(Error::ModelContext);
         }
     }
     Ok(fitted)
@@ -201,7 +261,12 @@ fn text_response(message: &Value) -> Result<String> {
         .as_str()
         .ok_or(Error::ModelResponse)?
         .trim();
-    if text.len() > OUTPUT_BYTES || crate::text::message(text).is_err() {
+    if text.len() > OUTPUT_BYTES
+        || unicode_segmentation::UnicodeSegmentation::graphemes(text, true).count() > 2000
+    {
+        return Err(Error::ModelReplyLimit);
+    }
+    if crate::text::message(text).is_err() {
         return Err(Error::ModelResponse);
     }
     Ok(text.to_owned())

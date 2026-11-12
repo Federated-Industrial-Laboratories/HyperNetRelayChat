@@ -5,7 +5,7 @@ use serde_json::json;
 use std::{
     io::{Read, Write},
     net::{TcpListener, TcpStream},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, atomic::Ordering},
     thread,
 };
 
@@ -21,6 +21,8 @@ fn model() -> LocalModel {
         adapter: Adapter::LlamaCpp,
         context_tokens: 4096,
         output_tokens: 512,
+        request_seconds: 60,
+        reply_characters: 1000,
     }
 }
 fn message(role: Role, content: &str) -> ChatMessage {
@@ -417,4 +419,47 @@ fn curl_bounds_output_rejects_redirects_and_cancels_under_one_deadline() {
         Err(Error::ModelUnavailable)
     ));
     worker.join().unwrap();
+}
+
+#[test]
+fn configured_limits_preserve_old_defaults_and_refuse_certificate_overrun() {
+    let config = model();
+    let mut value = serde_json::to_value(&config).unwrap();
+    assert!(value.get("request_seconds").is_none());
+    assert!(value.get("reply_characters").is_none());
+    let restored: LocalModel = serde_json::from_value(value.clone()).unwrap();
+    assert_eq!(restored.request_seconds, 60);
+    assert_eq!(restored.reply_characters, 1000);
+    value["request_seconds"] = json!(241);
+    assert!(
+        serde_json::from_value::<LocalModel>(value)
+            .unwrap()
+            .validate()
+            .is_err()
+    );
+    let mut config = model();
+    config.context_tokens = 16384;
+    config.output_tokens = 4096;
+    config.request_seconds = 240;
+    config.reply_characters = 2000;
+    config.validate().unwrap();
+    config.reply_characters = 2001;
+    assert!(config.validate().is_err());
+}
+#[test]
+fn truncated_reply_and_oversize_text_have_distinct_recoverable_diagnostics() {
+    let value = json!({"choices":[{"finish_reason":"length","message":{"role":"assistant","content":"partial"}}]});
+    assert!(matches!(
+        llama_cpp::response(&value),
+        Err(Error::ModelIncomplete)
+    ));
+    let value = json!({"done":true,"done_reason":"length","message":{"role":"assistant","content":"partial"}});
+    assert!(matches!(
+        ollama::response(&value),
+        Err(Error::ModelIncomplete)
+    ));
+    assert!(matches!(
+        text_response(&json!({"role":"assistant","content":"a".repeat(2001)})),
+        Err(Error::ModelReplyLimit)
+    ));
 }

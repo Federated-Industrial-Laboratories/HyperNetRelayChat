@@ -64,3 +64,25 @@ fn transitional_process_states_prevent_definition_edits() {
         ..Default::default()
     }));
 }
+
+#[test]
+fn request_deadline_validation_explains_history_certificate_and_keeps_identity_fields() {
+    let config = Config::new().unwrap();
+    let mut value = serde_json::to_value(&config).unwrap();
+    for key in ["requestSeconds", "replyCharacters", "startupSeconds"] {
+        value.as_object_mut().unwrap().remove(key);
+    }
+    let mut restored: Config = serde_json::from_value(value).unwrap();
+    assert_eq!(restored.id, config.id);
+    assert_eq!(restored.model, config.model);
+    assert_eq!(restored.endpoint, config.endpoint);
+    assert_eq!(restored.request_seconds, 60);
+    assert_eq!(restored.startup_seconds, 900);
+    restored.request_seconds = 241;
+    assert!(
+        restored
+            .validate()
+            .unwrap_err()
+            .contains("5-minute history certificate")
+    );
+}

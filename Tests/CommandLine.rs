@@ -298,3 +298,43 @@ fn committed_membership_output_keeps_readiness_failure_and_pending_identity_sepa
         signed.digest().as_hex()
     );
 }
+
+#[test]
+fn bot_diagnostic_output_refuses_full_pipe_without_blocking_or_changing_flags() {
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    let mut fds = [-1; 2];
+    assert_eq!(
+        unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_NONBLOCK | libc::O_CLOEXEC) },
+        0
+    );
+    let _read = unsafe { OwnedFd::from_raw_fd(fds[0]) };
+    let write = unsafe { OwnedFd::from_raw_fd(fds[1]) };
+    let bytes = [b'x'; 4096];
+    loop {
+        let count = unsafe { libc::write(write.as_raw_fd(), bytes.as_ptr().cast(), bytes.len()) };
+        if count < 0 {
+            assert_eq!(
+                std::io::Error::last_os_error().kind(),
+                std::io::ErrorKind::WouldBlock
+            );
+            break;
+        }
+    }
+    let flags = unsafe { libc::fcntl(write.as_raw_fd(), libc::F_GETFL) };
+    assert_eq!(
+        unsafe { libc::fcntl(write.as_raw_fd(), libc::F_SETFL, flags & !libc::O_NONBLOCK) },
+        0
+    );
+    let started = std::time::Instant::now();
+    assert!(bot_output_to(write.as_raw_fd(), &json!({"status":"BotStatus"})).is_err());
+    assert!(started.elapsed() < Duration::from_secs(1));
+    assert_eq!(
+        unsafe { libc::fcntl(write.as_raw_fd(), libc::F_GETFL) },
+        flags & !libc::O_NONBLOCK
+    );
+    assert!(
+        model_request_seconds("241")
+            .unwrap_err()
+            .contains("5-minute history certificate")
+    );
+}
