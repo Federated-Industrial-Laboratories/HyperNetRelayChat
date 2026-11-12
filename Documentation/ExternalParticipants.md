@@ -149,6 +149,11 @@ Python example retains its reply plan before sending and recovers its original
 ID after a restart. Give each program a separate credential. Its state file must
 be in a private directory; retain it along with the Agent profile.
 
+`integration init` reports the actual `socket` path. Short paths use `Api.sock`
+beside the configuration. Long paths use a private directory in the user's
+runtime directory, or a private owner-checked directory under `/tmp`. Keys and
+encrypted history stay in the original profile. Use the reported path in callers.
+
 Existing `hrc api`, exclusive-profile CLI commands and the built-in bot remain
 available. They are different interfaces to the same service permission model.
 Existing automated person profiles should move to a separately enrolled Agent

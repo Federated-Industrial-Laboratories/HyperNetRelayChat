@@ -423,7 +423,13 @@ fn private_socket_serves_version_and_stops_without_losing_profile() {
         time::Duration,
     };
     let f = Fixture::new();
-    let config = f.profile();
+    f.profile();
+    let config = initialise(
+        &f.path,
+        &f.path
+            .join("a-long-application-directory-that-still-retains-the-original-encrypted-profile"),
+    )
+    .unwrap();
     let credential = f.path.join("Credential.json");
     issue(
         &config,
@@ -436,7 +442,8 @@ fn private_socket_serves_version_and_stops_without_losing_profile() {
         &credential,
     )
     .unwrap();
-    let socket = config.parent().unwrap().join("Api.sock");
+    let socket = socket_path(&config).unwrap();
+    assert!(!socket.starts_with(config.parent().unwrap()));
     let stop = Arc::new(AtomicBool::new(false));
     let stopped = stop.clone();
     let path = config.clone();

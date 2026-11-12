@@ -257,9 +257,12 @@ pub fn serve(config: &Path, stdio: bool, stop: Arc<AtomicBool>) -> Result<()> {
         }
         return Ok(());
     }
-    let directory = config.parent().ok_or(Error::Invalid)?;
+    let path = super::socket_path(config)?;
+    let directory = path.parent().ok_or(Error::Invalid)?;
+    if !directory.try_exists().map_err(|_| Error::State)? {
+        files::directory(directory, true).map_err(|_| Error::State)?;
+    }
     files::directory(directory, false).map_err(|_| Error::State)?;
-    let path = directory.join("Api.sock");
     if let Ok(meta) = fs::symlink_metadata(&path) {
         if !meta.file_type().is_socket() || meta.uid() != unsafe { libc::geteuid() } {
             return Err(Error::Denied);
@@ -316,6 +319,9 @@ pub fn serve(config: &Path, stdio: bool, stop: Arc<AtomicBool>) -> Result<()> {
         let _ = worker.join();
     }
     let _ = fs::remove_file(&path);
+    if config.parent() != Some(directory) {
+        let _ = fs::remove_dir(directory);
+    }
     result
 }
 pub fn request(socket: &Path, credential: &Path, method: &str, params: Value) -> Result<Value> {
