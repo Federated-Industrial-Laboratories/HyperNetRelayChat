@@ -282,6 +282,52 @@ fn live_private_socket_enrolment_preserves_home_ownership_and_exact_retry() {
     let signed = crate::client::admission::registration(&child, &invitation).unwrap();
     assert!(child.join("Recovery.key").exists());
     assert!(!child.join("Profile/Recovery.key").exists());
+    // An interrupted join can outlive the invitation and retention pruning. The
+    // private registrar refreshes only expiry, so the local signed bytes stay exact.
+    let mut expired = invitation.clone();
+    expired.expires_ms = 0;
+    shared
+        .home
+        .lock()
+        .unwrap()
+        .store
+        .write(|db| {
+            db.execute(
+                "UPDATE hrc_admission_claims SET invitation=?1,expires=0 WHERE id=?2",
+                rusqlite::params![
+                    crate::home::types::encode(&expired)?,
+                    local.request.claim_id.as_hex()
+                ],
+            )?;
+            db.execute(
+                "DELETE FROM hrc_invitations WHERE id=?1",
+                [expired.id.as_hex()],
+            )?;
+            Ok(storage::Commit::new(
+                (),
+                b"test expired pending claim".to_vec(),
+            ))
+        })
+        .unwrap();
+    witness(&directory, &clock_key);
+    let refreshed = control::request(
+        &binding_path,
+        &a::Request::new(a::Action::Prepare(local.request.clone().into())),
+    )
+    .unwrap();
+    let a::Status::Prepared {
+        invitation: refreshed,
+        ..
+    } = refreshed.result
+    else {
+        panic!()
+    };
+    assert_eq!(refreshed.id, invitation.id);
+    assert!(refreshed.expires_ms > expired.expires_ms);
+    assert_eq!(
+        signed,
+        crate::client::admission::registration(&child, &refreshed).unwrap()
+    );
     fs::remove_file(child.join("Profile/Profile.json")).unwrap();
     assert_eq!(
         signed,

@@ -59,14 +59,30 @@ Responses use the same format and a `status` tag. `described` includes `home`,
 `serviceKey`, and `policy`. `prepared` includes `claimId`, `requestDigest`, and the
 normal HRC `invitation` object. `complete` includes `claimId`, `registrationDigest`,
 and the admitted `actor`. `refused` includes a stable `code`. The claim remains bound
-to its original request; changing any identity, permission, consent, or registration
-byte refuses the retry. A complete retry returns the original result without restoring
+to its original unsigned request; changing any identity, native principal, class,
+room, initiation permission, Agent-reply permission, successor choice or registration
+byte refuses the retry. Only an expired unused operator-consent receipt can be
+replaced for the same unsigned request after fresh operator approval. `prepare` on
+a completed claim returns `complete` with the original result, without restoring
 revoked authority or adding memberships again.
 
 Home retains up to 1024 claims and 256 accounts. Reaching capacity refuses admission;
 it does not discard retained claims or reuse identities. Prepared invitations and
 operator consents last 15 minutes. These are enrolment deadlines, not membership
-lease timers. Core remains the authority for native validity and revocation.
+lease timers. For an interrupted unfinished claim, repeat `prepare` with the same
+public identity and claim. Home rechecks current policy and, for an Agent, current
+operator consent. It can refresh an expired invitation while preserving its ID,
+even if expiry retention removed the invitation row. Already-signed registration
+bytes remain valid because registration binds the invitation ID. A consumed claim
+or existing account cannot be reopened by this path.
+
+If an Agent's consent has expired, its admitted operator submits the same public
+request again with `operatorConsent` omitted, then supplies the fresh receipt with
+the original prepare fields. Completed or consumed consent cannot be renewed.
+Registrars should bind their stable intent to the unsigned HRC request, excluding
+only `operatorConsent`, and use the latest `prepared` invitation when resuming.
+`status` remains read-only recovery of the retained result; it does not refresh
+admission deadlines. Core remains the authority for native validity and revocation.
 
 ## Local participant helper
 

@@ -3,7 +3,7 @@
 use super::*;
 type StoredConsent = (Vec<u8>, Vec<u8>, Vec<u8>, u64, bool);
 
-fn unsigned(request: &Prepare) -> Prepare {
+pub(super) fn unsigned(request: &Prepare) -> Prepare {
     let mut r = request.clone();
     r.operator_consent = None;
     r
@@ -136,10 +136,31 @@ pub(crate) fn operate(
                     |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
                 )
                 .optional()?;
-            let (receipt, expires) = if let Some((old, receipt, expires, used)) = old {
-                if old != bytes || used || expires <= time.upper_ms {
+            // The exact unsigned request remains fixed. Only an expired unused consent
+            // may get a fresh receipt, after current operator authority and quota checks.
+            if let Some((old, _, _, used)) = &old
+                && (*used || *old != bytes)
+            {
+                return conflict("ConsentClaimContent");
+            }
+            let claim: Option<(Vec<u8>, bool)> = db
+                .query_row(
+                    "SELECT request,result IS NOT NULL FROM hrc_admission_claims WHERE id=?1",
+                    [request.claim_id.as_hex()],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?;
+            if let Some((original, completed)) = claim {
+                if unsigned(&domain::decode::<Prepare>(&original)?) != request {
                     return conflict("ConsentClaimContent");
                 }
+                if completed {
+                    return conflict("ConsentClaimCompleted");
+                }
+            }
+            let (receipt, expires) = if let Some((_, receipt, expires, false)) =
+                old.filter(|(_, _, expires, _)| *expires > time.upper_ms)
+            {
                 (receipt, expires)
             } else {
                 db.execute(
@@ -170,7 +191,7 @@ pub(crate) fn operate(
                 ))?;
                 let expires = time.lower_ms + 15 * 60 * 1000;
                 db.execute(
-                    "INSERT INTO hrc_agent_consents VALUES(?1,?2,?3,?4,?5,0)",
+                    "INSERT INTO hrc_agent_consents VALUES(?1,?2,?3,?4,?5,0) ON CONFLICT(id) DO UPDATE SET request=excluded.request,actor=excluded.actor,receipt=excluded.receipt,expires=excluded.expires WHERE used=0",
                     params![
                         request.claim_id.as_hex(),
                         bytes,

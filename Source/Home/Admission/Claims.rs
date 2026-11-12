@@ -57,22 +57,75 @@ fn prepare(
     time: TimeBounds,
 ) -> Domain<Response> {
     let bytes = domain::encode(candidate)?;
-    let old: Option<(Vec<u8>, Vec<u8>)> = db
+    let old: Option<PendingClaim> = db
         .query_row(
-            "SELECT request,invitation FROM hrc_admission_claims WHERE id=?1",
+            "SELECT request,invitation,result FROM hrc_admission_claims WHERE id=?1",
             [candidate.claim_id.as_hex()],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .optional()?;
-    if let Some((request, invitation)) = old {
-        if request != bytes {
+    if let Some((request, invitation, result)) = old {
+        let original: Prepare = domain::decode(&request)?;
+        if consent::unsigned(&original) != consent::unsigned(candidate) {
             return conflict("AdmissionClaimContent");
         }
-        return Ok(prepared(
-            candidate.claim_id,
-            &bytes,
-            domain::decode(&invitation)?,
-        ));
+        // A completed claim is a receipt, not a new admission or membership operation.
+        if let Some(result) = result {
+            return Ok(domain::decode(&result)?);
+        }
+        validate_prepare(db, home, p, candidate)?;
+        if let Classification::Agent { .. } = candidate.classification {
+            consent::check(db, p, candidate, time, false)?;
+        }
+        let mut invitation: Invitation = domain::decode(&invitation)?;
+        if invitation.home != home
+            || invitation.service_key != Id::from_bytes(signer.verifying_key().to_bytes())
+            || invitation.principal != candidate.native_principal
+            || invitation.classification != candidate.classification.account_class()
+        {
+            return conflict("AdmissionInvitationBinding");
+        }
+        let used: Option<bool> = db
+            .query_row(
+                "SELECT used FROM hrc_invitations WHERE id=?1",
+                [invitation.id.as_hex()],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let account_exists: bool = db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM hrc_accounts WHERE id=?1)",
+            [candidate.identity.account.to_string()],
+            |r| r.get(0),
+        )?;
+        if used == Some(true) || account_exists {
+            return deny("AdmissionAlreadyConsumed");
+        }
+        if invitation.expires_ms <= time.upper_ms {
+            let active: u64 = db.query_row(
+                "SELECT count(*) FROM hrc_invitations WHERE expires>?1 AND id<>?2",
+                params![time.lower_ms, invitation.id.as_hex()],
+                |r| r.get(0),
+            )?;
+            if active >= 128 {
+                return Err(Fault::Reject(ErrorCode::Overloaded, "AdmissionCapacity"));
+            }
+            invitation.expires_ms = time.lower_ms + 15 * 60 * 1000;
+            // Retention may have pruned an expired unused invitation. Its ID stays bound to
+            // this durable unfinished claim, so an already signed registration is unchanged.
+            db.execute("INSERT INTO hrc_invitations(id,principal,class,expires) VALUES(?1,?2,?3,?4) ON CONFLICT(id) DO UPDATE SET expires=excluded.expires WHERE used=0", params![invitation.id.as_hex(),invitation.principal.as_hex(),domain::encode(&invitation.classification)?,invitation.expires_ms])?;
+        } else if used.is_none() {
+            return deny("AdmissionInvitationMissing");
+        }
+        db.execute(
+            "UPDATE hrc_admission_claims SET request=?1,invitation=?2,expires=?3 WHERE id=?4",
+            params![
+                bytes,
+                domain::encode(&invitation)?,
+                invitation.expires_ms,
+                candidate.claim_id.as_hex()
+            ],
+        )?;
+        return Ok(prepared(candidate.claim_id, &bytes, invitation));
     }
     validate_prepare(db, home, p, candidate)?;
     if let Classification::Agent { .. } = candidate.classification {

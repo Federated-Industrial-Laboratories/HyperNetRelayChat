@@ -592,3 +592,238 @@ fn raw_agent_replies_require_exact_cause_explicit_agent_opt_in_and_finite_chains
     // A separate direct trigger remains valid: refusal did not consume or disable the account.
     committed(reply(&mut home, &agents[0], room, other, Some(other)));
 }
+
+fn expire_claim(home: &mut Home, claim: Id, consent: bool) {
+    home.store
+        .write(|db| {
+            let bytes: Vec<u8> = db.query_row(
+                "SELECT invitation FROM hrc_admission_claims WHERE id=?1",
+                [claim.as_hex()],
+                |r| r.get(0),
+            )?;
+            let mut invitation: Invitation = decode(&bytes)?;
+            invitation.expires_ms = 0;
+            db.execute(
+                "UPDATE hrc_admission_claims SET invitation=?1,expires=0 WHERE id=?2",
+                params![encode(&invitation)?, claim.as_hex()],
+            )?;
+            db.execute(
+                "UPDATE hrc_invitations SET expires=0 WHERE id=?1",
+                [invitation.id.as_hex()],
+            )?;
+            if consent {
+                db.execute(
+                    "UPDATE hrc_agent_consents SET expires=0 WHERE id=?1",
+                    [claim.as_hex()],
+                )?;
+            }
+            Ok(Commit::new((), b"test expired invitation".to_vec()))
+        })
+        .unwrap();
+}
+#[test]
+fn unfinished_claim_refreshes_same_invitation_but_never_revives_completed_access() {
+    let fixture = Fixture::new();
+    let mut home = fixture.create();
+    let owner = enrol(&mut home, 10, AccountClass::Human);
+    let room = room(&mut home, &owner, "Resume");
+    home.configure_admission(policy(vec![room]), TimeBounds::test_now())
+        .unwrap();
+    let (c, key) = candidate(50, vec![room], a::Classification::Person);
+    let first = invitation(&mut home, &c);
+    let signed =
+        a::Artifact::new(&sign_registration(&c.registration(service(), first.id), &key).unwrap());
+    expire_claim(&mut home, c.claim_id, false);
+    let mut disabled = policy(vec![room]);
+    disabled.enabled = false;
+    home.configure_admission(disabled, TimeBounds::test_now())
+        .unwrap();
+    assert!(matches!(
+        request(&mut home, a::Action::Prepare(c.clone().into())).result,
+        a::Status::Refused { .. }
+    ));
+    home.configure_admission(policy(vec![room]), TimeBounds::test_now())
+        .unwrap();
+    let mut changed = c.clone();
+    changed.native_principal = id(123);
+    assert!(matches!(
+        request(&mut home, a::Action::Prepare(changed.into())).result,
+        a::Status::Refused { .. }
+    ));
+    drop(home);
+    home = fixture.open();
+    let refreshed = invitation(&mut home, &c);
+    assert_eq!(first.id, refreshed.id);
+    assert!(refreshed.expires_ms > TimeBounds::test_now().upper_ms);
+    let enrolled = request(
+        &mut home,
+        a::Action::Enrol {
+            claim_id: c.claim_id,
+            registration: signed,
+        },
+    );
+    assert!(matches!(enrolled.result, a::Status::Complete { .. }));
+    home.store
+        .write(|db| {
+            db.execute(
+                "UPDATE hrc_endpoints SET disabled=1 WHERE account=?1",
+                [c.identity.account.to_string()],
+            )?;
+            db.execute(
+                "UPDATE hrc_members SET active=0 WHERE account=?1",
+                [c.identity.account.to_string()],
+            )?;
+            Ok(Commit::new(
+                (),
+                b"test disable completed participant".to_vec(),
+            ))
+        })
+        .unwrap();
+    let retry = request(&mut home, a::Action::Prepare(c.clone().into()));
+    assert_eq!(
+        serde_json::to_value(&retry).unwrap(),
+        serde_json::to_value(enrolled).unwrap()
+    );
+    assert!(
+        home.endpoint(c.identity.account, c.identity.endpoint)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        !home
+            .store
+            .read(Duration::from_secs(1), |db| db.query_row(
+                "SELECT active FROM hrc_members WHERE room=?1 AND account=?2",
+                params![room.to_string(), c.identity.account.to_string()],
+                |r| r.get::<_, bool>(0)
+            ))
+            .unwrap()
+    );
+    let (pending, _) = candidate(60, vec![room], a::Classification::Person);
+    let consumed = invitation(&mut home, &pending);
+    expire_claim(&mut home, pending.claim_id, false);
+    home.store
+        .write(|db| {
+            db.execute(
+                "UPDATE hrc_invitations SET used=1 WHERE id=?1",
+                [consumed.id.as_hex()],
+            )?;
+            Ok(Commit::new(
+                (),
+                b"test consumed unfinished invitation".to_vec(),
+            ))
+        })
+        .unwrap();
+    assert!(matches!(
+        request(&mut home, a::Action::Prepare(pending.into())).result,
+        a::Status::Refused { .. }
+    ));
+}
+#[test]
+fn expired_agent_consent_requires_current_exact_reapproval_before_resume() {
+    let fixture = Fixture::new();
+    let mut home = fixture.create();
+    let owner = enrol(&mut home, 10, AccountClass::Human);
+    let room = room(&mut home, &owner, "Agent resume");
+    home.configure_admission(policy(vec![room]), TimeBounds::test_now())
+        .unwrap();
+    let (mut c, key) = candidate(
+        50,
+        vec![room],
+        a::Classification::Agent {
+            operator: owner.record.acting.account,
+        },
+    );
+    consent(&mut home, &owner, &mut c);
+    let first = invitation(&mut home, &c);
+    let old_receipt = c.operator_consent.clone();
+    expire_claim(&mut home, c.claim_id, true);
+    assert!(matches!(
+        request(&mut home, a::Action::Prepare(c.clone().into())).result,
+        a::Status::Refused { .. }
+    ));
+    let mut changed = c.clone();
+    changed.operator_consent = None;
+    changed.allow_agent_replies = true;
+    assert!(matches!(
+        run(
+            &mut home,
+            &owner,
+            &action(
+                &owner,
+                Operation::AgentConsent,
+                Target::Account(owner.record.acting.account),
+                &a::Consent { request: changed }
+            )
+        ),
+        Outcome::Rejected { .. }
+    ));
+    c.operator_consent = None;
+    consent(&mut home, &owner, &mut c);
+    assert_ne!(old_receipt, c.operator_consent);
+    // Retention of consent can end before the unfinished claim. Its original scope
+    // must still prevent a fresh consent record from rebinding that claim.
+    expire_claim(&mut home, c.claim_id, true);
+    home.store
+        .write(|db| {
+            db.execute(
+                "DELETE FROM hrc_agent_consents WHERE id=?1",
+                [c.claim_id.as_hex()],
+            )?;
+            Ok(Commit::new((), b"test pruned expired consent".to_vec()))
+        })
+        .unwrap();
+    let mut changed = c.clone();
+    changed.operator_consent = None;
+    changed.allow_agent_replies = true;
+    assert!(matches!(
+        run(
+            &mut home,
+            &owner,
+            &action(
+                &owner,
+                Operation::AgentConsent,
+                Target::Account(owner.record.acting.account),
+                &a::Consent { request: changed }
+            )
+        ),
+        Outcome::Rejected { .. }
+    ));
+    c.operator_consent = None;
+    consent(&mut home, &owner, &mut c);
+    let renewed = invitation(&mut home, &c);
+    assert_eq!(first.id, renewed.id);
+    let signed =
+        a::Artifact::new(&sign_registration(&c.registration(service(), first.id), &key).unwrap());
+    assert!(matches!(
+        request(
+            &mut home,
+            a::Action::Enrol {
+                claim_id: c.claim_id,
+                registration: signed
+            }
+        )
+        .result,
+        a::Status::Complete { .. }
+    ));
+    // Completed claims return the old receipt even if an interrupted caller retained old consent.
+    c.operator_consent = old_receipt;
+    assert!(matches!(
+        request(&mut home, a::Action::Prepare(c.clone().into())).result,
+        a::Status::Complete { .. }
+    ));
+    c.operator_consent = None;
+    assert!(matches!(
+        run(
+            &mut home,
+            &owner,
+            &action(
+                &owner,
+                Operation::AgentConsent,
+                Target::Account(owner.record.acting.account),
+                &a::Consent { request: c }
+            )
+        ),
+        Outcome::Rejected { .. }
+    ));
+}
