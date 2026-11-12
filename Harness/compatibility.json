@@ -2,7 +2,7 @@
   "schema": 1,
   "component": "hrc-external-assistant",
   "distribution": "embedded-with-hrc",
-  "upstream": { "core": "0.10.4", "suite": "0.10.3" },
+  "upstream": { "core": "0.11.0", "suite": "0.11.0" },
   "provider_status": "documentation-checked; live discovery and model operation not qualified",
   "checked_on": "2026-11-06",
   "providers": {

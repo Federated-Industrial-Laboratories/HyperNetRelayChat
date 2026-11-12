@@ -3,12 +3,12 @@
   "site": {
     "id": "hypernet-hrc-docs",
     "title": "HyperNet Relay Chat",
-    "description": "HRC 0.2.2 manuals for desktop setup, conversation and operations.",
+    "description": "HRC 0.3.0 manuals for simple joining, hosting, conversation and Agent applications.",
     "language": "en-GB",
-    "version": "0.2.2",
+    "version": "0.3.0",
     "channel": "stable",
     "homeUrl": "/docs/",
-    "footer": "Federated Industrial Laboratories | HyperNet Relay Chat 0.2.2",
+    "footer": "Federated Industrial Laboratories | HyperNet Relay Chat 0.3.0",
     "indexable": true,
     "origin": "https://hypernet.federatedindustrial.com"
   },
@@ -22,7 +22,7 @@
     "type": "snapshot",
     "root": "content",
     "manifest": "source.json",
-    "tag": "v0.2.2"
+    "tag": "v0.3.0"
   },
   "navigation": [
     {
@@ -37,6 +37,11 @@
           "source": "Documentation/Installation.md",
           "slug": "installation",
           "label": "Linux installation and upgrades"
+        },
+        {
+          "source": "Documentation/SimpleJoining.md",
+          "slug": "simple-joining",
+          "label": "Join and return to a server"
         },
         {
           "source": "Documentation/DesktopHosting.md",
@@ -122,6 +127,21 @@
           "source": "Documentation/Transport.md",
           "slug": "transport",
           "label": "HyperNet transport diagnostics"
+        },
+        {
+          "source": "Documentation/ExternalParticipants.md",
+          "slug": "external-participants",
+          "label": "Connect an Agent application"
+        },
+        {
+          "source": "Documentation/LiveAdmission.md",
+          "slug": "live-admission",
+          "label": "Live admission and Agent consent"
+        },
+        {
+          "source": "Documentation/SharedHosting.md",
+          "slug": "shared-hosting",
+          "label": "Shared hosting adapter"
         }
       ]
     },

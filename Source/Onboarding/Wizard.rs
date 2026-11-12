@@ -63,6 +63,7 @@ impl Drop for Job {
 }
 #[derive(Clone, Copy)]
 enum Pick {
+    NativePackages,
     Profile,
     Configuration,
     SetupFolder,
@@ -78,7 +79,10 @@ enum Pick {
 }
 impl Pick {
     fn folder(self) -> bool {
-        matches!(self, Self::Profile | Self::SetupFolder)
+        matches!(
+            self,
+            Self::Profile | Self::SetupFolder | Self::NativePackages
+        )
     }
 }
 struct Browser {
@@ -88,6 +92,7 @@ struct Browser {
 }
 
 pub struct Wizard {
+    packages: super::packages::Form,
     config: RuntimeConfig,
     location: String,
     saved: Vec<(PathBuf, String)>,
@@ -140,6 +145,7 @@ impl Wizard {
             .display()
             .to_string();
         Self {
+            packages: super::packages::Form::new(),
             folder: config.data_directory.display().to_string(),
             config,
             configuration: configuration.display().to_string(),
@@ -208,6 +214,7 @@ impl Wizard {
         });
     }
     pub fn logic(&mut self, ctx: &egui::Context) {
+        self.packages.logic(ctx, self.step == Step::Simple);
         let outcome = self
             .job
             .as_ref()
@@ -276,6 +283,7 @@ impl Wizard {
     fn choose(&mut self, purpose: Pick, path: PathBuf) {
         let text = path.display().to_string();
         match purpose {
+            Pick::NativePackages => self.packages.select(path),
             Pick::Profile => self.profile = text,
             Pick::Configuration => self.configuration = text,
             Pick::SetupFolder => self.folder = text,
@@ -416,25 +424,23 @@ impl Wizard {
         }
         ui.add_enabled_ui(self.job.is_none(), |ui| match self.step {
             Step::Simple => {
+                if self.packages.ui(ui) {
+                    self.browse(&ctx, Pick::NativePackages, &self.packages.release.clone());
+                }
+                ui.separator();
                 ui.label("Join using a server address, private link, or QR code. HyperNet will show the server and any password request before you connect.");
                 ui.label("Server address or invitation link (optional)");
                 ui.add(egui::TextEdit::singleline(&mut self.location).password(true).char_limit(8192).desired_width(f32::INFINITY));
-                if components::primary(ui, "Continue to HyperNet").clicked() {
+                if ui.add_enabled_ui(self.packages.ready(), |ui|components::primary(ui, "Continue to HyperNet")).inner.clicked() {
                     let location = (!self.location.trim().is_empty()).then(|| self.location.trim().to_owned());
                     self.start(&ctx, Task::SimpleJoin { location }, None);
                     self.location.clear();
                 }
                 ui.separator();
-                if components::button(ui, "Create or manage a server").clicked() {
+                if ui.add_enabled_ui(self.packages.ready(), |ui|components::button(ui, "Create or manage a server")).inner.clicked() {
                     self.start(&ctx, Task::HostDesktop, None);
                 }
                 ui.small("The HyperNet host window manages saved servers and package setup. Your current chat stays open.");
-                ui.collapsing("Installed HyperNet tools", |ui| {
-                    ui.label(self.config.suite.display().to_string());
-                    if components::button(ui, "Choose HyperNetSuite…").clicked() {
-                        self.browse(&ctx, Pick::Suite, &self.config.suite.display().to_string());
-                    }
-                });
                 ui.small("Manual setup and existing private invitations remain available in the other setup tabs.");
             }
             Step::Existing => {

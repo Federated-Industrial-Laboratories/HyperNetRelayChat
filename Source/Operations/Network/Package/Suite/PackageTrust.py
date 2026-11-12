@@ -175,6 +175,33 @@ def authorise(api, args):
     return {'status': 'UpdateAuthorised', 'targetDigest': digest(api, value), 'policy': str(output)}
 
 
+def authenticated_target(api, args, key, archive, manifest, original, temporary):
+    policy, signature = temporary / 'Target.json', temporary / 'Target.json.sig'
+    api.copy_private(args.policy, policy, MAX_POLICY)
+    api.copy_private(args.policy_signature, signature, 32768)
+    verify_policy(api, policy, signature, key, temporary, args.ssh_keygen)
+    with policy.open('rb') as source:
+        value = validate_target(api, canonical(api, source.read(MAX_POLICY + 1)))
+    api.require(value['rootPin'] == pin(key), 'Target differs from the supplied historical publisher key')
+    api.require(value['version'] == manifest['version'] and value['architecture'] == manifest['architecture']
+                and value['manifestSha256'] == hashlib.sha256(original).hexdigest()
+                and value['archiveBytes'] == archive.stat().st_size
+                and value['archiveSha256'] == api.digest_file(archive, api.MAX_ARCHIVE), 'Update policy does not bind this exact package')
+    api.require(any(entry['path'] == 'Tools/PackageTrust.py' for entry in manifest['files']), 'Package lacks the current update verifier')
+    return value
+
+
+class TargetInspection:
+    """Historical integrity only: cannot authorise installation or activation."""
+    def __init__(self, api, args):
+        self.api, self.args = api, args
+        self.key = api.public_key(args.public_key)
+
+    def check(self, archive, manifest, original, temporary):
+        self.target = authenticated_target(self.api, self.args, self.key, archive, manifest, original, temporary)
+        self.target_digest = digest(self.api, self.target)
+
+
 class Admission:
     """Hold the trust lock until the checked installation is durably published."""
     def __init__(self, api, args):
@@ -197,20 +224,10 @@ class Admission:
 
     def check(self, archive, manifest, original, temporary):
         api = self.api
-        policy, signature = temporary / 'Target.json', temporary / 'Target.json.sig'
-        api.copy_private(self.args.policy, policy, MAX_POLICY)
-        api.copy_private(self.args.policy_signature, signature, 32768)
-        verify_policy(api, policy, signature, self.trust['publicKey'], temporary, self.args.ssh_keygen)
-        with policy.open('rb') as source:
-            self.target = validate_target(api, canonical(api, source.read(MAX_POLICY + 1)))
+        self.target = authenticated_target(api, self.args, self.trust['publicKey'], archive, manifest, original, temporary)
         value = self.target
         api.require(value['rootGeneration'] == self.trust['rootGeneration']
                     and value['rootPin'] == self.trust['rootPin'], 'Update names another trust root generation')
-        api.require(value['version'] == manifest['version'] and value['architecture'] == manifest['architecture']
-                    and value['manifestSha256'] == hashlib.sha256(original).hexdigest()
-                    and value['archiveBytes'] == archive.stat().st_size
-                    and value['archiveSha256'] == api.digest_file(archive, api.MAX_ARCHIVE), 'Update policy does not bind this exact package')
-        api.require(any(entry['path'] == 'Tools/PackageTrust.py' for entry in manifest['files']), 'Package lacks the current update verifier')
         api.require(version(api, value['version']) >= version(api, self.trust['versionFloor']), 'Update version is below the retained version floor')
         api.require(value['sequence'] >= self.trust['sequence'], 'Update sequence is below the retained floor')
         self.target_digest = digest(api, value)

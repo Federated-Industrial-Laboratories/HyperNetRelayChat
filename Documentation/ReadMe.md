@@ -3,7 +3,7 @@
 [Project](../README.md) &middot; [Install](Installation.md) &middot;
 [Trust](../README.md#trust-and-operations) &middot; [HyperNet](https://github.com/Federated-Industrial-Laboratories/HyperNet)
 
-These manuals describe HRC 0.2.2. Start with the task you want to complete;
+These manuals describe HRC 0.3.0. Start with the task you want to complete;
 the release notes distinguish current features from earlier qualification evidence.
 
 ## Choose a starting point
@@ -11,14 +11,17 @@ the release notes distinguish current features from earlier qualification eviden
 | Goal | Guide |
 | --- | --- |
 | Install and open the desktop application | [Installation and upgrades](Installation.md) |
-| Join with one private invitation, or operate optional self-service admission | [Private invitations](SelfServiceInvitations.md) |
+| Join with an address, link, password or QR code; return to a saved server | [Simple joining](SimpleJoining.md) |
+| Use the earlier individual invitation exchange | [Private invitations](SelfServiceInvitations.md) |
 | Join a conversation and use the interfaces | [GUI, TUI and CLI](Interfaces.md) |
 | Choose or import desktop colours | [Themes](Themes.md) |
 | Open a HyperNet Page from a conversation | [Page links and browser configuration](Interfaces.md#hypernet-page-links) |
-| Create a network or host an HRC service | [Desktop hosting](DesktopHosting.md) and [service setup](ConversationSetup.md) |
+| Create a simple server or operate finite/manual hosting | [Desktop hosting](DesktopHosting.md) |
+| Compose a shared native host with HRC | [Shared hosting adapter](SharedHosting.md) |
+| Configure a service manually | [Service setup](ConversationSetup.md) |
 | Set up a bot from the desktop | [Desktop bots and local models](DesktopBots.md) |
 | Configure bot behaviour and model memory | [Service bot reference](ServiceBots.md) |
-| Connect an external agent through a scoped local API | [External participants](ExternalParticipants.md) |
+| Add a separately keyed Agent and connect its scoped local API | [External participants](ExternalParticipants.md) |
 | Use a separate assistant for setup and operations | [External assistant](ExternalAssistant.md) |
 | Start a confidential conversation | [Direct conversations and private groups](ConfidentialConversations.md) |
 
@@ -48,6 +51,7 @@ to administer a host.
 | Inspected Core and Suite interfaces | [HyperNet contract map](HyperNetContract.md) |
 | Identity, delegation and operation rules | [Protocol and permissions](ProtocolPermissions.md) |
 | Framing and compatibility | [Wire protocol](WireProtocol.md) |
+| Live account enrolment, Agent consent and retirement | [Live admission](LiveAdmission.md) |
 | State transitions and recovery decisions | [State and recovery](StateAndRecovery.md) |
 | Text, identifiers and indexed search | [Text and search](TextAndSearch.md) |
 | Transactional persistence | [Storage runtime](StorageRuntime.md) |
@@ -67,5 +71,3 @@ private paths and identifiers from the selected deployment. Uppercase placeholde
 are not literal identifiers. Use the installed command's `--help` and supported
 template and validation commands when preparing management input. Never place passwords or private keys in
 commands, exported diagnostics or assistant prompts.
-
-- [Simple joining, saved servers and external Agent setup](SimpleJoining.md)

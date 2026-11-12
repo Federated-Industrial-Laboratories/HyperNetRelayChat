@@ -1,5 +1,70 @@
 # Release notes
 
+## 0.3.0
+
+HRC uses the shared HyperNet join and host windows for address, invitation link,
+QR and password access. Participants choose a name and retain locally generated
+keys; hosts can admit restricted members without a synchronous file exchange.
+Saved servers preserve explicit offline preference and resume exact interrupted
+operations. Page links use a separately admitted reader and reuse its browser
+window without interrupting an active form.
+
+The shared host workflow offers Invite only, Password and explicitly selected
+Public admission, a separate owner account, welcome room and read-only Pages.
+Core and Suite 0.11.0 provide explicit access until removed and hosting until
+stopped or withdrawn. Finite permissions and the manual host workflow remain
+available. Route vouchers, action checks and connection proofs still have finite
+validity. Installing a new binary does not extend existing authority.
+
+Live HRC enrolment runs while Home stays online. A bounded authenticated registrar
+receives only the configured community-room preset. Ordinary members cannot
+create rooms, moderate, publish Pages, host services or administer the computer.
+Host removal retains history and exact terminal outcomes, and removing a person
+also retires their scoped Agents. Native generation fences prevent slot reuse from
+restoring an old identity.
+
+Admitted operators can create separately keyed external Agents and approve their
+rooms, initiation and Agent-reply permissions through the current chat controller.
+The local API works through a private Unix socket or cancellable stdio, with
+durable events, acknowledgements and exact sends. Desktop and `manage agent`
+controls prepare, start, inspect, stop and restore saved API connections. Exported
+settings contain private paths, never token or endpoint-key contents. Interrupted
+credential creation recovers the original token and scope; revocation cannot be
+undone by retry. The built-in model runner is optional.
+
+Bots report specific current and historical errors, recent successful work and
+bounded dependency recovery. Model startup shows readiness progress and supports
+cancellation. Validated context, reply-token, message-length and request-time
+settings expose the relevant limits. These operation deadlines do not introduce
+a bot/model lifetime timer or alter GPU power settings.
+
+Core 0.11.0 also aligns private replay-cache capacity with its documented bound
+and recovers certified forward progress after floor/cache publication interruption.
+Expiry pruning preserves unexpired replay identifiers; rollback floors and
+authentication remain enforced.
+
+### Compatibility and limits
+
+Use HRC 0.3.0 with coordinated Core and Suite 0.11.0. Upgrade the complete native
+committee before enabling persistent records. Existing HRC v1 self-service
+invitations, manual pinned files and finite consent remain options. Enabling live
+HRC admission advances Home to schema 2; older Home binaries refuse that state.
+Keep stopped backups and independent guards/floors. See [installation and
+migration](Installation.md#hrc-030-and-coordinated-native-upgrade).
+
+The shared chat preset allows at most 32 participants including the owner. HRC
+retains 256 accounts and 1024 admission claims; removed accounts continue to count
+towards retained storage. Host Agent quota is one to eight per operator. Each
+local API configuration has at most eight active credentials, each selecting up
+to eight rooms. Agent replies require explicit causation and remain bounded to
+depth four and eight effects. These limits are not throughput measurements.
+
+Existing qualification records retain their original package versions, platforms,
+topologies and workload scope. They do not establish independent operator fault
+domains, an independent security assessment or support for additional platforms.
+See [simple joining](SimpleJoining.md), [shared hosting](DesktopHosting.md),
+[external applications](ExternalParticipants.md) and [bot controls](DesktopBots.md).
+
 ## 0.2.2
 
 Hosts can enable optional self-service invitations and send one private code or

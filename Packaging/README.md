@@ -37,3 +37,31 @@ and an OpenSSH signature, `SHA256SUMS.sig`. The publisher principal is
 Publish `Documentation/PublisherKey.txt` as `PublisherKey.txt` beside the assets.
 The installation guide pins its fingerprint and verifies the signature before
 all listed checksums. The package tool does not load publisher signing keys.
+
+## Coordinated native payload
+
+Pass `--native-packages /Absolute/Packages` to the existing package command to
+include the coordinated Core and Suite sets. The folder contains `Core/` and
+`Suite/`, each with its exact supported `.tar`, `.tar.sig`, `.target.json`,
+`.target.json.sig` and `Publisher.pub`. Supported versions come from the built
+HRC executable's normal capabilities command. HRC's existing pinned native
+verifier checks each archive before assembly; signed update targets are retained
+for the normal installer's policy, validity and rollback checks.
+
+Only those ten bounded regular files enter the package. Adjacent files, keys,
+profiles and logs are excluded. All included bytes receive entries in the same
+`Package.json` inventory as HRC, and the outer release checksum signature covers
+the complete archive. No second manifest or alternative signature verifier is
+introduced. The native source/release notices remain inside their signed packages.
+
+`Tools/Install.sh` detects a complete adjacent payload and calls the normal
+`hrc install --native-packages` entry. An incomplete coordinated payload refuses
+before starting installation. Packages with no native payload keep the existing
+launcher-only behaviour. The first HRC GUI also supplies a folder chooser and
+explicit review for this same installer. Suite installs directly into its final
+content-addressed prefix; HRC does not create a second bootstrap installation.
+
+The shared `Installation.json` is published only after both native targets are
+admitted. It is a location index, not executable trust: HRC derives the exact
+Suite prefix from its archive identity and verifies that candidate with the
+pinned publisher before invoking Suite's own installed-state inspection.

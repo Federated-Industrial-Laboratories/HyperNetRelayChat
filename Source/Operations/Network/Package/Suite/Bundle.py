@@ -17,14 +17,16 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import uuid
 import zipfile
 sys.dont_write_bytecode = True
 import PackageTrust
 
 PRODUCT = 'HyperNetSuite'
-VERSION = '0.10.3'
+VERSION = '0.11.0'
 NAMESPACE = 'HyperNetSuiteBundle1'
 PRINCIPAL = 'HyperNetSuitePublisher'
+PUBLISHER_PIN = '6529f9e574e73409ec578c9e9a66e683fef6ae885704d22d75538781b4b43b1e'
 MAX_ARCHIVE = 512 * 1024 * 1024
 MAX_FILE = 256 * 1024 * 1024
 MAX_MANIFEST = 256 * 1024
@@ -113,7 +115,9 @@ def allowed_path(name):
     return bool(re.fullmatch(r'(Tools/[A-Z][A-Za-z0-9]*\.(py|sh)|Documentation/[A-Z][A-Za-z0-9]*\.(md|txt|json)|Examples/[A-Z][A-Za-z0-9]*\.(py|png|svg|md|txt)|Tests/(ApplicationStreams|ReaderTerminal|LayoutTerminal|MarkupRobustness|MediaImport|MediaTerminal|NativeGraphics|NetworkProvisioning)\.py)', name))
 
 
-def file_mode(name):
+def file_mode(name, version=VERSION):
+    if name == 'Bin/HyperNetSuite' and tuple(map(int, version.split('.'))) >= (0, 11, 0):
+        return 0o755
     return 0o700 if name.startswith(('Bin/', 'Tools/', 'Tests/')) else 0o600
 
 
@@ -139,7 +143,7 @@ def validate_manifest(value):
         name = item['path']
         require(isinstance(name, str) and allowed_path(name) and str(PurePosixPath(name)) == name, 'Unexpected package path')
         require(type(item['size']) is int and 0 <= item['size'] <= MAX_FILE, 'Invalid file size')
-        require(type(item['mode']) is int and item['mode'] == file_mode(name), 'Invalid file mode')
+        require(type(item['mode']) is int and item['mode'] == file_mode(name, value['version']), 'Invalid file mode')
         require(isinstance(item['sha256'], str) and HEX.fullmatch(item['sha256']), 'Invalid file digest')
         paths.append(name)
         total += item['size']
@@ -194,7 +198,9 @@ def archive_members(archive):
             require(item.name == 'Manifest.json' or (item.name.startswith('Payload/') and allowed_path(item.name[8:])), 'Unexpected archive member')
             require(str(PurePosixPath(item.name)) == item.name and not item.name.startswith('/'), 'Unsafe archive path')
             require(0 <= item.size <= MAX_FILE, 'Archive member exceeds its bound')
-            require(item.mode in (0o600, 0o700), 'Unsafe archive mode')
+            require(item.mode in (0o600, 0o700)
+                    or (item.name == 'Payload/Bin/HyperNetSuite' and item.mode == 0o755),
+                    'Unsafe archive mode')
             seen.add(item.name)
             total += item.size
             require(total <= MAX_ARCHIVE, 'Archive content exceeds its bound')
@@ -421,6 +427,89 @@ def admit_installed(args):
                    ('notBefore', 'expires', 'rootGeneration', 'sequence')}}
 
 
+def inspect_installed_target(args):
+    inspection = PackageTrust.TargetInspection(sys.modules[__name__], args)
+    manifest = installed_manifest(args, inspection)[0]
+    return {'manifest': manifest, 'activationAllowed': False,
+            'targetDigest': inspection.target_digest,
+            **{name: inspection.target[name] for name in
+               ('notBefore', 'expires', 'rootGeneration', 'rootPin', 'sequence')}}
+
+
+def private_directories(path):
+    path = Path(path)
+    require(path.is_absolute(), 'Choose an absolute private installation directory')
+    missing, at = [], path
+    while not at.exists() and not at.is_symlink():
+        missing.append(at)
+        at = at.parent
+    for at in reversed(missing):
+        at.mkdir(mode=0o700)
+    private_parent(path / 'Entry')
+    require(all(parent.lstat().st_uid in (0, os.geteuid()) for parent in path.parents),
+            'Installation parent belongs to another user')
+    info = path.lstat()
+    require(stat.S_ISDIR(info.st_mode) and info.st_uid == os.geteuid()
+            and stat.S_IMODE(info.st_mode) == 0o700, 'Installation directory is not private')
+    return path
+
+
+def bootstrap(args):
+    """Authenticate the inner Suite before executing the coordinated installer."""
+    require(os.geteuid() != 0, 'Install for this user, not root')
+    release = Path(args.release_directory)
+    require(release.is_absolute(), 'Choose an absolute coordinated Packages folder')
+    root = private_directories(args.directory or Path(os.environ.get('XDG_STATE_HOME') or Path.home() / '.local/state') / 'HyperNetSuite/Installation')
+    product = root / 'Products/Suite'
+    installed = private_directories(product / 'Installed')
+    trust = product / 'Trust'
+    base = release / 'Suite' / f'{PRODUCT}-{VERSION}-linux-x86_64'
+    with tempfile.TemporaryDirectory(prefix='.Bootstrap-', dir=root) as name:
+        temporary = Path(name)
+        key = temporary / 'Publisher.pub'
+        copy_private(release / 'Suite/Publisher.pub', key, 8192)
+        require(PackageTrust.pin(public_key(key)) == PUBLISHER_PIN, 'Publisher differs from the pinned release key')
+        selected = argparse.Namespace(archive=Path(str(base) + '.tar'), signature=Path(str(base) + '.tar.sig'),
+            public_key=key, ssh_keygen=args.ssh_keygen, trust_directory=trust,
+            policy=temporary / 'SelectedTarget.json', policy_signature=temporary / 'SelectedTarget.json.sig')
+        archive, signature = prepared(selected, temporary)
+        selected.archive, selected.signature = archive, signature
+        copy_private(Path(str(base) + '.target.json'), selected.policy, 32768)
+        copy_private(Path(str(base) + '.target.json.sig'), selected.policy_signature, 32768)
+        expected = parse_archive(archive)[0]
+        require(expected['product'] == PRODUCT and expected['version'] == VERSION, 'Choose the supported Suite release')
+        identity = digest_file(archive, MAX_ARCHIVE)
+        selected.prefix = installed / f'{PRODUCT}-{VERSION}-{identity}'
+        if not trust.exists():
+            PackageTrust.trust_command(sys.modules[__name__], argparse.Namespace(command='TrustInit',
+                trust_directory=trust, public_key=key, root_pin=PUBLISHER_PIN, root_generation=1,
+                version_floor=VERSION, state_contract='HyperNet080Client1'))
+        if not selected.prefix.exists():
+            install(selected)
+        report = admit_installed(selected)
+        require(report['manifest'] == expected
+                and digest_file(selected.prefix / 'Package/Archive.tar', MAX_ARCHIVE) == identity,
+                'Existing Suite differs from the selected package; it was preserved')
+        retained = private_directories(product / 'Targets' / report['targetDigest'])
+        for source, filename in [(key, 'Publisher.pub'), (selected.policy, 'Target.json'), (selected.policy_signature, 'Target.json.sig')]:
+            destination = retained / filename
+            if destination.exists():
+                require(digest_file(source) == digest_file(destination), 'Retained target evidence differs')
+            else:
+                staged = retained / ('.Evidence-' + uuid.uuid4().hex)
+                try:
+                    copy_private(source, staged, 32768)
+                    rename_new(staged, destination)
+                finally:
+                    staged.unlink(missing_ok=True)
+        result = decode(run([str(selected.prefix / 'Bin/HyperNetSuite'), 'native-installation', 'install',
+                             '--release-directory', str(release), '--directory', str(root), '--json'], timeout=1800))
+        require(result.get('format') == 'HyperNetNativeInstallation/1' and result.get('status') == 'Ready'
+                and result.get('suiteExecutable') == str(selected.prefix / 'Bin/HyperNetSuite'),
+                'Coordinated installer did not confirm the authenticated Suite')
+        return result
+
+
 def remove(args):
     prefix = private_parent(args.prefix)
     _, files, directories = installed_manifest(args)
@@ -512,6 +601,9 @@ def main():
     parser.add_argument('--ssh-keygen', default='/usr/bin/ssh-keygen', help='Independently trusted OpenSSH verifier')
     commands = parser.add_subparsers(dest='command', required=True)
     PackageTrust.arguments(commands)
+    boot = commands.add_parser('Bootstrap', help='Install the coordinated local pair through an authenticated inner Suite')
+    boot.add_argument('--release-directory', required=True)
+    boot.add_argument('--directory')
     package = commands.add_parser('Create')
     package.add_argument('--binary', required=True, help='Locked release binary for the native architecture')
     package.add_argument('--streams-sdk-wheel', required=True, help='Matching stdlib-only Python SDK wheel built from SDK/pyproject.toml')
@@ -527,17 +619,20 @@ def main():
             option.add_argument('--trust-directory', required=True)
             option.add_argument('--policy', required=True)
             option.add_argument('--policy-signature', required=True)
-    for command in ('VerifyInstalled', 'AdmitInstalled', 'Remove'):
+    for command in ('VerifyInstalled', 'AdmitInstalled', 'InspectInstalledTarget', 'Remove'):
         option = commands.add_parser(command)
         option.add_argument('--prefix', required=True)
         option.add_argument('--public-key', required=True)
         if command == 'AdmitInstalled':
             option.add_argument('--trust-directory', required=True)
+        if command in ('AdmitInstalled', 'InspectInstalledTarget'):
             option.add_argument('--policy', required=True)
             option.add_argument('--policy-signature', required=True)
     args = parser.parse_args()
     if args.command in PackageTrust.COMMANDS:
         result = PackageTrust.trust_command(sys.modules[__name__], args)
+    elif args.command == 'Bootstrap':
+        result = bootstrap(args)
     elif args.command == 'Create':
         result = create(args)
     elif args.command == 'Install':
@@ -548,6 +643,8 @@ def main():
         result = installed_manifest(args)[0]
     elif args.command == 'AdmitInstalled':
         result = admit_installed(args)
+    elif args.command == 'InspectInstalledTarget':
+        result = inspect_installed_target(args)
     else:
         with tempfile.TemporaryDirectory(prefix='HyperNetSuiteVerify') as temporary_name:
             temporary = Path(temporary_name)

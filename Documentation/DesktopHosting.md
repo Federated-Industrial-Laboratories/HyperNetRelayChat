@@ -1,9 +1,51 @@
 # Create and operate a HyperNet host
 
-The shared Suite host workflow can compose HRC through the
-[private HRC hosting adapter](SharedHosting.md). It supplies certified native
-connections, while HRC creates its owner, restricted room policy and general
-room. The finite/manual HRC workflow documented below remains available.
+## Simple shared hosting
+
+Open **Profiles and setup > Join a server > Create or manage a server**. HRC
+opens the shared HyperNet host window with its installed executable. Closing
+that window leaves the current chat profile open.
+
+1. Select **Invite only**, **Password** or **Public**. A new server starts with
+   Invite only selected. Public joining is an explicit choice.
+2. Set the server name, reachable IPv4 address and owner nickname. Choose finite
+   access or **Access until removed**, and finite hosting consent or **Run until
+   stopped or withdrawn**. Existing finite consent is never converted silently.
+3. Review participant capacity, optional Agents and resource settings. The shared
+   chat preset permits at most 32 participants including the separate owner. It
+   allows the welcome room and approved Pages; ordinary room creation, moderation,
+   publication, hosting and delegation are off. Agent enrolment is optional, with
+   a host-selected quota of one to eight Agents per operator.
+4. Use **Install / verify packages** if native dependencies are missing. Select
+   the coordinated release's `Packages` folder; it contains `Core/` and `Suite/`
+   with their signed package sets. The installer preserves signature and rollback
+   checks. Distribution packages and host permissions remain explicit prerequisites.
+5. Choose **Review server setup**, inspect the topology and permissions, then
+   **Create and start server**. Resume the same saved setup after an interruption.
+6. From the dashboard, create a private invitation or show the public connection
+   link. Copy the connection instructions or save its QR image. Share a password
+   separately. Test the link from another connection before inviting others.
+
+The dashboard can pause new joining, rotate the password, disable invitations,
+remove members, open the owner chat or welcome Page, and export redacted diagnosis.
+Invitation expiry or password rotation affects future joins, not existing members.
+Removing a person also retires their scoped Agents; **Continue removal** resumes
+an interrupted cascade. Chat history and original registration outcomes remain
+retained. **Stop hosting** preserves state. Withdrawal also revokes local hosting
+consent and requires a fresh review before hosting again.
+
+Enable unattended user services deliberately if hosting must continue after logout
+or reboot. There is no service lifetime timer in persistent mode. Current clock
+checks, short-lived transport proofs and explicit removal still apply. Ready means
+checks from this host passed; it does not prove Internet routing or firewall access.
+The first topology uses one computer and does not provide independent fault domains.
+
+The shared workflow uses the [private HRC hosting adapter](SharedHosting.md) to
+create the separate owner, restricted Home and general room while Suite owns the
+native network and read-only Pages. Suite can also host Pages with HRC absent.
+The existing finite/manual workflow follows below.
+
+## Finite and manual hosting
 
 HRC's desktop hosting workflow prepares a user-owned HyperNet and an HRC home
 service. The first topology runs four separately keyed authority replicas, a
@@ -50,7 +92,9 @@ package verification uses Python 3.11 or later and OpenSSH signature support.
 The clock observer reads authenticated chrony observations; it does not adjust
 the system clock. Missing packages, subordinate-ID allocation, clock policy,
 user lingering and network exposure require separate deliberate system setup.
-No package download, privileged change or consent renewal happens automatically.
+The manual workflow does not download packages, make privileged changes or renew
+consent automatically. The shared workflow offers reviewed package installation
+and a separate, explicit unattended-service setting.
 
 Four authority reservations and three service reservations are shown separately
 from HRC's application data. Default admission is 512 MiB memory and 1 GiB state
@@ -132,7 +176,7 @@ by renewing the host owner's desktop.
 
 ## Pinned native verification
 
-The supported pair is HyperNet Core 0.10.4 and HyperNetSuite 0.10.3. HRC
+The supported pair is HyperNet Core 0.11.0 and HyperNetSuite 0.11.0. HRC
 embeds their released offline Bundle.py and PackageTrust.py helpers, executes them
 with isolated Python, verifies the independently pinned publisher key and checks
 the signed installed manifest and complete file set. It does not accept a matching
@@ -140,14 +184,14 @@ version string as sufficient package identity.
 
 | Source | Pinned release |
 | --- | --- |
-| HyperNet Core | [v0.10.4](https://github.com/Federated-Industrial-Laboratories/HyperNet/releases/tag/v0.10.4) |
-| HyperNetSuite | [v0.10.3](https://github.com/Federated-Industrial-Laboratories/HyperNetSuite/releases/tag/v0.10.3) |
+| HyperNet Core | [v0.11.0](https://github.com/Federated-Industrial-Laboratories/HyperNet/releases/tag/v0.11.0) |
+| HyperNetSuite | [v0.11.0](https://github.com/Federated-Industrial-Laboratories/HyperNetSuite/releases/tag/v0.11.0) |
 
 | Embedded helper | SHA-256 |
 | --- | --- |
-| Core Bundle.py | `47f636c1d35df1396ee878c30d3872504f5ee31cf54c6768eaf90b9e62a549e4` |
+| Core Bundle.py | `aa278629cae5afaa390de96c7d6f77c0e63aad88506e96e13ad2563a51f80629` |
 | Core PackageTrust.py | `5f58c67ea68ceca21ed33aa5229d62c17ea647d028dc74a9a637f5aaeb3e8e2d` |
-| Suite Bundle.py | `9c738affdd1843a9969eaa6b0254cd39b685e68998c5ece6462d0a9c61b66dde` |
-| Suite PackageTrust.py | `84600aa9eec08d549d19a04534ae2ecf1644945687174e6d79a3bb17c1106833` |
+| Suite Bundle.py | `8e3dfd5bab246db067600e550350e3c9d9efa33b6e69554a73e2822c26d74c47` |
+| Suite PackageTrust.py | `5f58c67ea68ceca21ed33aa5229d62c17ea647d028dc74a9a637f5aaeb3e8e2d` |
 
 The helpers retain their MIT notices. See [native hosting licences](NativeHostingLicences.txt).

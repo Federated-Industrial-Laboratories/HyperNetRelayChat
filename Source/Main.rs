@@ -65,8 +65,12 @@ enum Command {
     },
     /// Open the graphical conversation client.
     Gui(desktop::Options),
-    /// Install the desktop launcher for the current user.
-    Install,
+    /// Install the desktop launcher and optionally the coordinated signed native tools.
+    Install {
+        /// Local Packages folder from the coordinated release; no invitation-selected downloads.
+        #[arg(long)]
+        native_packages: Option<PathBuf>,
+    },
     /// Assemble an operator invitation for the graphical setup wizard.
     SetupBundle(desktop::BundleOptions),
     /// Open the interactive terminal client.
@@ -456,7 +460,35 @@ fn main() -> ExitCode {
         .unwrap_or_else(|| Command::Gui(desktop::Options::default()))
     {
         Command::Gui(options) => desktop::run(options).map_err(Failure),
-        Command::Install => desktop::install().map_err(Failure).and_then(|v| output(&v)),
+        Command::Install { native_packages } => {
+            let installed = (|| -> operations::Result<serde_json::Value> {
+                let tools = if let Some(release) = native_packages {
+                    Some(operations::run(operations::Command::Package {
+                        command: operations::packages::Command::Bootstrap {
+                            release_directory: release,
+                        },
+                    })?)
+                } else {
+                    None
+                };
+                let mut result = desktop::install().map_err(str::to_owned)?;
+                if let Some(tools) = tools {
+                    result["nativeInstallation"] = tools;
+                }
+                Ok(result)
+            })();
+            match installed {
+                Ok(value) => output(&value),
+                Err(message) => {
+                    let _ = writeln!(
+                        std::io::stderr().lock(),
+                        "{}",
+                        json!({"status":"Failed","code":"InstallationRefused","message":message})
+                    );
+                    return ExitCode::FAILURE;
+                }
+            }
+        }
         Command::SetupBundle(options) => desktop::bundle(options)
             .map_err(Failure)
             .and_then(|v| output(&v)),
@@ -509,7 +541,9 @@ fn main() -> ExitCode {
                 Command::Resolve { profile } => conversation::resolve(&profile),
                 Command::Abandon(request) => conversation::abandon(request),
                 Command::Transport { .. } | Command::Gui(_) | Command::Tui(_) => unreachable!(),
-                Command::Bot(_) | Command::Install | Command::SetupBundle(_) => unreachable!(),
+                Command::Bot(_) | Command::Install { .. } | Command::SetupBundle(_) => {
+                    unreachable!()
+                }
                 Command::Manage { .. }
                 | Command::Assistant { .. }
                 | Command::Admission { .. }

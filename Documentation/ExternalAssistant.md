@@ -45,7 +45,7 @@ add `--scope user` and select the absolute home directory. The preview is read-o
 For example: "Use hrc-setup to help me create a new HyperNet on this machine and
 open HRC from the desktop." Supply the intended host and desired result. The
 assistant discovers the installed `hrc manage` help, templates and validation commands before making
-changes. Core 0.10.4 and Suite 0.10.3 are the supported upstream pair.
+changes. Core 0.11.0 and Suite 0.11.0 are the supported upstream pair.
 
 For command-line work, these entry points expose the actual saved input formats:
 

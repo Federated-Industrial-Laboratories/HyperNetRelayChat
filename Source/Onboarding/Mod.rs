@@ -4,6 +4,8 @@
 mod bundle;
 #[path = "Native.rs"]
 pub(crate) mod native;
+#[path = "Packages.rs"]
+mod packages;
 #[path = "Runtime.rs"]
 mod runtime;
 #[path = "SelfService.rs"]
@@ -29,7 +31,7 @@ pub enum Error {
     #[error("The route allowance cannot cover its stated reconnect count.")]
     RouteBudget,
     #[error(
-        "Install the released HyperNet and HyperNetSuite tools, then choose their local executables."
+        "Install or repair the verified native tools in Join a server, or configure existing tools for manual setup."
     )]
     RuntimeMissing,
     #[error("A trusted readable chrony socket is required. No system settings were changed.")]

@@ -1,10 +1,19 @@
 # Joining a server
 
-Open **HyperNet Relay Chat > Profiles and setup > Join a server**. Paste the
+Open **HyperNet Relay Chat > Profiles and setup > Join a server**. On a first
+installation, verify and install the supplied native tools in that view. The
+coordinated package folder is selected automatically when present; **Choose
+package folder** selects it without entering individual file paths. An existing
+verified installation is reused.
+
+Paste the
 server address or private invitation link, or continue to HyperNet to use its QR
 code controls. Review the server in that window and enter its password if asked.
 Keys are created locally. After admission, HRC opens the saved chat profile.
-A password is never passed as a command argument. The name chosen during joining
+A password is never passed as a command argument. Treat private invitation links
+and their QR images as credentials. The native link pins the server identity and
+TLS authority; a normal browser needs a publicly trusted HTTPS certificate. Do
+not bypass certificate checks. Private keys stay in the local saved profile. The name chosen during joining
 is applied through the first authenticated chat connection, only while the
 account still has its untouched default name. Later or concurrent nickname
 changes are preserved. You can change your name in **Settings > Profile**.
@@ -14,6 +23,22 @@ and whether external Agents may join. Joining does not grant room creation,
 moderation, hosting or access to the host's computer. The host can revoke access.
 Manual network admission, private invitation bundles and the existing invitation
 exchange remain available in the other setup tabs.
+
+## Access and invitation lifetimes
+
+The host may grant access until removed or select a finite expiry. Invitation use
+counts and expiry govern new enrolment separately: a used invitation expiring
+does not remove an already admitted member. A reusable invitation admits separate
+identities within the host quota. Password rotation affects future password joins.
+Current authority and revocation still apply, and short-lived route/connection
+proofs renew while an opted-in saved server is online. Persistent membership is
+not a permanently open connection.
+
+If setup is interrupted, reopen the same saved server or unfinished proposal.
+Do not delete its keys or consume another invitation to retry an uncertain result.
+HRC preserves the account and original registration while shared HyperNet resolves
+the exact native outcome. A quota, removal or compatibility refusal needs its
+stated cause corrected; it is not an invitation to generate replacement keys.
 
 ## Saved servers and offline history
 
@@ -94,3 +119,18 @@ outbox action. A successful or already-renamed account completes the marker;
 reopening does not overwrite a later nickname. Invalid join names produce a
 visible notice and leave chat available. Nicknames allow 1 to 32 grapheme
 clusters, at most 64 UTF-8 bytes, and no control characters.
+
+## Capacity and retained state
+
+The shared HRC hosting preset allows up to 32 participants including its owner;
+a host can select a lower limit. This is a configuration bound, not a measured
+concurrent-load guarantee. HRC retains at most 256 accounts and 1024 live-admission
+claim records per Home. Retiring members frees active membership and Agent quota,
+but does not erase their identities, history or registration receipts. Retained
+storage capacity can therefore refuse new admission even when active places exist.
+
+An operator can have one to eight non-revoked Agents, according to host policy;
+paused Agents still count. Each application API credential selects at most eight
+rooms, and one API configuration permits at most eight active credentials. Replies
+to other Agents require explicit approval; Home limits causal chains to depth four
+and eight effects, with normal account and room budgets still enforced.

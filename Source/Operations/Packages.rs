@@ -26,8 +26,8 @@ impl Product {
     }
     pub fn version(self) -> &'static str {
         match self {
-            Self::Core => "0.10.4",
-            Self::Suite => "0.10.3",
+            Self::Core => "0.11.0",
+            Self::Suite => "0.11.0",
         }
     }
     fn contract(self) -> &'static str {
@@ -72,9 +72,6 @@ impl Configuration {
             self.product.name(),
             self.product.version()
         ))
-    }
-    pub fn executable(&self) -> PathBuf {
-        self.prefix().join("Bin").join(self.product.name())
     }
     pub fn publisher(&self) -> PathBuf {
         self.downloads.join("Publisher.pub")
@@ -127,7 +124,7 @@ impl Helpers {
         serde_json::from_slice(&native::run(&self.python,&argv,cancel,self.end).map_err(|_|"The signed native package was refused. Check the exact archive, signatures, publisher key, target policy and platform requirements.".to_owned())?).map_err(failure)
     }
 }
-fn input_digest(config: &Configuration) -> Result<String> {
+fn input_digest(config: &Configuration, prefix: &Path, trust: &Path) -> Result<String> {
     let key = native::public_file(&config.publisher(), 8192).map_err(failure)?;
     let fields = std::str::from_utf8(&key)
         .map_err(failure)?
@@ -143,8 +140,8 @@ fn input_digest(config: &Configuration) -> Result<String> {
     }
     let mut digest = Sha256::new();
     digest.update(serde_json::to_vec(config).map_err(failure)?);
-    digest.update(native::path(&config.prefix()).map_err(failure)?.as_bytes());
-    digest.update(native::path(&config.trust()).map_err(failure)?.as_bytes());
+    digest.update(native::path(prefix).map_err(failure)?.as_bytes());
+    digest.update(native::path(trust).map_err(failure)?.as_bytes());
     digest.update(key);
     for suffix in [".tar", ".tar.sig", ".target.json", ".target.json.sig"] {
         use std::os::unix::fs::OpenOptionsExt;
@@ -196,23 +193,50 @@ fn verification(config: &Configuration, helper: &Helpers, cancel: &AtomicBool) -
     Ok(manifest)
 }
 pub fn preview(config: &Configuration, cancel: &AtomicBool) -> Result<Value> {
-    let digest = input_digest(config)?;
+    preview_at(config, &config.prefix(), &config.trust(), cancel)
+}
+pub(super) fn preview_at(
+    config: &Configuration,
+    prefix: &Path,
+    trust: &Path,
+    cancel: &AtomicBool,
+) -> Result<Value> {
+    let digest = input_digest(config, prefix, trust)?;
     let helper = Helpers::new(config.product)?;
     let manifest = verification(config, &helper, cancel)?;
     Ok(
-        json!({"status":"VerifiedArchive","product":config.product.name(),"version":config.product.version(),"digest":digest,"destination":config.prefix(),"hostRuntime":manifest["metadata"]["hostRuntime"],"systemPackagesChanged":false}),
+        json!({"status":"VerifiedArchive","product":config.product.name(),"version":config.product.version(),"digest":digest,"destination":prefix,"hostRuntime":manifest["metadata"]["hostRuntime"],"systemPackagesChanged":false}),
     )
 }
 pub fn install(config: &Configuration, digest: &str, cancel: &AtomicBool) -> Result<Value> {
-    if input_digest(config)? != digest {
+    install_at(config, digest, &config.prefix(), &config.trust(), cancel)
+}
+pub(super) fn install_at(
+    config: &Configuration,
+    digest: &str,
+    prefix: &Path,
+    trust_directory: &Path,
+    cancel: &AtomicBool,
+) -> Result<Value> {
+    if input_digest(config, prefix, trust_directory)? != digest {
         return Err("The selected package files changed. Review them again.".into());
     }
     let helper = Helpers::new(config.product)?;
     let expected = verification(config, &helper, cancel)?;
     private_directory(&root().join("Native"))?;
+    private_directory(
+        prefix
+            .parent()
+            .ok_or("Choose a private installation directory.")?,
+    )?;
+    private_directory(
+        trust_directory
+            .parent()
+            .ok_or("Choose a private trust directory.")?,
+    )?;
     let key = native::path(&config.publisher()).map_err(failure)?;
-    let trust = native::path(&config.trust()).map_err(failure)?;
-    if !config.trust().exists() {
+    let trust = native::path(trust_directory).map_err(failure)?;
+    if !trust_directory.exists() {
         helper.run(
             &native::strings(&[
                 "TrustInit",
@@ -232,7 +256,7 @@ pub fn install(config: &Configuration, digest: &str, cancel: &AtomicBool) -> Res
             cancel,
         )?;
     }
-    if !config.prefix().exists() {
+    if !prefix.exists() {
         helper.run(
             &native::strings(&[
                 "Install",
@@ -243,7 +267,7 @@ pub fn install(config: &Configuration, digest: &str, cancel: &AtomicBool) -> Res
                 "--public-key",
                 &key,
                 "--prefix",
-                &native::path(&config.prefix()).map_err(failure)?,
+                &native::path(prefix).map_err(failure)?,
                 "--trust-directory",
                 &trust,
                 "--policy",
@@ -258,7 +282,7 @@ pub fn install(config: &Configuration, digest: &str, cancel: &AtomicBool) -> Res
         &native::strings(&[
             "VerifyInstalled",
             "--prefix",
-            &native::path(&config.prefix()).map_err(failure)?,
+            &native::path(prefix).map_err(failure)?,
             "--public-key",
             &key,
         ]),
@@ -271,7 +295,7 @@ pub fn install(config: &Configuration, digest: &str, cancel: &AtomicBool) -> Res
         &native::strings(&[
             "AdmitInstalled",
             "--prefix",
-            &native::path(&config.prefix()).map_err(failure)?,
+            &native::path(prefix).map_err(failure)?,
             "--public-key",
             &key,
             "--trust-directory",
@@ -290,7 +314,7 @@ pub fn install(config: &Configuration, digest: &str, cancel: &AtomicBool) -> Res
     )
     .map_err(failure)?;
     Ok(
-        json!({"status":"Installed","product":config.product.name(),"version":config.product.version(),"executable":config.executable(),"publisher":retained_key}),
+        json!({"status":"Installed","product":config.product.name(),"version":config.product.version(),"executable":prefix.join("Bin").join(config.product.name()),"publisher":retained_key}),
     )
 }
 pub(crate) fn verify_installed(
@@ -340,6 +364,11 @@ pub(crate) fn verify_installed(
 }
 #[derive(clap::Subcommand)]
 pub enum Command {
+    /// Install the coordinated local Core/Suite set before simple joining or hosting.
+    Bootstrap {
+        #[arg(long)]
+        release_directory: PathBuf,
+    },
     Preview {
         #[arg(long, value_enum)]
         product: Product,
@@ -357,6 +386,10 @@ pub enum Command {
 }
 pub fn run(command: Command, cancel: &AtomicBool) -> Result<Value> {
     match command {
+        Command::Bootstrap { release_directory } => {
+            let review = super::bootstrap::preview(&release_directory, cancel)?;
+            serde_json::to_value(super::bootstrap::install(&review, cancel)?).map_err(failure)
+        }
         Command::Preview { product, downloads } => {
             preview(&Configuration { product, downloads }, cancel)
         }
