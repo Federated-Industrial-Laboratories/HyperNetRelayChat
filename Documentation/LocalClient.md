@@ -476,3 +476,9 @@ and the same explicit contact-anchor acceptance as local contacts. A foreign
 owner's grant proof selects its signed origin continuity head. The home grant
 position is never compared with an unrelated origin history position. Origin
 assertions and exact owner-signed grant bytes remain bound to that checkpoint.
+
+For simple joins, `Command::InitializeNickname` applies the reviewed initial name
+only to an account at revision 1 with its generated default nickname. Its ordinary
+`AccountSetNickname` action requires that exact account revision, so another
+endpoint's rename wins. The current controller owns the pending/completed marker
+and exact outbox; manual profiles do not request automatic naming.

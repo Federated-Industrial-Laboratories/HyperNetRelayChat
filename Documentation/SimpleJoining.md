@@ -4,7 +4,10 @@ Open **HyperNet Relay Chat > Profiles and setup > Join a server**. Paste the
 server address or private invitation link, or continue to HyperNet to use its QR
 code controls. Review the server in that window and enter its password if asked.
 Keys are created locally. After admission, HRC opens the saved chat profile.
-A password is never passed as a command argument.
+A password is never passed as a command argument. The name chosen during joining
+is applied through the first authenticated chat connection, only while the
+account still has its untouched default name. Later or concurrent nickname
+changes are preserved. You can change your name in **Settings > Profile**.
 
 The host chooses whether simple joining is available, its default permissions
 and whether external Agents may join. Joining does not grant room creation,
@@ -28,7 +31,9 @@ history offline and reports that it could not confirm the saved server setting.
 History and keys are not deleted by going offline or cancelling setup.
 
 Page links use HyperNet's separately admitted Page reader, when the server
-provides one. **Settings > HyperNet Pages** shows that saved reader. Manual
+provides one. Links reuse its existing browser window. A queued link waits while
+a form is active; use **Leave page and open queued link** when ready. **Settings >
+HyperNet Pages** shows that saved reader. Manual
 profiles retain their existing reader-selection controls.
 
 ## Add an external Agent
@@ -77,3 +82,10 @@ operator consent with its already-open controller and matches its exact request
 digest before returning the receipt. Private inputs use bounded stdin, with
 cancellable child processes and bounded output. These commands do not provide
 another public API or replace native permission checks.
+
+Initial nickname setup stores a pending/completed marker in the same encrypted
+profile owned by the current controller. Unknown outcomes retain their exact
+outbox action. A successful or already-renamed account completes the marker;
+reopening does not overwrite a later nickname. Invalid join names produce a
+visible notice and leave chat available. Nicknames allow 1 to 32 grapheme
+clusters, at most 64 UTF-8 bytes, and no control characters.

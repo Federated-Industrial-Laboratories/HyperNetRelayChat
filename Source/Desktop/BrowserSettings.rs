@@ -84,7 +84,7 @@ impl Settings {
                     ui.label("HyperNet manages this saved server's separate Page reader.");
                     if let Some(profile) = &binding.page_profile {
                         ui.add(egui::Label::new(profile.display().to_string()).wrap().selectable(true));
-                        ui.small("Page links open through this reader while chat stays connected. Close its browser window before starting another one.");
+                        ui.small("Page links reuse this reader's browser window while chat stays connected. An active form is kept until you choose to leave its page.");
                     } else { ui.label("This server has not provided a Page reader."); }
                     return;
                 }

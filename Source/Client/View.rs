@@ -276,6 +276,8 @@ pub enum Command {
         topic: String,
     },
     SetNickname(String),
+    /// Apply the reviewed join name only to an untouched account, once per private profile.
+    InitializeNickname(String),
     SetPresence(identity::Presence),
     SetFilter {
         subject: AccountId,

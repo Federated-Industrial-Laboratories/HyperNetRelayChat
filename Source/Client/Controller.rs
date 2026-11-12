@@ -97,6 +97,7 @@ impl Queued {
                     | Command::Leave(_)
                     | Command::SetTopic { .. }
                     | Command::SetNickname(_)
+                    | Command::InitializeNickname(_)
                     | Command::SetPresence(_)
                     | Command::SetFilter { .. }
                     | Command::SetRestriction { .. }
@@ -333,6 +334,7 @@ fn bounded(c: &Command) -> bool {
                 && grant.as_ref().is_none_or(|g| bounded_scope(&g.scope))
         }
         Command::SetNickname(s) | Command::CreateRoom { name: s } => s.len() <= 256,
+        Command::InitializeNickname(s) => crate::text::handle(s).is_ok(),
         Command::SetTopic { topic, .. } => topic.len() <= 1024,
         Command::Search(s) => {
             s.terms.len() <= 8
@@ -1132,6 +1134,8 @@ impl Worker {
 
 #[path = "Commands.rs"]
 mod commands;
+#[path = "InitialNickname.rs"]
+mod initial_nickname;
 #[path = "Synchronise.rs"]
 mod synchronise;
 #[path = "Views.rs"]

@@ -61,6 +61,7 @@ else: sys.exit(2)
         let binding = simple::Binding {
             version: 1,
             name: Some("Example server".into()),
+            initial_nickname: Some("Test member".into()),
             directory: root.clone(),
             suite,
             runtime_configuration: runtime,

@@ -388,7 +388,7 @@ impl Browser {
             self.simple = None;
             if result.is_err() {
                 error = Some(
-                    "HyperNet could not open the saved Page reader. Check this server's Page access and close its existing browser before retrying.",
+                    "HyperNet could not open the saved Page reader. Check this server's Page access and retry when its browser is ready.",
                 );
             }
         }

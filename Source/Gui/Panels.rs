@@ -65,6 +65,7 @@ impl App {
                                 .dispatch(Command::SetNickname(self.nickname.clone()));
                         }
                     });
+                    self.initial_nickname_notice(ui);
                 });
             });
             components::section(ui, "Appearance", |ui| {
