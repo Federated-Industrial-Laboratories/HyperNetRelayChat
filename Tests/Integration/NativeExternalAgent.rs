@@ -89,7 +89,7 @@ fn main() -> Result<()> {
         },
         &key,
     )?;
-    let socket = a.work.join("Api.sock");
+    let socket = integration::socket_path(&config)?;
     let mut server = Server::start(&config);
     let status = request(&socket, &key, "api.describe", json!({}), end)?;
     assert_eq!(status["apiVersion"], integration::API_VERSION);

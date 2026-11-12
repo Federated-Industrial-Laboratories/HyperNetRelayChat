@@ -5,7 +5,10 @@ use crate::{client::Profile, protocol::*, service::files};
 use serde::{Deserialize, Serialize};
 use std::{
     fs::{self, OpenOptions},
-    os::{fd::AsRawFd, unix::fs::OpenOptionsExt},
+    os::{
+        fd::AsRawFd,
+        unix::{ffi::OsStrExt, fs::OpenOptionsExt},
+    },
     path::{Path, PathBuf},
 };
 use zeroize::Zeroize;
@@ -103,6 +106,40 @@ impl Configuration {
             .cloned()
             .ok_or(Error::Denied)
     }
+}
+/// Long profile paths use a short private runtime directory without moving keys or history.
+pub fn socket_path(config: &Path) -> Result<PathBuf> {
+    let canonical = config.canonicalize().map_err(|_| Error::State)?;
+    let ordinary = canonical.parent().ok_or(Error::Invalid)?.join("Api.sock");
+    if ordinary.as_os_str().as_bytes().len() < 108 {
+        return Ok(ordinary);
+    }
+    let uid = unsafe { libc::geteuid() };
+    let runtime = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(format!("/run/user/{uid}")));
+    let suffix = format!(
+        "hrc-api-{uid}-{}",
+        &digest(canonical.as_os_str().as_bytes()).as_hex()[..24]
+    );
+    let base = if runtime
+        .join(&suffix)
+        .join("Api.sock")
+        .as_os_str()
+        .as_bytes()
+        .len()
+        < 108
+        && files::directory(&runtime, false).is_ok()
+    {
+        runtime
+    } else {
+        PathBuf::from("/tmp")
+    };
+    let path = base.join(suffix).join("Api.sock");
+    if path.as_os_str().as_bytes().len() >= 108 {
+        return Err(Error::Invalid);
+    }
+    Ok(path)
 }
 fn lock(path: &Path) -> Result<fs::File> {
     let parent = path.parent().ok_or(Error::Invalid)?;
