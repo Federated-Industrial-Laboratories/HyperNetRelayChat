@@ -19,7 +19,21 @@ pub(super) fn handle(
     request: &Request,
     time: TimeBounds,
 ) -> Domain<Response> {
+    let claim = match &request.action {
+        Action::Prepare(candidate) => Some(candidate.claim_id),
+        Action::Enrol { claim_id, .. }
+        | Action::Status { claim_id }
+        | Action::Revoke { claim_id } => Some(*claim_id),
+        Action::Describe | Action::RetiredClaims { .. } => None,
+    };
+    if let Some(claim) = claim
+        && let Some(retired) = retirement::outcome(db, claim)?
+    {
+        return Ok(retired);
+    }
     match &request.action {
+        Action::RetiredClaims { claim_id, after } => retirement::page(db, *claim_id, *after),
+        Action::Revoke { claim_id } => retirement::revoke(db, *claim_id),
         Action::Describe => Ok(Response::new(Status::Described {
             home,
             service_key: Id::from_bytes(signer.verifying_key().to_bytes()),
@@ -43,7 +57,7 @@ pub(super) fn handle(
                 Some((request, invitation, None)) => {
                     Ok(prepared(*claim_id, &request, domain::decode(&invitation)?))
                 }
-                None => deny("AdmissionClaimMissing"),
+                None => deny("AdmissionClaimAbsent"),
             }
         }
     }

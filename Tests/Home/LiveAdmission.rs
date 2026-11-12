@@ -827,3 +827,318 @@ fn expired_agent_consent_requires_current_exact_reapproval_before_resume() {
         Outcome::Rejected { .. }
     ));
 }
+
+#[test]
+fn retirement_cascades_exact_scoped_claims_preserves_history_and_pages_largest_snapshot() {
+    let fixture = Fixture::new();
+    let mut home = fixture.create();
+    let host = enrol(&mut home, 10, AccountClass::Human);
+    let chosen = room(&mut home, &host, "Chosen");
+    home.configure_admission(policy(vec![chosen]), TimeBounds::test_now())
+        .unwrap();
+    let (person, key) = candidate(50, vec![chosen], a::Classification::Person);
+    let (member, registration) = register(&mut home, &person, &key);
+    let (mut agent, agent_key) = candidate(
+        80,
+        vec![chosen],
+        a::Classification::Agent {
+            operator: person.identity.account,
+        },
+    );
+    consent(&mut home, &member, &mut agent);
+    let (agent_member, _) = register(&mut home, &agent, &agent_key);
+    let original = request(
+        &mut home,
+        a::Action::Status {
+            claim_id: person.claim_id,
+        },
+    );
+    // Represent expired unfinished proposals retained across many normal resumptions.
+    // There are exactly1024 claims, the documented hard storage bound.
+    home.store.write(|db|{
+        let invitation:Vec<u8>=db.query_row("SELECT invitation FROM hrc_admission_claims WHERE id=?1",[agent.claim_id.as_hex()],|r|r.get(0))?;
+        for n in 0..1022 {
+            let mut pending=agent.clone();pending.claim_id=digest(format!("retired-pending-{n}").as_bytes());
+            pending.identity.account.local=digest(format!("retired-account-{n}").as_bytes());
+            pending.operator_consent=None;
+            db.execute("INSERT INTO hrc_admission_claims(id,request,invitation,expires)VALUES(?1,?2,?3,0)",rusqlite::params![pending.claim_id.as_hex(),crate::home::types::encode(&pending)?,&invitation])?;
+        }
+        Ok(crate::storage::Commit::new((),b"retained pending claim fixture".to_vec()))
+    }).unwrap();
+    let wrong = home
+        .admission_request(
+            &a::Request::new(a::Action::Revoke {
+                claim_id: person.claim_id,
+            }),
+            id(201),
+            TimeBounds::test_now(),
+        )
+        .unwrap();
+    assert!(matches!(wrong.result, a::Status::Refused { .. }));
+    assert!(
+        home.endpoint(person.identity.account, person.identity.endpoint)
+            .unwrap()
+            .is_some()
+    );
+    let retired = request(
+        &mut home,
+        a::Action::Revoke {
+            claim_id: person.claim_id,
+        },
+    );
+    let a::Status::Revoked {
+        account,
+        affected_claim_ids,
+        more_affected,
+        ..
+    } = &retired.result
+    else {
+        panic!("{retired:?}")
+    };
+    assert_eq!(*account, Some(person.identity.account));
+    assert_eq!(affected_claim_ids.len(), 256);
+    assert!(*more_affected);
+    assert!(serde_json::to_vec(&retired).unwrap().len() < a::MAXIMUM);
+    let mut all = affected_claim_ids.clone();
+    let mut after = all.last().copied();
+    let mut pages = 1;
+    loop {
+        let response = request(
+            &mut home,
+            a::Action::RetiredClaims {
+                claim_id: person.claim_id,
+                after,
+            },
+        );
+        assert!(serde_json::to_vec(&response).unwrap().len() < a::MAXIMUM);
+        let a::Status::RetiredClaims {
+            affected_claim_ids,
+            next,
+            ..
+        } = response.result
+        else {
+            panic!()
+        };
+        all.extend(affected_claim_ids);
+        pages += 1;
+        if next.is_none() {
+            break;
+        }
+        after = next;
+    }
+    assert_eq!(all.len(), 1024);
+    assert_eq!(pages, 4);
+    assert!(all.windows(2).all(|p| p[0] < p[1]));
+    assert!(all.contains(&person.claim_id) && all.contains(&agent.claim_id));
+    assert!(
+        home.endpoint(person.identity.account, person.identity.endpoint)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        home.endpoint(agent.identity.account, agent.identity.endpoint)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        home.endpoint(host.record.acting.account, host.record.acting.endpoint)
+            .unwrap()
+            .is_some()
+    );
+    for party in [&member, &agent_member] {
+        let outcome = run(
+            &mut home,
+            party,
+            &action(
+                party,
+                Operation::RoomList,
+                Target::Service,
+                &conversations::List {
+                    after: None,
+                    limit: 16,
+                },
+            ),
+        );
+        assert!(
+            matches!(outcome,Outcome::Refused{code:ErrorCode::Denied,detail,..}if detail=="EndpointDisabled")
+        );
+    }
+    home.store
+        .read(Duration::from_secs(2), |db| {
+            assert_eq!(
+                db.query_row("SELECT count(*) FROM hrc_accounts", [], |r| r
+                    .get::<_, u64>(0))?,
+                3
+            );
+            assert_eq!(
+                db.query_row(
+                    "SELECT count(*) FROM hrc_members WHERE room=?1 AND active=1",
+                    [chosen.to_string()],
+                    |r| r.get::<_, u64>(0)
+                )?,
+                1
+            );
+            let retained: Vec<u8> = db.query_row(
+                "SELECT result FROM hrc_admission_claims WHERE id=?1",
+                [person.claim_id.as_hex()],
+                |r| r.get(0),
+            )?;
+            assert_eq!(retained, crate::home::types::encode(&original)?);
+            Ok(())
+        })
+        .unwrap();
+    for action in [
+        a::Action::Status {
+            claim_id: person.claim_id,
+        },
+        a::Action::Revoke {
+            claim_id: person.claim_id,
+        },
+        a::Action::Prepare(person.clone().into()),
+        a::Action::Enrol {
+            claim_id: person.claim_id,
+            registration,
+        },
+    ] {
+        assert_eq!(
+            serde_json::to_value(request(&mut home, action)).unwrap(),
+            serde_json::to_value(&retired).unwrap()
+        );
+    }
+    assert!(matches!(
+        request(
+            &mut home,
+            a::Action::RetiredClaims {
+                claim_id: person.claim_id,
+                after: Some(id(250))
+            }
+        )
+        .result,
+        a::Status::Refused { .. }
+    ));
+    drop(home);
+    home = fixture.open();
+    assert_eq!(
+        serde_json::to_value(request(
+            &mut home,
+            a::Action::Revoke {
+                claim_id: person.claim_id
+            }
+        ))
+        .unwrap(),
+        serde_json::to_value(retired).unwrap()
+    );
+}
+
+#[test]
+fn retirement_pending_and_absent_are_distinct_and_never_revive_invitation_or_operator_quota() {
+    let fixture = Fixture::new();
+    let mut home = fixture.create();
+    let host = enrol(&mut home, 10, AccountClass::Human);
+    let chosen = room(&mut home, &host, "Chosen");
+    home.configure_admission(policy(vec![chosen]), TimeBounds::test_now())
+        .unwrap();
+    assert!(
+        matches!(request(&mut home,a::Action::Revoke{claim_id:id(250)}).result,a::Status::Refused{code}if code=="AdmissionClaimAbsent")
+    );
+    let (pending, _) = candidate(50, vec![chosen], a::Classification::Person);
+    invitation(&mut home, &pending);
+    assert!(matches!(
+        request(
+            &mut home,
+            a::Action::Revoke {
+                claim_id: pending.claim_id
+            }
+        )
+        .result,
+        a::Status::Revoked { account: None, .. }
+    ));
+    assert!(matches!(
+        request(&mut home, a::Action::Prepare(pending.into())).result,
+        a::Status::Revoked { .. }
+    ));
+    let (person, key) = candidate(60, vec![chosen], a::Classification::Person);
+    let (member, _) = register(&mut home, &person, &key);
+    let (mut agent, key) = candidate(
+        80,
+        vec![chosen],
+        a::Classification::Agent {
+            operator: person.identity.account,
+        },
+    );
+    consent(&mut home, &member, &mut agent);
+    register(&mut home, &agent, &key);
+    request(
+        &mut home,
+        a::Action::Revoke {
+            claim_id: agent.claim_id,
+        },
+    );
+    // Revoking the Agent frees its active quota while retaining its account tombstone.
+    let (mut successor, key) = candidate(
+        100,
+        vec![chosen],
+        a::Classification::Agent {
+            operator: person.identity.account,
+        },
+    );
+    consent(&mut home, &member, &mut successor);
+    register(&mut home, &successor, &key);
+    assert!(
+        home.endpoint(person.identity.account, person.identity.endpoint)
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[test]
+fn retirement_schema_upgrades_existing_admission_without_changing_completed_claims() {
+    let fixture = Fixture::new();
+    let mut home = fixture.create();
+    let host = enrol(&mut home, 10, AccountClass::Human);
+    let chosen = room(&mut home, &host, "Chosen");
+    home.configure_admission(policy(vec![chosen]), TimeBounds::test_now())
+        .unwrap();
+    let (person, key) = candidate(50, vec![chosen], a::Classification::Person);
+    register(&mut home, &person, &key);
+    let complete = request(
+        &mut home,
+        a::Action::Status {
+            claim_id: person.claim_id,
+        },
+    );
+    home.store
+        .write(|db| {
+            db.execute_batch("DROP TABLE hrc_admission_retired")?;
+            Ok(crate::storage::Commit::new(
+                (),
+                b"pre-retirement schema fixture".to_vec(),
+            ))
+        })
+        .unwrap();
+    drop(home);
+    home = fixture.open();
+    assert_eq!(
+        serde_json::to_value(request(
+            &mut home,
+            a::Action::Status {
+                claim_id: person.claim_id
+            }
+        ))
+        .unwrap(),
+        serde_json::to_value(complete).unwrap()
+    );
+    assert!(matches!(
+        request(
+            &mut home,
+            a::Action::Revoke {
+                claim_id: person.claim_id
+            }
+        )
+        .result,
+        a::Status::Revoked {
+            account: Some(_),
+            ..
+        }
+    ));
+}
