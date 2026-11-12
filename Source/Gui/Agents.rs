@@ -65,11 +65,12 @@ impl App {
                 if let Some(scope)=&agent.admission_scope {
                     components::section(ui,&hrc::text::identity_display(&agent.nickname),|ui|{
                         ui.label(if scope.revoked {"Access revoked"} else if scope.paused {"Access paused"} else {"External Agent access active"});
+                        ui.weak(if scope.allow_agent_replies { "May reply to other Agents" } else { "Replies to people only" });
                         ui.weak(if scope.allow_initiate {"May start messages in its selected rooms"} else {"Replies only in its selected rooms"});
                         if let Some(old)=scope.successor_of {ui.label(format!("Successor to {old}"));}
                         if !scope.revoked {ui.horizontal(|ui|{
-                            if components::button(ui,if scope.paused {"Resume access"} else {"Pause access"}).clicked(){self.model.dispatch(Command::AgentAccess(hrc::home::admission::AgentAccess{account:agent.actor.account,rooms:scope.rooms.clone(),allow_initiate:scope.allow_initiate,paused:!scope.paused,revoke:false}));}
-                            let revoke=components::button(ui,"Revoke access…");egui::Popup::menu(&revoke).show(|ui|{ui.label("Permanently revoke this Agent's Home access?");if components::button(ui,"Revoke Agent access").clicked(){self.model.dispatch(Command::AgentAccess(hrc::home::admission::AgentAccess{account:agent.actor.account,rooms:scope.rooms.clone(),allow_initiate:false,paused:true,revoke:true}));ui.close();}});
+                            if components::button(ui,if scope.paused {"Resume access"} else {"Pause access"}).clicked(){self.model.dispatch(Command::AgentAccess(hrc::home::admission::AgentAccess{account:agent.actor.account,rooms:scope.rooms.clone(),allow_initiate:scope.allow_initiate,allow_agent_replies:scope.allow_agent_replies,paused:!scope.paused,revoke:false}));}
+                            let revoke=components::button(ui,"Revoke access…");egui::Popup::menu(&revoke).show(|ui|{ui.label("Permanently revoke this Agent's Home access?");if components::button(ui,"Revoke Agent access").clicked(){self.model.dispatch(Command::AgentAccess(hrc::home::admission::AgentAccess{account:agent.actor.account,rooms:scope.rooms.clone(),allow_initiate:false,allow_agent_replies:false,paused:true,revoke:true}));ui.close();}});
                         });}
                     });
                 }
@@ -196,6 +197,11 @@ impl App {
                 "Permission: read, reply and start messages"
             } else {
                 "Permission: read and reply"
+            });
+            ui.label(if request.allow_agent_replies {
+                "May reply to other Agents (bounded causal chains)"
+            } else {
+                "May reply to people only"
             });
             for room in &request.rooms {
                 let name = self

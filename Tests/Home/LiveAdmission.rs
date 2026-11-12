@@ -30,6 +30,7 @@ fn candidate(n: u8, rooms: Vec<RoomId>, class: a::Classification) -> (a::Prepare
             classification: class,
             rooms,
             allow_initiate: false,
+            allow_agent_replies: false,
             successor: false,
             operator_consent: None,
         },
@@ -366,6 +367,7 @@ fn operator_consent_quota_scope_and_successor_cannot_be_forged() {
         account: c.identity.account,
         rooms: vec![chosen],
         allow_initiate: false,
+        allow_agent_replies: false,
         paused: true,
         revoke: false,
     };
@@ -461,4 +463,132 @@ fn disabled_operator_endpoint_and_disabled_host_agent_policy_refuse_consent_reus
         request(&mut home, a::Action::Prepare(c.into())).result,
         a::Status::Refused { .. }
     ));
+}
+
+#[test]
+fn raw_agent_replies_require_exact_cause_explicit_agent_opt_in_and_finite_chains() {
+    fn committed(out: Outcome) -> Id {
+        match out {
+            Outcome::Committed {
+                event: Some(event), ..
+            } => event,
+            other => panic!("{other:?}"),
+        }
+    }
+    fn refused(out: Outcome, expected: &str) {
+        assert!(
+            matches!(out, Outcome::Rejected { code: ErrorCode::Denied, ref detail } if detail == expected),
+            "{out:?}"
+        );
+    }
+    fn reply(
+        home: &mut Home,
+        agent: &Party,
+        room: RoomId,
+        parent: Id,
+        cause: Option<Id>,
+    ) -> Outcome {
+        run(
+            home,
+            agent,
+            &action(
+                agent,
+                Operation::MessageReply,
+                Target::Room(room),
+                &messaging::Send {
+                    text: "Bounded reply".into(),
+                    mentions: vec![],
+                    parent: Some(parent),
+                    causation: cause,
+                },
+            ),
+        )
+    }
+    let fixture = Fixture::new();
+    let mut home = fixture.create();
+    let owner = enrol(&mut home, 10, AccountClass::Human);
+    let room = room(&mut home, &owner, "Causal chains");
+    let mut p = policy(vec![room]);
+    p.max_agents_per_operator = 3;
+    home.configure_admission(p, TimeBounds::test_now()).unwrap();
+    let mut agents = Vec::new();
+    for (n, allow_agent_replies) in [(50, false), (60, true), (70, true)] {
+        let (mut c, key) = candidate(
+            n,
+            vec![room],
+            a::Classification::Agent {
+                operator: owner.record.acting.account,
+            },
+        );
+        c.allow_agent_replies = allow_agent_replies;
+        consent(&mut home, &owner, &mut c);
+        let mut changed = c.clone();
+        changed.allow_agent_replies = !allow_agent_replies;
+        assert!(matches!(
+            request(&mut home, a::Action::Prepare(changed.into())).result,
+            a::Status::Refused { .. }
+        ));
+        agents.push(register(&mut home, &c, &key).0);
+    }
+    // A raw client cannot expand the original operator-approved permission.
+    refused(
+        run(
+            &mut home,
+            &owner,
+            &action(
+                &owner,
+                Operation::AgentSetAccess,
+                Target::Account(owner.record.acting.account),
+                &a::AgentAccess {
+                    account: agents[0].record.acting.account,
+                    rooms: vec![room],
+                    allow_initiate: false,
+                    allow_agent_replies: true,
+                    paused: false,
+                    revoke: false,
+                },
+            ),
+        ),
+        "AgentOriginalScope",
+    );
+    let root = committed(run(&mut home, &owner, &send(&owner, room, "Human trigger")));
+    let other = committed(run(
+        &mut home,
+        &owner,
+        &send(&owner, room, "Another human trigger"),
+    ));
+    refused(
+        reply(&mut home, &agents[0], room, root, None),
+        "AgentReplyCausation",
+    );
+    refused(
+        reply(&mut home, &agents[0], room, root, Some(other)),
+        "AgentReplyCausation",
+    );
+    let a1 = committed(reply(&mut home, &agents[1], room, root, Some(root)));
+    refused(
+        reply(&mut home, &agents[0], room, a1, Some(a1)),
+        "AgentRepliesDisabled",
+    );
+    let b1 = committed(reply(&mut home, &agents[2], room, root, Some(root)));
+    let b2 = committed(reply(&mut home, &agents[2], room, a1, Some(a1)));
+    let a2 = committed(reply(&mut home, &agents[1], room, b1, Some(b1)));
+    let a3 = committed(reply(&mut home, &agents[1], room, b2, Some(b2)));
+    let b3 = committed(reply(&mut home, &agents[2], room, a2, Some(a2)));
+    let b4 = committed(reply(&mut home, &agents[2], room, a3, Some(a3)));
+    let _a4 = committed(reply(&mut home, &agents[1], room, b3, Some(b3)));
+    refused(
+        reply(&mut home, &agents[1], room, b4, Some(b4)),
+        "AgentDepth",
+    );
+    refused(
+        reply(&mut home, &agents[1], room, root, Some(root)),
+        "AgentTriggerRepeated",
+    );
+    refused(
+        reply(&mut home, &agents[0], room, root, Some(root)),
+        "AgentChainLimit",
+    );
+    // A separate direct trigger remains valid: refusal did not consume or disable the account.
+    committed(reply(&mut home, &agents[0], room, other, Some(other)));
 }

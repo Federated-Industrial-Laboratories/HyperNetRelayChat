@@ -24,6 +24,8 @@ pub struct Options {
     pub rooms: Vec<RoomId>,
     pub allow_initiate: bool,
     #[serde(default)]
+    pub allow_agent_replies: bool,
+    #[serde(default)]
     pub successor: bool,
     pub companion: PathBuf,
     pub clock: clock::Config,
@@ -130,6 +132,7 @@ pub fn prepare(directory: &Path, mut options: Options) -> files::Result<Pending>
         classification: options.classification.clone(),
         rooms: options.rooms.clone(),
         allow_initiate: options.allow_initiate,
+        allow_agent_replies: options.allow_agent_replies,
         successor: options.successor,
         operator_consent: None,
     };
