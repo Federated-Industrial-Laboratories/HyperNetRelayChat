@@ -124,6 +124,8 @@ retained consumers, 4096 retained sends, four simultaneous socket clients and
 Terminal send mappings remain at least seven days past their retry-window expiry;
 unknown outcomes remain explicit. Capacity exhaustion refuses new work. A
 reusable invitation or permanent membership does not mean unlimited storage.
+Socket and stdio output have a five-second write deadline. A stalled consumer
+cannot hold the encrypted profile open indefinitely during a requested stop.
 
 ## Pause, revoke and inspect
 

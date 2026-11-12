@@ -484,3 +484,39 @@ fn stdio_frames_do_not_stall_after_buffered_lines_and_cancel_partial_input() {
             .is_none()
     );
 }
+
+#[test]
+fn full_stdio_pipe_cancels_output_and_releases_writer() {
+    use std::{
+        os::fd::{AsRawFd, FromRawFd, OwnedFd},
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
+        thread,
+        time::{Duration, Instant},
+    };
+    let mut fds = [-1; 2];
+    assert_eq!(
+        unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC | libc::O_NONBLOCK) },
+        0
+    );
+    let _reader = unsafe { OwnedFd::from_raw_fd(fds[0]) };
+    let writer = unsafe { OwnedFd::from_raw_fd(fds[1]) };
+    let bytes = [0u8; 4096];
+    while unsafe { libc::write(writer.as_raw_fd(), bytes.as_ptr().cast(), bytes.len()) } > 0 {}
+    assert_eq!(
+        std::io::Error::last_os_error().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+    let stop = Arc::new(AtomicBool::new(false));
+    let stopped = stop.clone();
+    let worker = thread::spawn(move || {
+        transport::write_fd(writer.as_raw_fd(), &json!({"result":"bounded"}), &stopped)
+    });
+    thread::sleep(Duration::from_millis(20));
+    let at = Instant::now();
+    stop.store(true, Ordering::Release);
+    assert!(worker.join().unwrap().is_err());
+    assert!(at.elapsed() < Duration::from_secs(1));
+}

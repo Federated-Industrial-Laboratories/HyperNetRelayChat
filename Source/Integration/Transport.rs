@@ -48,6 +48,64 @@ fn write_line(writer: &mut impl Write, value: &Value) -> Result<()> {
         .and_then(|()| writer.flush())
         .map_err(|_| Error::Transport)
 }
+pub(super) fn write_fd(fd: std::os::fd::RawFd, value: &Value, stop: &AtomicBool) -> Result<()> {
+    let mut bytes = serde_json::to_vec(value).map_err(|_| Error::State)?;
+    if bytes.len() > RESPONSE_BYTES {
+        return Err(Error::Capacity);
+    }
+    bytes.push(b'\n');
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+        return Err(Error::Transport);
+    }
+    struct Restore(std::os::fd::RawFd, libc::c_int);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            unsafe {
+                libc::fcntl(self.0, libc::F_SETFL, self.1);
+            }
+        }
+    }
+    let _restore = Restore(fd, flags);
+    let end = Instant::now() + Duration::from_secs(5);
+    let mut written = 0;
+    while written < bytes.len() {
+        if stop.load(Ordering::Acquire) || Instant::now() >= end {
+            return Err(Error::Transport);
+        }
+        let mut ready = libc::pollfd {
+            fd,
+            events: libc::POLLOUT,
+            revents: 0,
+        };
+        let polled = unsafe { libc::poll(&mut ready, 1, 100) };
+        if polled < 0 {
+            if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(Error::Transport);
+        }
+        if polled == 0 {
+            continue;
+        }
+        let count =
+            unsafe { libc::write(fd, bytes[written..].as_ptr().cast(), bytes.len() - written) };
+        if count < 0 {
+            if matches!(
+                io::Error::last_os_error().kind(),
+                io::ErrorKind::Interrupted | io::ErrorKind::WouldBlock
+            ) {
+                continue;
+            }
+            return Err(Error::Transport);
+        }
+        if count == 0 {
+            return Err(Error::Transport);
+        }
+        written += count as usize;
+    }
+    Ok(())
+}
 pub(super) fn input_line(input: std::os::fd::RawFd, stop: &AtomicBool) -> Result<Option<Vec<u8>>> {
     let mut bytes = Vec::new();
     let mut started = None;
@@ -185,12 +243,17 @@ pub fn serve(config: &Path, stdio: bool, stop: Arc<AtomicBool>) -> Result<()> {
     let mut broker = Broker::open(config)?;
     if stdio {
         let input = io::stdin().lock();
-        let mut output = io::stdout().lock();
+        let output = io::stdout().lock();
         while !stop.load(Ordering::Acquire) {
             let Some(bytes) = input_line(input.as_raw_fd(), &stop)? else {
                 break;
             };
-            write_line(&mut output, &broker.handle(&bytes))?;
+            if let Err(error) = write_fd(output.as_raw_fd(), &broker.handle(&bytes), &stop) {
+                if stop.load(Ordering::Acquire) {
+                    break;
+                }
+                return Err(error);
+            }
         }
         return Ok(());
     }
