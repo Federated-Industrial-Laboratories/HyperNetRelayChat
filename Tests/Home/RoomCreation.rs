@@ -132,6 +132,7 @@ fn service_configuration(fixture: &Fixture) -> service::Config {
         },
         motd: String::new(),
         room_creation: RoomCreationPolicy::default(),
+        admission_bridge: None,
     };
     fs::rename(fixture.root.join("Key"), fixture.root.join("Database.key")).unwrap();
     service::files::create(&fixture.root.join("Signing.key"), &[4; 32]).unwrap();

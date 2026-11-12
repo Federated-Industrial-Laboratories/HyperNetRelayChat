@@ -198,6 +198,8 @@ fn host_prepare_resumes_same_owner_and_refuses_changed_native_binding() {
         motd: "Welcome".into(),
         agents_enabled: true,
         max_agents_per_operator: 2,
+        admission_bridge: None,
+        admission_uid: None,
     };
     let prepare = |options| {
         host::request(

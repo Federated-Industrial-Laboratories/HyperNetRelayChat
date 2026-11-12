@@ -16,30 +16,60 @@ pub(super) struct Server {
     stop: Arc<AtomicBool>,
     worker: Option<thread::JoinHandle<()>>,
     path: PathBuf,
-    boot: PathBuf,
+    boot: Option<PathBuf>,
     _directory: fs::File,
+    _bridge: Option<Box<Server>>,
 }
 impl Server {
     pub(super) fn start(directory: &Path, shared: Arc<Shared>) -> Result<Self> {
-        files::directory(directory, false).map_err(|_| Error::Configuration)?;
+        let mut server = Self::start_socket(directory, Arc::clone(&shared), None)?;
+        if let Some(bridge) = &shared.config.admission_bridge {
+            server._bridge = Some(Box::new(Self::start_socket(
+                &bridge.directory,
+                Arc::clone(&shared),
+                Some(bridge.uid),
+            )?));
+        }
+        Ok(server)
+    }
+    fn start_socket(directory: &Path, shared: Arc<Shared>, bridge: Option<u32>) -> Result<Self> {
+        let owner = unsafe { libc::geteuid() };
+        let (held, socket) = if bridge.is_some() {
+            let opened = control::bridge::directory(directory, owner, true)
+                .map_err(|_| Error::Configuration)?;
+            for item in fs::read_dir(directory).map_err(|_| Error::Configuration)? {
+                if item.map_err(|_| Error::Configuration)?.file_name() != "Admission.sock" {
+                    return Err(Error::Configuration);
+                }
+            }
+            opened
+        } else {
+            control::socket_directory(directory).map_err(|_| Error::Configuration)?
+        };
         let path = directory.join("Admission.sock");
-        let boot = directory.join("Admission.boot");
+        let boot = bridge.is_none().then(|| directory.join("Admission.boot"));
         if let Ok(m) = fs::symlink_metadata(&path) {
             if !m.file_type().is_socket() || m.uid() != unsafe { libc::geteuid() } {
                 return Err(Error::Configuration);
             }
             fs::remove_file(&path).map_err(|_| Error::State)?;
         }
-        if boot.exists() {
-            files::read(&boot, 1024).map_err(|_| Error::State)?;
-            fs::remove_file(&boot).map_err(|_| Error::State)?;
+        if let Some(boot) = &boot
+            && boot.exists()
+        {
+            files::read(boot, 1024).map_err(|_| Error::State)?;
+            fs::remove_file(boot).map_err(|_| Error::State)?;
         }
-        let (held, socket) =
-            control::socket_directory(directory).map_err(|_| Error::Configuration)?;
         let listener = UnixListener::bind(socket).map_err(|_| Error::State)?;
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).map_err(|_| Error::State)?;
+        fs::set_permissions(
+            &path,
+            fs::Permissions::from_mode(if bridge.is_some() { 0o666 } else { 0o600 }),
+        )
+        .map_err(|_| Error::State)?;
         listener.set_nonblocking(true).map_err(|_| Error::State)?;
-        files::create_json(&boot, &shared.boot).map_err(|_| Error::State)?;
+        if let Some(boot) = &boot {
+            files::create_json(boot, &shared.boot).map_err(|_| Error::State)?;
+        }
         let stop = Arc::new(AtomicBool::new(false));
         let stopped = Arc::clone(&stop);
         let worker = thread::spawn(move || {
@@ -47,7 +77,9 @@ impl Server {
             while !stopped.load(Ordering::Acquire) && !shared.stop.load(Ordering::Acquire) {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
-                        let _ = serve(&shared, &mut stream, &mut used);
+                        if control::bridge::peer(&stream, bridge.unwrap_or(owner)).is_ok() {
+                            let _ = serve(&shared, &mut stream, &mut used, bridge.is_some());
+                        }
                     }
                     Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(25))
@@ -62,6 +94,7 @@ impl Server {
             path,
             boot,
             _directory: held,
+            _bridge: None,
         })
     }
 }
@@ -72,17 +105,35 @@ impl Drop for Server {
             let _ = worker.join();
         }
         let _ = fs::remove_file(&self.path);
-        let _ = fs::remove_file(&self.boot);
+        if let Some(boot) = &self.boot {
+            let _ = fs::remove_file(boot);
+        }
     }
 }
 fn serve(
     shared: &Shared,
     stream: &mut UnixStream,
     used: &mut BTreeMap<Id, u64>,
+    bridge: bool,
 ) -> std::result::Result<(), files::Invalid> {
     let end = Instant::now() + Duration::from_secs(5);
+    let challenge = if bridge {
+        let challenge =
+            control::bridge::Challenge::new(shared.config.descriptor.home, shared.boot)?;
+        control::send(stream, &challenge, &shared.signer, end)?;
+        Some(challenge)
+    } else {
+        None
+    };
     let envelope = control::receive(stream, end)?;
     let payload: Payload = control::verify(&envelope)?;
+    if let Some(challenge) = challenge
+        && (!matches!(payload.control, Control::Request { .. })
+            || payload.nonce != challenge.nonce
+            || payload.expires_boot_ms != challenge.expires_boot_ms)
+    {
+        return Err(files::Invalid);
+    }
     let current = clock::boot_ms().map_err(|_| files::Invalid)?;
     used.retain(|_, expires| *expires > current);
     if payload.home != shared.config.descriptor.home

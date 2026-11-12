@@ -54,6 +54,8 @@ fn shared_host_finish_configures_running_home_and_never_restores_disabled_policy
         motd: "Welcome".into(),
         agents_enabled: true,
         max_agents_per_operator: 2,
+        admission_bridge: Some(fixture.root.join("HrcBridge")),
+        admission_uid: Some(unsafe { libc::geteuid() }),
     };
     let prepared = adapter::request(
         &directory,
@@ -207,6 +209,18 @@ fn shared_host_finish_configures_running_home_and_never_restores_disabled_policy
         max_agents_per_operator: 2,
     };
     assert!(control::configure_host(&prepared.service_directory, changed).is_err());
+    let mut changed = options.clone();
+    changed.admission_uid = changed.admission_uid.map(|uid| uid + 1);
+    assert!(
+        adapter::request(
+            &directory,
+            adapter::Request {
+                format: adapter::FORMAT.into(),
+                action: adapter::Action::Prepare(Box::new(changed))
+            }
+        )
+        .is_err()
+    );
     let again = adapter::request(
         &directory,
         adapter::Request {

@@ -102,3 +102,39 @@ Keep the owner recovery key separately backed up. The local registrar binding
 and signing files must remain private to the host account. Neither the public
 listener nor an ordinary participant chooses helper executables, configuration
 paths or registrar credentials.
+
+## Isolated registrar bridge
+
+A composed host can pass the optional pair `admissionBridge` (absolute directory)
+and `admissionUid` (the registrar's mapped host UID) in Prepare. Both must be
+present or absent. They become part of the retained exact host intent and cannot
+change on retry. The bridge must be separate from the HRC private hosting tree.
+When omitted, the existing owner-only local control workflow is unchanged.
+
+Home creates a socket-only bridge directory owned by its host UID with mode 0711
+and `Admission.sock` with mode 0666. An exact `SO_PEERCRED` UID check precedes
+reading or sending a control frame. The bridge accepts only typed, signed live
+admission requests; even an owner-signed configuration or legacy-administration
+command is refused there. The Home owner socket remains in its private 0700
+directory with mode 0600 and its separate owner controls.
+
+The native host derives mapped UIDs from the actual rootless namespace map. It
+provisions only the scoped registrar key and public binding into a separate
+mapped-owned private state directory. No Home signing/database key, owner profile
+or recovery state is mounted into the registrar. The original scoped key remains
+private at the host for exact provisioning retries. Do not print it or send it
+through command arguments.
+
+With fixed mounts `/HrcAdmission` for scoped state and `/HrcBridge` for the socket,
+the isolated binding is `directory: "/HrcBridge"`, `peerUid: 0`, the response's
+`home` and `serviceKey`, and `registrarKeyFile: "/HrcAdmission/Registrar.key"`.
+Here zero identifies the Home owner's translated UID inside that namespace,
+not permission to run the registrar as root. The configured registrar UID remains
+distinct. Home authenticates the registrar's signature and current admission
+policy on every request.
+
+The bridge sends a signed per-connection Home challenge binding its identity,
+boot instance, nonce and five-second deadline. The reply must use that exact
+challenge. No boot file or private service configuration is exposed. This
+bridge protocol is selected only by a binding with `peerUid`; legacy bindings
+continue using the original private control socket.

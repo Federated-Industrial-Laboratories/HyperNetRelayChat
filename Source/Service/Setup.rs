@@ -44,6 +44,7 @@ pub fn create(
         clock,
         motd,
         room_creation: RoomCreationPolicy::default(),
+        admission_bridge: None,
     };
     let store = storage::Store::create(
         directory.join("Data"),
