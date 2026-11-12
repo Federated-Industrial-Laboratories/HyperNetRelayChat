@@ -1,5 +1,17 @@
 # Native conversation qualification
 
+`native-external-agent` qualifies the scoped participant API with two already
+enrolled native profiles and their running companions. Both must be members of
+the selected room; use isolated test identities with current authority and clock
+evidence. Run `cargo run --example native-external-agent -- --person PROFILE
+--agent AGENT_PROFILE --room ROOM --work NEW_PRIVATE_DIRECTORY` from the candidate.
+The work path must fit the Linux Unix-socket pathname limit. The probe publishes
+a new person message and an Agent reply, restarts the API before acknowledging,
+and verifies stable redelivery, one exact reply, conflicting retry refusal,
+pause and credential revocation. It leaves the test profiles and encrypted
+results available for inspection. No model runner is used. Compiling this probe
+alone is not native integration evidence.
+
 `NativeLoad.py` and the `native-load-client` example provide the separate bounded
 pilot/load workflow. Select `configuration.loadOnly=true` or
 `HRC_NATIVE_LOAD_ONLY=1`, and supply `configuration.loadClientBinary` or

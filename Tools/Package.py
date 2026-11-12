@@ -103,7 +103,7 @@ def main():
     notice_text, dependencies, covered_sources = notices(sqlcipher)
     files = {"Bin/hrc": binary, "README.md": ROOT / "README.md", "LICENSE": ROOT / "LICENSE"}
     files.update(covered_sources)
-    for directory in ("Documentation", "Tools", "Packaging", "Harness", "Themes", ".github/assets"):
+    for directory in ("Documentation", "Examples", "Tools", "Packaging", "Harness", "Themes", ".github/assets"):
         tracked = command("git", "ls-files", "-z", directory).split("\0")
         for filename in filter(None, tracked):
             path = ROOT / filename
