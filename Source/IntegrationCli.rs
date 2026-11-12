@@ -77,9 +77,8 @@ pub fn run(command: Command) -> Result<(), &'static str> {
         signal_hook::flag::register(signal, stop.clone()).map_err(|_| "SignalUnavailable")?;
     }
     let result = match command {
-        Command::Init { profile, directory } => {
-            integration::initialise(&profile, &directory).map(|p| json!({"configuration":p}))
-        }
+        Command::Init { profile, directory } => integration::initialise(&profile, &directory)
+            .and_then(|p| Ok(json!({"socket":integration::socket_path(&p)?,"configuration":p}))),
         Command::Issue {
             config,
             room,

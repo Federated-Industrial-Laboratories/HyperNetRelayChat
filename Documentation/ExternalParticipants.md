@@ -124,6 +124,8 @@ retained consumers, 4096 retained sends, four simultaneous socket clients and
 Terminal send mappings remain at least seven days past their retry-window expiry;
 unknown outcomes remain explicit. Capacity exhaustion refuses new work. A
 reusable invitation or permanent membership does not mean unlimited storage.
+Socket and stdio output have a five-second write deadline. A stalled consumer
+cannot hold the encrypted profile open indefinitely during a requested stop.
 
 ## Pause, revoke and inspect
 
@@ -146,6 +148,11 @@ The package contains `Examples/ExternalAgent.py`, a durable no-model responder t
 Python example retains its reply plan before sending and recovers its original
 ID after a restart. Give each program a separate credential. Its state file must
 be in a private directory; retain it along with the Agent profile.
+
+`integration init` reports the actual `socket` path. Short paths use `Api.sock`
+beside the configuration. Long paths use a private directory in the user's
+runtime directory, or a private owner-checked directory under `/tmp`. Keys and
+encrypted history stay in the original profile. Use the reported path in callers.
 
 Existing `hrc api`, exclusive-profile CLI commands and the built-in bot remain
 available. They are different interfaces to the same service permission model.
