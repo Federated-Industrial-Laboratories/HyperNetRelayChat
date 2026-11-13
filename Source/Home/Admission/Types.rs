@@ -107,6 +107,15 @@ pub enum Action {
         claim_id: Id,
         registration: Artifact,
     },
+    RetiredClaims {
+        #[serde(rename = "claimId")]
+        claim_id: Id,
+        after: Option<Id>,
+    },
+    Revoke {
+        #[serde(rename = "claimId")]
+        claim_id: Id,
+    },
     Status {
         #[serde(rename = "claimId")]
         claim_id: Id,
@@ -149,6 +158,22 @@ pub enum Status {
         #[serde(rename = "registrationDigest")]
         registration_digest: Id,
         actor: EndpointActor,
+    },
+    Revoked {
+        #[serde(rename = "claimId")]
+        claim_id: Id,
+        account: Option<AccountId>,
+        #[serde(rename = "affectedClaimIds")]
+        affected_claim_ids: Vec<Id>,
+        #[serde(rename = "moreAffected")]
+        more_affected: bool,
+    },
+    RetiredClaims {
+        #[serde(rename = "claimId")]
+        claim_id: Id,
+        #[serde(rename = "affectedClaimIds")]
+        affected_claim_ids: Vec<Id>,
+        next: Option<Id>,
     },
     Refused {
         code: String,

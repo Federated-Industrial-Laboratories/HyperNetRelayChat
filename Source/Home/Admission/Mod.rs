@@ -10,6 +10,8 @@ pub use types::{
 mod claims;
 #[path = "Consent.rs"]
 mod consent;
+#[path = "Retirement.rs"]
+mod retirement;
 #[path = "Scopes.rs"]
 pub(crate) mod scopes;
 use super::{
@@ -32,10 +34,20 @@ pub(crate) fn initialize(store: &mut Store) -> storage::Result<()> {
             |r| r.get::<_, bool>(0),
         )
     })?;
-    if exists {
+    let retired = store.read(Duration::from_secs(2), |db| {
+        db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='hrc_admission_retired')",
+            [],
+            |r| r.get::<_, bool>(0),
+        )
+    })?;
+    if exists && retired {
         return Ok(());
     }
     store.write(|db| {
+        db.execute_batch("CREATE TABLE IF NOT EXISTS hrc_admission_retired(claim TEXT PRIMARY KEY,result BLOB NOT NULL,affected BLOB NOT NULL)")?;
+        if exists { return Ok(Commit::new((),b"HRC.Admission.Retirement.Schema.1".to_vec())); }
+
         db.execute_batch("CREATE TABLE hrc_admission_policy(singleton INTEGER PRIMARY KEY CHECK(singleton=1),policy BLOB NOT NULL);
         CREATE TABLE hrc_admission_claims(id TEXT PRIMARY KEY,request BLOB NOT NULL,invitation BLOB NOT NULL,registration BLOB,result BLOB,expires INTEGER NOT NULL);
         CREATE TABLE hrc_agent_consents(id TEXT PRIMARY KEY,request BLOB NOT NULL,actor BLOB NOT NULL,receipt BLOB NOT NULL,expires INTEGER NOT NULL,used INTEGER NOT NULL DEFAULT 0);

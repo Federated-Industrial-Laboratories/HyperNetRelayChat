@@ -343,6 +343,41 @@ fn live_private_socket_enrolment_preserves_home_ownership_and_exact_retry() {
     )
     .unwrap();
     assert!(matches!(enrolled.result, a::Status::Complete { .. }));
+    witness(&directory, &clock_key);
+    let retired = control::request(
+        &binding_path,
+        &a::Request::new(a::Action::Revoke {
+            claim_id: local.request.claim_id,
+        }),
+    )
+    .unwrap();
+    assert!(
+        matches!(retired.result,a::Status::Revoked{account:Some(account),more_affected:false,..}if account==local.request.identity.account)
+    );
+    witness(&directory, &clock_key);
+    let retry = control::request(
+        &binding_path,
+        &a::Request::new(a::Action::Status {
+            claim_id: local.request.claim_id,
+        }),
+    )
+    .unwrap();
+    assert_eq!(
+        serde_json::to_value(&retired).unwrap(),
+        serde_json::to_value(retry).unwrap()
+    );
+    assert!(
+        shared
+            .home
+            .lock()
+            .unwrap()
+            .endpoint(
+                local.request.identity.account,
+                local.request.identity.endpoint
+            )
+            .unwrap()
+            .is_none()
+    );
     drop(server);
     assert!(!directory.join("Admission.sock").exists());
     drop(shared);
