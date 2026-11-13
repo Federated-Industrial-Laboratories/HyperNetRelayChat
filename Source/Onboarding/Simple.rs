@@ -15,6 +15,8 @@ pub struct Binding {
     pub version: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initial_nickname: Option<String>,
     pub directory: PathBuf,
     pub suite: PathBuf,
     pub runtime_configuration: PathBuf,

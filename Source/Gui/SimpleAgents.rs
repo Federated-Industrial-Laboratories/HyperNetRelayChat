@@ -28,7 +28,10 @@ enum Outcome {
 impl App {
     pub(crate) fn configure_simple_server(&mut self, profile: &Path) {
         match simple::load(profile) {
-            Ok(binding) => self.grant.simple.binding = binding,
+            Ok(binding) => {
+                self.initial_nickname(binding.as_ref().and_then(|b| b.initial_nickname.clone()));
+                self.grant.simple.binding = binding;
+            }
             Err(error) => self.grant.simple.message = Some(error.to_string()),
         }
     }

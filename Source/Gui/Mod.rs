@@ -10,6 +10,8 @@ mod conversation;
 mod editor;
 #[path = "Encryption.rs"]
 mod encryption;
+#[path = "InitialNickname.rs"]
+mod initial_nickname;
 #[path = "PageLinks.rs"]
 pub(crate) mod page_links;
 #[path = "Panels.rs"]
@@ -37,6 +39,7 @@ impl App {
         theme::configure_selected(ctx, &model.snapshot.preferences, &themes);
         Self {
             nickname: model.snapshot.nickname.clone(),
+            initial_nickname: Default::default(),
             model,
             query: String::new(),
             room_name: String::new(),
@@ -99,6 +102,7 @@ impl App {
 pub(crate) struct App {
     model: Model,
     nickname: String,
+    initial_nickname: initial_nickname::InitialNickname,
     query: String,
     room_name: String,
     private_group: bool,
@@ -124,9 +128,14 @@ pub(crate) struct App {
 }
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
+        let previous_nickname = self.model.snapshot.nickname.clone();
         if self.model.tick() {
             self.sound.play();
         }
+        if self.nickname == previous_nickname {
+            self.nickname = self.model.snapshot.nickname.clone();
+        }
+        self.initial_nickname_logic();
         self.simple_agent_logic(ctx);
         if self.model.notified {
             ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(

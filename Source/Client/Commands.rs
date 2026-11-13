@@ -244,6 +244,7 @@ impl Worker {
                     &conversations::Topic { topic },
                 )?;
             }
+            InitializeNickname(nickname) => return self.initialize_nickname(&nickname),
             SetNickname(nickname) => {
                 self.effect(
                     Operation::AccountSetNickname,
