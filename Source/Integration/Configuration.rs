@@ -13,7 +13,7 @@ use std::{
 };
 use zeroize::Zeroize;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Scope {
     pub rooms: Vec<RoomId>,
@@ -179,8 +179,19 @@ pub fn initialise(profile: &Path, directory: &Path) -> Result<PathBuf> {
     if !matches!(p.registration.classification, AccountClass::Agent { .. }) {
         return Err(Error::AgentRequired);
     }
-    files::directory(directory, true).map_err(|_| Error::State)?;
+    files::directory(directory, !directory.exists()).map_err(|_| Error::State)?;
     let path = directory.join("Configuration.json");
+    let _lock = lock(&path)?;
+    if path.exists() {
+        let old = Configuration::load(&path)?;
+        if old.profile != profile
+            || old.account != p.registration.account
+            || old.endpoint != p.registration.endpoint
+        {
+            return Err(Error::Conflict);
+        }
+        return Ok(path);
+    }
     let config = Configuration {
         version: 1,
         profile: profile.to_owned(),
@@ -195,33 +206,181 @@ pub fn issue(path: &Path, scope: Scope, output: &Path) -> Result<Id> {
     scope.validate()?;
     let _lock = lock(path)?;
     let mut c = Configuration::load(path)?;
-    c.credentials.retain(|binding| binding.enabled);
-    if c.credentials.len() >= 8 || output.exists() {
-        return Err(Error::Capacity);
-    }
-    let credential = Credential {
-        version: 1,
-        id: Id::random().map_err(|_| Error::State)?,
-        secret: Id::random().map_err(|_| Error::State)?.as_hex(),
+    let pending = path.with_file_name("Issuance.json");
+    let request = if pending.exists() {
+        let request: Issuance = files::json(&pending).map_err(|_| Error::State)?;
+        if request.configuration != path
+            || request.profile != c.profile
+            || request.output != output
+            || request.scope != scope
+            || request.account != c.account
+            || request.endpoint != c.endpoint
+        {
+            return Err(Error::Conflict);
+        }
+        request
+    } else {
+        // An old completed/revoked export can only recover an already-active
+        // identical binding. It cannot mint a new grant or restore a revocation.
+        if output.exists() {
+            let credential = Credential::load(output)?;
+            let binding = c.authenticate(&credential)?;
+            if binding.scope != scope {
+                return Err(Error::Conflict);
+            }
+            return Ok(credential.id);
+        }
+        if c.credentials.iter().filter(|b| b.enabled).count() >= 8 {
+            return Err(Error::Capacity);
+        }
+        files::directory(output.parent().ok_or(Error::Invalid)?, false)
+            .map_err(|_| Error::State)?;
+        let request = Issuance {
+            configuration: path.to_owned(),
+            profile: c.profile.clone(),
+            account: c.account,
+            endpoint: c.endpoint,
+            output: output.to_owned(),
+            scope,
+            credential: Credential {
+                version: 1,
+                id: Id::random().map_err(|_| Error::State)?,
+                secret: Id::random().map_err(|_| Error::State)?.as_hex(),
+            },
+        };
+        // Persist the one exact token before exporting or enabling it.
+        let bytes =
+            zeroize::Zeroizing::new(serde_json::to_vec(&request).map_err(|_| Error::State)?);
+        files::create(&pending, &bytes).map_err(|_| Error::State)?;
+        request
     };
-    // A failed export never enables a credential whose secret was not delivered.
-    files::create_json(output, &credential).map_err(|_| Error::State)?;
-    c.credentials.push(Binding {
-        id: credential.id,
-        digest: digest(credential.secret.as_bytes()),
-        scope,
-        enabled: true,
-    });
-    save(path, &c)?;
-    Ok(credential.id)
+    complete_issue(path, &pending, &mut c, request)
+}
+/// Inspect a private credential without returning its token to the caller/UI.
+pub fn credential_scope(path: &Path, credential: &Path) -> Result<(Id, Scope)> {
+    let credential = Credential::load(credential)?;
+    let binding = Configuration::load(path)?.authenticate(&credential)?;
+    Ok((binding.id, binding.scope))
+}
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct Issuance {
+    configuration: PathBuf,
+    profile: PathBuf,
+    account: AccountId,
+    endpoint: Id,
+    output: PathBuf,
+    scope: Scope,
+    credential: Credential,
+}
+fn complete_issue(
+    path: &Path,
+    pending: &Path,
+    config: &mut Configuration,
+    request: Issuance,
+) -> Result<Id> {
+    if request.credential.version != 1 || Id::from_hex(&request.credential.secret).is_err() {
+        return Err(Error::State);
+    }
+    let pin = digest(request.credential.secret.as_bytes());
+    let existing = config
+        .credentials
+        .iter()
+        .find(|b| b.id == request.credential.id);
+    if existing.is_some_and(|b| !b.enabled || b.digest != pin || b.scope != request.scope) {
+        return Err(Error::Denied);
+    }
+    export_exact(&request.output, &request.credential)?;
+    if existing.is_none() {
+        config.credentials.retain(|b| b.enabled);
+        if config.credentials.len() >= 8 {
+            return Err(Error::Capacity);
+        }
+        config.credentials.push(Binding {
+            id: request.credential.id,
+            digest: pin,
+            scope: request.scope,
+            enabled: true,
+        });
+        save(path, config)?;
+    }
+    // Configuration is durable before the intent disappears. A lost cleanup
+    // simply retries the same token; explicit revocation never re-enables it.
+    fs::remove_file(pending)
+        .and_then(|()| {
+            fs::File::open(
+                pending
+                    .parent()
+                    .ok_or_else(|| std::io::Error::other("parent"))?,
+            )?
+            .sync_all()
+        })
+        .map_err(|_| Error::State)?;
+    Ok(request.credential.id)
+}
+fn export_exact(output: &Path, credential: &Credential) -> Result<()> {
+    let bytes = zeroize::Zeroizing::new(serde_json::to_vec(credential).map_err(|_| Error::State)?);
+    if output.exists() {
+        let retained =
+            zeroize::Zeroizing::new(files::read(output, 16384).map_err(|_| Error::State)?);
+        if let Ok(exported) = serde_json::from_slice::<Credential>(&retained) {
+            if exported.version != credential.version
+                || exported.id != credential.id
+                || exported.secret != credential.secret
+            {
+                return Err(Error::Conflict);
+            }
+        } else if bytes.starts_with(&retained) {
+            // A partial export can be repaired only from its durable exact
+            // issuance intent, with the same bytes and no replacement token.
+            let temporary = output.with_file_name(format!(
+                ".credential-{}",
+                Id::random().map_err(|_| Error::State)?
+            ));
+            files::create(&temporary, &bytes).map_err(|_| Error::State)?;
+            fs::rename(&temporary, output).map_err(|_| Error::State)?;
+        } else {
+            return Err(Error::Conflict);
+        }
+        OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(output)
+            .and_then(|f| f.sync_all())
+            .and_then(|()| {
+                fs::File::open(
+                    output
+                        .parent()
+                        .ok_or_else(|| std::io::Error::other("parent"))?,
+                )?
+                .sync_all()
+            })
+            .map_err(|_| Error::State)?;
+    } else {
+        files::create(output, &bytes).map_err(|_| Error::State)?;
+    }
+    Ok(())
 }
 pub fn revoke(path: &Path, id: Id) -> Result<()> {
     let _lock = lock(path)?;
     let mut c = Configuration::load(path)?;
-    c.credentials
-        .iter_mut()
-        .find(|b| b.id == id)
-        .ok_or(Error::Invalid)?
-        .enabled = false;
-    save(path, &c)
+    let pending = path.with_file_name("Issuance.json");
+    let cancelling = files::json::<Issuance>(&pending).ok().is_some_and(|p| {
+        p.configuration == path
+            && p.account == c.account
+            && p.endpoint == c.endpoint
+            && p.credential.id == id
+    });
+    if let Some(binding) = c.credentials.iter_mut().find(|b| b.id == id) {
+        binding.enabled = false;
+        save(path, &c)?;
+    } else if !cancelling {
+        return Err(Error::Invalid);
+    }
+    if cancelling {
+        fs::remove_file(&pending)
+            .and_then(|()| fs::File::open(pending.parent().expect("parent"))?.sync_all())
+            .map_err(|_| Error::State)?;
+    }
+    Ok(())
 }

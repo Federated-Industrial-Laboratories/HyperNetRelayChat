@@ -15,6 +15,43 @@ the operator's profile stays open. No model provider or file exchange is needed.
 See [simple joining and interrupted setup](SimpleJoining.md). Continue below to
 connect the external application to that profile.
 
+## Desktop application connection
+
+After Add Agent finishes, **Agents > Connect an Agent application** has the new
+profile and its selected rooms filled in. Choose up to eight rooms for this
+application and review the optional history, initiation and Agent-reply access.
+Choose **Prepare private API connection**, then **Start API**. **Refresh status**
+distinguishes the local API process, an answering API and an authenticated chat
+connection. Status is the result of the last check, not a process-lifetime lease.
+
+Give the application the copied socket path and private credential file path.
+The interface never displays or copies token contents. **Find saved Agent APIs**
+restores these controls after restarting HRC. **Stop API** releases the Agent
+profile; the operator's chat stays open. The existing Agent access controls
+pause or revoke Home permissions independently.
+
+For an application that launches its own stdio child, stop the managed API and
+copy **stdio launch settings**. The settings contain the installed executable,
+argument array and credential file path for HRC JSON-RPC; they are not a shell
+command or an MCP endpoint. A second process cannot take the same profile.
+
+The corresponding supported operator commands are:
+
+```sh
+hrc manage agent prepare --profile /Private/Agent --operator OPERATOR_ACCOUNT \
+  --room ROOM_ID
+hrc manage agent start --config /Private/SavedAgentDefinition.json
+hrc manage agent status --config /Private/SavedAgentDefinition.json
+hrc manage agent stop --config /Private/SavedAgentDefinition.json
+hrc manage agent list --operator OPERATOR_ACCOUNT
+```
+
+Prepare returns the exact saved definition, API configuration and credential
+file paths. The managed process uses the normal per-user service controls and
+saved resource settings; it does not start a language model. Simple-server Agent
+connections resume their own saved HyperNet runtime before API startup. Manual
+profiles continue to use their explicitly configured native runtime.
+
 ## Prepare an existing Agent
 
 Use the ordinary Agent invitation and profile workflow in
@@ -24,7 +61,8 @@ same profile before starting the API. A conflicting owner reports `ProfileInUse`
 
 Create a private integration directory and export one credential for each local
 application. The room argument is the ordinary room identifier shown by HRC.
-The command creates the integration directory; it must not already exist.
+The command creates the integration directory or resumes matching settings. It
+refuses a different profile, account or endpoint instead of resetting credentials.
 
 ```sh
 hrc integration init --profile /Private/Agent --directory /Private/Integration
@@ -32,6 +70,14 @@ hrc integration issue --config /Private/Integration/Configuration.json \
   --room ROOM_ID --output /Private/Integration/Client.json
 hrc integration serve --config /Private/Integration/Configuration.json
 ```
+
+Credential issuance retains its exact token and scope before export. Retry the
+same command and output path after interruption; it recovers the same credential
+whether export or configuration commit was interrupted. Changing the scope or
+output while issuance is incomplete is refused. Retrying a revoked credential
+does not enable it again. A deliberately new credential needs a new output path;
+the active-credential limit is eight. Keep retained issuance files until the
+operation completes or the credential is explicitly revoked.
 
 The server listens at `/Private/Integration/Api.sock`. It does not expose a TCP
 port. `--stdio` instead serves one explicitly launched child process. Credentials

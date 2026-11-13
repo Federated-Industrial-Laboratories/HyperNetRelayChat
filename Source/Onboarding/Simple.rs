@@ -118,6 +118,32 @@ pub fn join(suite: &Path, location: Option<&str>, cancel: &AtomicBool) -> Result
         native::input_json(suite, &args, &json!({"location":location}), cancel, None)?;
     joined.checked(suite)
 }
+/// Open shared hosting without changing this HRC window or selecting a chat profile.
+pub fn host_desktop(suite: &Path, cancel: &AtomicBool) -> Result<()> {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Closed {
+        status: String,
+    }
+    let executable = std::env::current_exe().map_err(|_| Error::RuntimeMissing)?;
+    native::executable(&executable)?;
+    let response: Closed = native::input_json(
+        suite,
+        &native::strings(&[
+            "join",
+            "host-desktop",
+            "--hrc-executable",
+            &native::path(&executable)?,
+        ]),
+        &json!({}),
+        cancel,
+        None,
+    )?;
+    if response.status != "Closed" {
+        return Err(Error::NativeRefused);
+    }
+    Ok(())
+}
 pub fn status(
     binding: &Binding,
     profile: &Path,

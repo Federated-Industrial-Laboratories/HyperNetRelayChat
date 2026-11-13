@@ -13,6 +13,8 @@ pub(crate) mod models;
 pub(crate) mod network;
 #[path = "Packages.rs"]
 pub(crate) mod packages;
+#[path = "Participants.rs"]
+pub(crate) mod participants;
 #[path = "Units.rs"]
 pub(crate) mod units;
 pub(crate) use commands::{Command, run};

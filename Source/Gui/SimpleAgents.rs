@@ -51,6 +51,11 @@ impl App {
                         Some("Choose an unfinished proposal below to review and resume it.".into());
                 }
                 Ok(Outcome::Joined(joined)) => {
+                    if let Some(pending) = &form.selected {
+                        self.grant
+                            .api
+                            .select(joined.hrc_profile.clone(), &pending.request);
+                    }
                     form.joined = Some(joined);
                     form.selected = None;
                     form.pending.clear();
@@ -128,7 +133,7 @@ impl App {
         ui.add_enabled_ui(!busy, |ui| {
             if let Some(joined) = &form.joined {
                 ui.strong("Agent connected and ready for an external application");
-                ui.label("Use this separate profile with HRC's API or CLI. The application owns this profile while running; leave the operator's chat profile open.");
+                ui.label("Prepare and start its private API in Connect an Agent application below. Leave the operator's chat profile open.");
                 ui.add(egui::Label::new(joined.hrc_profile.display().to_string()).wrap().selectable(true));
                 if components::button(ui,"Copy Agent profile path").clicked() { ui.ctx().copy_text(joined.hrc_profile.display().to_string()); }
                 ui.small("The API guide describes the private socket and stdio interfaces. Access and message attribution remain typed as Agent. Pause or revoke access below.");
