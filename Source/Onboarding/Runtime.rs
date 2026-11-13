@@ -11,7 +11,7 @@ use serde_json::json;
 use std::{
     os::unix::fs::FileTypeExt,
     path::{Path, PathBuf},
-    sync::atomic::AtomicBool,
+    sync::atomic::{AtomicBool, Ordering},
     time::{Duration, Instant},
 };
 
@@ -839,7 +839,8 @@ pub(super) fn perform(
     mut config: RuntimeConfig,
     cancel: &AtomicBool,
 ) -> Result<Completed> {
-    // One fixed operation budget; component commands cannot restart it.
+    let interactive = matches!(&task, Task::HostDesktop | Task::SimpleJoin { .. });
+    // Native setup keeps one fixed budget. Interactive windows end on close or cancel.
     let seconds = if matches!(&task, Task::PrivateInvitation { .. }) {
         600
     } else {
@@ -852,6 +853,10 @@ pub(super) fn perform(
     let mut listing = None;
     let notice = match task {
         Task::HostDesktop => {
+            let tools =
+                crate::operations::bootstrap::inspect(cancel).map_err(|_| Error::RuntimeMissing)?;
+            config.suite = tools.suite;
+            config.core = tools.core;
             super::simple::host_desktop(&config.suite, cancel)?;
             "Host window closed; saved hosting settings remain in HyperNet"
         }
@@ -874,6 +879,10 @@ pub(super) fn perform(
             "Choose a local file or folder"
         }
         Task::SimpleJoin { location } => {
+            let tools =
+                crate::operations::bootstrap::inspect(cancel).map_err(|_| Error::RuntimeMissing)?;
+            config.suite = tools.suite;
+            config.core = tools.core;
             let joined = super::simple::join(&config.suite, location.as_deref(), cancel)?;
             open = Some(super::wizard::Selection {
                 profile: joined.hrc_profile,
@@ -959,7 +968,12 @@ pub(super) fn perform(
             "Private invitation accepted. Ready for chat."
         }
     };
-    native::check(cancel, end)?;
+    if cancel.load(Ordering::Acquire) {
+        return Err(Error::Cancelled);
+    }
+    if !interactive {
+        native::check(cancel, end)?;
+    }
     Ok(Completed {
         config,
         notice,

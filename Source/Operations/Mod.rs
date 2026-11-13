@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //! User-owned setup and process control shared by the desktop and external operator commands.
 pub(crate) use crate::onboarding::native;
+#[path = "Bootstrap.rs"]
+pub(crate) mod bootstrap;
 #[path = "Bots.rs"]
 pub(crate) mod bots;
 #[path = "Commands.rs"]

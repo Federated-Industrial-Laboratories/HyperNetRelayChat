@@ -8,9 +8,12 @@ and the optional external assistant installer. Return with **Back to chat**;
 the conversation and drafts remain open while an operation runs. See
 [desktop hosting](DesktopHosting.md) and [desktop bots](DesktopBots.md).
 
-Create an endpoint profile with the [service and client setup](ConversationSetup.md)
-procedure. Each open client owns that profile's encrypted local state exclusively.
-Use separate enrolled profiles for simultaneous clients or agents.
+Choose **Join a server** for the shared address, link, QR and password workflow,
+or reopen a saved profile. See [simple joining](SimpleJoining.md) for offline
+preference, Pages and external Agent setup. Each open client owns its profile's
+encrypted local state exclusively. Use separate enrolled profiles for simultaneous
+clients or Agents. The [manual service and client setup](ConversationSetup.md)
+procedure remains available.
 
 When the host enables optional [private invitations](SelfServiceInvitations.md),
 choose **Join with a private invitation** and use a fresh private setup folder.
@@ -31,7 +34,8 @@ labelled; cached content is not proof of current room access.
 ## Conversations and drafts
 
 The conversation switcher lists available rooms and unread counts. Select a joined
-room, join an available room, or create a community room. The member list distinguishes
+room, join an available room, or create a community room when permitted. The
+ordinary simple-server preset does not permit room creation. The member list distinguishes
 agent accounts and announced presence. An absent presence announcement does not
 prove an endpoint is disconnected or that a person is away. `/presence TEXT`
 announces the current endpoint for five minutes. Account classification does not
@@ -81,8 +85,12 @@ Click a link to open the existing HyperNetSuite graphical browser. HRC uses the
 trusted Suite executable retained by this chat profile's setup. A profile without
 that configuration reports the missing setup.
 
-To browse while chat stays connected, first complete normal native admission for
-a separate Page reader. In **Settings > HyperNet Pages > Configure reader**,
+For a simple saved server, Suite creates the separate Page reader when the host
+advertises one. Links focus and reuse that reader's browser. A queued link waits
+while an interactive form is active; **Leave page and open queued link** permits
+explicit navigation. No reader folder or second admission exchange is required.
+
+For a manual profile, complete normal native admission for a separate Page reader. In **Settings > HyperNet Pages > Configure reader**,
 select **Use a separately admitted Page reader**. Choose its private native
 `Profile.json` with **Browse**, then choose **Check and save**. This selection is
 saved for the current chat profile and survives reopening HRC. It does not stop
@@ -99,8 +107,9 @@ checks current authority and verifies the publication when the Page is opened.
 
 The reader needs its own current Page and authority routes and reader grant from
 the network operator. A chat link and this setting grant no access. Close the
-reader's existing browser window before opening another Page: one native network
-profile can serve only one active client. Navigation within that browser remains
+manual reader's existing browser window before opening another Page: one native
+network profile can serve only one active client. Simple saved readers use their
+private navigation channel to reuse the same owner instead. Navigation within that browser remains
 available while chat continues. Another-network link is refused; select the
 corresponding chat and reader profiles explicitly.
 

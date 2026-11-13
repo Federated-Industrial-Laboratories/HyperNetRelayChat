@@ -124,12 +124,12 @@ fn shell_and_mount_metacharacters_do_not_become_host_configuration() {
     assert!(serde_json::from_value::<Configuration>(value).is_err());
 }
 #[test]
-fn embedded_verifiers_match_the_supported_released_sources() {
+fn embedded_verifiers_match_the_supported_upstream_sources() {
     for (data, expected) in [
         (
             include_bytes!("../../../../Source/Operations/Network/Package/Core/Bundle.py")
                 .as_slice(),
-            "0bbcf290e8667912bf6ac51535f2af92334133f575ad1755402f6a0bff93aae6",
+            "aa278629cae5afaa390de96c7d6f77c0e63aad88506e96e13ad2563a51f80629",
         ),
         (
             include_bytes!("../../../../Source/Operations/Network/Package/Core/PackageTrust.py")
@@ -139,12 +139,12 @@ fn embedded_verifiers_match_the_supported_released_sources() {
         (
             include_bytes!("../../../../Source/Operations/Network/Package/Suite/Bundle.py")
                 .as_slice(),
-            "5e5fc31890a927b45156c5495a8bce217b55e5f14a400363903c13e2442965fa",
+            "8e3dfd5bab246db067600e550350e3c9d9efa33b6e69554a73e2822c26d74c47",
         ),
         (
             include_bytes!("../../../../Source/Operations/Network/Package/Suite/PackageTrust.py")
                 .as_slice(),
-            "84600aa9eec08d549d19a04534ae2ecf1644945687174e6d79a3bb17c1106833",
+            "5f58c67ea68ceca21ed33aa5229d62c17ea647d028dc74a9a637f5aaeb3e8e2d",
         ),
     ] {
         assert_eq!(engine::digest(data), expected);

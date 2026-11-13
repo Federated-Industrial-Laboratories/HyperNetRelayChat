@@ -74,6 +74,48 @@ class PackagePaths(unittest.TestCase):
                              "Binary retains private build paths; rebuild with package path remapping")
             self.assertFalse(output.exists())
 
+    def test_native_loader_contract_checks_real_elf_dependencies(self):
+        self.assertIn("libc.so.6", Package.runtime_dependencies(Path("/usr/bin/true")))
+        with self.assertRaisesRegex(SystemExit, "outside the native hosting runtime"):
+            Package.runtime_dependencies(Path("/usr/bin/openssl"))
+
+    def test_cli_refuses_dynamic_crypto_before_executing_the_binary(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            output = directory / "package.tar.gz"
+            result = subprocess.run([
+                sys.executable, "-B", str(ROOT / "Tools/Package.py"),
+                "--binary", "/usr/bin/openssl", "--sqlcipher-source", str(directory),
+                "--output", str(output),
+            ], capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(result.stdout, "")
+            self.assertEqual(result.stderr.strip(),
+                             "Binary requires shared libraries outside the native hosting runtime; "
+                             "rebuild with Tools/Environment.sh and static OpenSSL")
+            self.assertFalse(output.exists())
+
+    def test_environment_requires_major_three_with_real_pkg_config(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            library = directory / "lib"
+            library.mkdir()
+            for name in ["libcrypto.a", "libsqlcipher.a"]:
+                (library / name).write_bytes(b"fixture archive presence")
+            environment = dict(os.environ, PKG_CONFIG_PATH=str(directory),
+                               PKG_CONFIG_LIBDIR=str(directory), HRC_NATIVE_PREFIX=str(directory))
+            for version, accepted in [("3.0.13", True), ("4.0.0", False), ("1.1.1", False)]:
+                (directory / "libcrypto.pc").write_text(
+                    f"libdir={library}\nName: OpenSSL-libcrypto\nDescription: Version boundary fixture\n"
+                    f"Version: {version}\nLibs: -L${{libdir}} -lcrypto\n")
+                result = subprocess.run([
+                    "bash", "-ec", 'source "$1"; test "$HRC_CRYPTO_LIB_DIR" = "$2"',
+                    "environment-check", str(ROOT / "Tools/Environment.sh"), str(library),
+                ], env=environment, capture_output=True, text=True)
+                self.assertEqual(result.returncode == 0, accepted, result.stderr)
+                if not accepted:
+                    self.assertIn("Install the OpenSSL 3 development package", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

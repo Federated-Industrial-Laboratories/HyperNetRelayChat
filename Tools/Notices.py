@@ -4,6 +4,7 @@
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import subprocess
 import tomllib
@@ -15,6 +16,40 @@ NAMES = ("license", "licence", "copying", "notice", "copyright")
 
 def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def native_crypto():
+    """Record the selected distribution archive used by the normal static build."""
+    def output(*args):
+        return subprocess.check_output(args, text=True).strip()
+
+    version = output("pkg-config", "--modversion", "libcrypto")
+    directory = Path(output("pkg-config", "--variable=libdir", "libcrypto"))
+    if not version.startswith("3.") or os.environ.get("HRC_CRYPTO_LIB_DIR") != str(directory):
+        raise ValueError("Source Tools/Environment.sh with the build's OpenSSL 3 selection before packaging")
+    archive = directory / "libcrypto.a"
+    if not archive.is_file():
+        raise ValueError("The selected OpenSSL static archive is unavailable")
+    owner = output("dpkg-query", "-S", str(archive.resolve())).split(": ", 1)[0]
+    if owner.split(":", 1)[0] != "libssl-dev":
+        raise ValueError("Package OpenSSL must be the maintained distribution development archive")
+    binary, binary_version, source, source_version = output(
+        "dpkg-query", "-W", "-f=${binary:Package}\t${Version}\t${source:Package}\t${source:Version}",
+        owner).split("\t")
+    if source != "openssl":
+        raise ValueError("OpenSSL source package identity differs")
+    copyright_text = (Path("/usr/share/doc") / owner.split(":", 1)[0] / "copyright").read_text()
+    apache = Path("/usr/share/common-licenses/Apache-2.0").read_text()
+    if "License: Apache-2.0" not in copyright_text or "Apache License" not in apache:
+        raise ValueError("OpenSSL distribution notices are unavailable")
+    metadata = {"name": "OpenSSL", "version": version, "linkage": "static",
+                "archiveSha256": digest(archive), "binaryPackage": binary,
+                "binaryVersion": binary_version, "sourcePackage": source,
+                "sourceVersion": source_version, "license": "Apache-2.0"}
+    text = ("\n" + "=" * 72 + "\nOpenSSL " + version + " (statically linked libcrypto)\n"
+            "Distribution source: " + source + " " + source_version + "\n"
+            "Source: https://www.openssl.org/source/\n\n" + copyright_text + "\n" + apache + "\n")
+    return metadata, text
 
 
 def notices(sqlcipher):
@@ -88,6 +123,8 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     content, _, _ = notices(args.sqlcipher_source.resolve(strict=True))
+    _, crypto_notice = native_crypto()
+    content += crypto_notice
     with args.output.open("x") as output:
         output.write(content)
 

@@ -1,12 +1,38 @@
 # HRC HyperNet integration contract map
 
-Revision 7, 5 November 2026. [Product plan](ProductPlan.md) · [Protocol contract](ProtocolPermissions.md)
+[Product plan](ProductPlan.md) · [Protocol contract](ProtocolPermissions.md)
 
-This map records the integration boundary used by HRC 0.1.0 with the required
-Core 0.10.2 and Suite 0.10.1 releases. Source links pin their published merge commits. The
-runtime code below passed the bounded native HRC pilot; final upstream release
-changes only update documentation. The [integration profile](IntegrationProfile.md#8-linux-pilot-qualification)
-records the measured topology, workload, results and limits.
+HRC 0.3.0 requires coordinated Core and Suite 0.11.0 for shared joining and
+persistent native access. The existing version-2 application companion and
+`checkAuthority-v2` remain mandatory for chat. Native admission, policy, keys,
+route renewal and Page profiles belong to Suite/Core; HRC never replaces their
+authority with a browser connection, password check or cached local status.
+
+The shared join listener exchanges bounded admission artifacts over HTTPS.
+Chat and Page payloads remain on HyperNet. A private authenticated registrar
+invokes HRC's fixed [live admission extension](LiveAdmission.md), binding its
+certified native principal to the exact locally generated HRC identity and
+restricted Person or Agent class. Public inputs cannot select executables,
+private binding paths, account privileges or administrator grants.
+
+Persistent validity requires explicit supported features throughout the native
+committee and client tools. Membership, every grant ancestor, application consent
+and hosting consent must permit the selected lifetime. Short-lived vouchers,
+clock observations, challenges and action receipts remain finite. Removal,
+withdrawal and current policy still deny access. Old clients and voters refuse
+new tagged validity, scoped admission records and stream origins. Existing finite
+networks remain readable without reset or identity migration; do not downgrade
+state after activating the new features. Existing finite records keep their bounds; read the native [persistent-access migration](https://github.com/Federated-Industrial-Laboratories/HyperNetSuite/blob/v0.11.0/Documentation/PersistentAccess.md)
+before adopting that mode.
+
+## Historical payload and fresh-check baseline
+
+The following source map records the boundary qualified for HRC 0.1.0 with Core
+0.10.2 and Suite 0.10.1. Source links pin those original published merge commits.
+The [integration profile](IntegrationProfile.md#8-linux-pilot-qualification)
+records their measured topology, workload, results and limits. Retained source
+and qualification identifiers do not certify the 0.11.0 runtime or its new
+admission/persistent-access features.
 
 | Product | Qualified runtime source | Required release |
 | --- | --- | --- |
@@ -53,7 +79,8 @@ The additive 0.10.0 check interface needs matching Core endpoints and Suite comp
 
 ## Optional admission artifact exchange
 
-HRC 0.2.2 can expose a separately enabled TLS 1.3 invitation endpoint. It exchanges
+The retained HRC v1 self-service mode can expose a separately enabled TLS 1.3
+invitation endpoint. It exchanges
 only public admission, registration and route-renewal artifacts before or between
 native connections. A private invitation pins its authority, exact leaf certificate
 and network bootstrap; normal certificate validity and IP checks still apply.
@@ -64,7 +91,13 @@ authority checks. The manual file exchange remains supported. See
 
 ## Application identity and renewal
 
-An application admission binds its own key, owner and exact grant, with validity at most seven days and within grant validity. Applications have no further delegation authority. Same-rights renewal requires explicit owner/application consent; it does not enlarge rights or permit unattended consent. Withdrawal remains restrictive, and withdrawn application keys cannot be reused. [Application lifecycle](https://github.com/Federated-Industrial-Laboratories/HyperNet/blob/4cf491891e2b2c5a21cba339c3e0dd2730fed370/Documentation/Applications.md)
+In the finite/manual mode, application admission binds its key, owner and exact
+grant, with validity at most seven days and within grant validity. Applications
+have no further delegation authority. Same-rights renewal requires the original
+owner/application consent scope and cannot enlarge rights. The explicit 0.11.0
+persistent mode may retain consent until withdrawal only when every required
+ancestor permits it; finite proof refresh does not grant new consent. Withdrawal
+remains restrictive, and withdrawn application keys cannot be reused. [Application lifecycle](https://github.com/Federated-Industrial-Laboratories/HyperNet/blob/4cf491891e2b2c5a21cba339c3e0dd2730fed370/Documentation/Applications.md)
 
 Each HRC agent that requires independent transport attribution needs its own admitted principal and companion/profile. Sharing a human's companion authenticates the same principal and cannot prove a separate agent. HRC's account/endpoint enrolment must bind that principal explicitly; no caller-supplied display name or represented-account field can do so.
 
@@ -173,6 +206,6 @@ HyperNet's current federation copies explicitly shared approved Pages. Its treat
 
 ## Platform and evidence gate
 
-Suite's inspected release manifest uses Rust edition 2024 with `rust-version = 1.95`, eframe 0.37.0, Crossterm 0.29.0 and OpenMLS 0.9.1. These are inspected dependency facts, not HRC dependency commitments. The qualified family is native Ubuntu x86_64 within its documented limits; HRC has its own bounded qualification in the integration profile. [Manifest](https://github.com/Federated-Industrial-Laboratories/HyperNetSuite/blob/ae11f4ab11a3dff6c537e173a1952add0a03c266/Cargo.toml) · [Platform scope](https://github.com/Federated-Industrial-Laboratories/HyperNetSuite/blob/ae11f4ab11a3dff6c537e173a1952add0a03c266/ReadMe.md)
+The historical inspected Suite manifest uses Rust edition 2024 with `rust-version = 1.95`, eframe 0.37.0, Crossterm 0.29.0 and OpenMLS 0.9.1. These are inspected dependency facts, not HRC dependency commitments. The qualified family is native Ubuntu x86_64 within its documented limits; HRC has its own bounded qualification in the integration profile. [Manifest](https://github.com/Federated-Industrial-Laboratories/HyperNetSuite/blob/ae11f4ab11a3dff6c537e173a1952add0a03c266/Cargo.toml) · [Platform scope](https://github.com/Federated-Industrial-Laboratories/HyperNetSuite/blob/ae11f4ab11a3dff6c537e173a1952add0a03c266/ReadMe.md)
 
 The integration checks must demonstrate one exact admitted endpoint binding, successful/denied stream admission, narrow grant ancestry, permission expiry/revocation, cancellation, explicit renewal, same-principal versus distinct-agent attribution, and constrained receiving/sending topology. Exercise malformed IPC, path/socket replacement and size bounds at the adapter boundary. Preserve genuine transport outcomes and exact source identities; a fake transport test cannot establish this integration.

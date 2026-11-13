@@ -13,6 +13,22 @@ The source inventory includes archive checksums from `Cargo.lock`. The MPL-2.0
 HPKE sources are included in the binary package under `ThirdPartySources/` with
 their declared licence and the full licence text.
 
+The normal build statically links SQLCipher's OpenSSL 3 `libcrypto` dependency.
+`Tools/Environment.sh` selects the distribution development archive through
+`pkg-config`; `build.rs` requires it and records it as a rebuild input. Packaging
+uses that same selection and adds the archive digest, exact binary/source package
+versions, package copyright notice and complete Apache 2.0 licence. This notice
+collection requires Debian-format `libssl-dev` ownership and licence files.
+The metadata identifies selected build inputs; it does not establish binary
+provenance independently of the trusted build.
+
+Before executing the candidate, the packager reads its ELF dependency table and
+requires only the libc, libm, libgcc and loader libraries in the native Core image.
+A shared `libcrypto` or another undeclared loader dependency is refused. Package
+qualification also runs the executable and an actual encrypted-store operation
+inside the unchanged native image; ELF metadata alone does not exercise crypto
+provider initialisation or SQLCipher.
+
 `NoticeSources.json` maps exact crate versions to source URLs and SHA-256 digests.
 The filenames are content hashes to share identical texts without changing their
 content. These are licence files, not alternate dependency implementations.
@@ -37,3 +53,31 @@ and an OpenSSH signature, `SHA256SUMS.sig`. The publisher principal is
 Publish `Documentation/PublisherKey.txt` as `PublisherKey.txt` beside the assets.
 The installation guide pins its fingerprint and verifies the signature before
 all listed checksums. The package tool does not load publisher signing keys.
+
+## Coordinated native payload
+
+Pass `--native-packages /Absolute/Packages` to the existing package command to
+include the coordinated Core and Suite sets. The folder contains `Core/` and
+`Suite/`, each with its exact supported `.tar`, `.tar.sig`, `.target.json`,
+`.target.json.sig` and `Publisher.pub`. Supported versions come from the built
+HRC executable's normal capabilities command. HRC's existing pinned native
+verifier checks each archive before assembly; signed update targets are retained
+for the normal installer's policy, validity and rollback checks.
+
+Only those ten bounded regular files enter the package. Adjacent files, keys,
+profiles and logs are excluded. All included bytes receive entries in the same
+`Package.json` inventory as HRC, and the outer release checksum signature covers
+the complete archive. No second manifest or alternative signature verifier is
+introduced. The native source/release notices remain inside their signed packages.
+
+`Tools/Install.sh` detects a complete adjacent payload and calls the normal
+`hrc install --native-packages` entry. An incomplete coordinated payload refuses
+before starting installation. Packages with no native payload keep the existing
+launcher-only behaviour. The first HRC GUI also supplies a folder chooser and
+explicit review for this same installer. Suite installs directly into its final
+content-addressed prefix; HRC does not create a second bootstrap installation.
+
+The shared `Installation.json` is published only after both native targets are
+admitted. It is a location index, not executable trust: HRC derives the exact
+Suite prefix from its archive identity and verifies that candidate with the
+pinned publisher before invoking Suite's own installed-state inspection.

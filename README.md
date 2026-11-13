@@ -5,11 +5,11 @@
 <p align="center">Rooms, private conversations and scoped agents across independently administered HyperNets.</p>
 
 <p align="center">
-  <img src=".github/assets/badges.svg" width="720" alt="Apache 2.0 | Version 0.2.2 | Rust 1.96 | HyperNet transport">
+  <img src=".github/assets/badges.svg" width="720" alt="Apache 2.0 | Version 0.3.0 | Rust 1.96 | HyperNet transport">
 </p>
 
 <p align="center">
-  <a href="https://github.com/Federated-Industrial-Laboratories/HyperNetRelayChat/releases/tag/v0.2.2">Linux 0.2.2</a> &middot;
+  <a href="https://github.com/Federated-Industrial-Laboratories/HyperNetRelayChat/releases/tag/v0.3.0">Linux 0.3.0</a> &middot;
   <a href="Documentation/Installation.md">Install</a> &middot;
   <a href="Documentation/Interfaces.md">Use HRC</a> &middot;
   <a href="Documentation/DesktopHosting.md">Host</a> &middot;
@@ -26,10 +26,10 @@ conversation and permission rules. Chat transport stays on HyperNet, including
 explicitly federated rooms.
 
 > [!NOTE]
-> HRC 0.2.2 adds optional self-service invitations to desktop setup, native hosting, model adapters and operator controls.
+> HRC 0.3.0 adds shared link, QR and password joining, saved servers, and separately keyed external Agent applications.
 > The earlier [bounded native Linux pilot](Documentation/IntegrationProfile.md#8-linux-pilot-qualification)
 > retains its original measured version, topology and workload scope.
-> Core 0.10.4 and Suite 0.10.3 are the supported hosting pair. Source and signed
+> Core 0.11.0 and Suite 0.11.0 are the supported hosting pair. Source and signed
 > release packages are public under Apache-2.0.
 
 ## Capabilities
@@ -52,9 +52,10 @@ explicitly federated rooms.
 | --- | --- |
 | Chat from the desktop | [Install HRC](Documentation/Installation.md), open its application-menu entry, then use the guided setup or an existing profile |
 | Change the desktop appearance | Choose one of 14 light/dark palettes or import a validated JSON [theme](Documentation/Themes.md) from Settings |
-| Create or operate a network | Open **Operations > HyperNets** and follow [desktop hosting](Documentation/DesktopHosting.md) for native packages, setup, invitations and renewal |
+| Join or return to a server | Use **Join a server** and [saved-server controls](Documentation/SimpleJoining.md) for link, QR or password access |
+| Create or operate a network | Choose **Create or manage a server** and follow [desktop hosting](Documentation/DesktopHosting.md); finite/manual hosting remains available |
 | Run a local model bot | Configure a separate agent profile and local backend using [desktop bot setup](Documentation/DesktopBots.md) |
-| Connect an external agent | Use a scoped credential and the [local participant API](Documentation/ExternalParticipants.md) |
+| Connect an external Agent | Choose **Agents > Add an external Agent**, then prepare its [private application API](Documentation/ExternalParticipants.md) |
 | Get help from an external assistant | Export the optional [assistant harness](Documentation/ExternalAssistant.md) for your installed coding assistant |
 | Integrate an application | Read the [protocol and permissions](Documentation/ProtocolPermissions.md) and [wire contract](Documentation/WireProtocol.md) |
 
@@ -66,15 +67,18 @@ The assistant does not receive chat access or administrator authority by being i
 
 ## Install
 
-Download the [Linux 0.2.2 release](https://github.com/Federated-Industrial-Laboratories/HyperNetRelayChat/releases/tag/v0.2.2)
+Download the [Linux 0.3.0 release](https://github.com/Federated-Industrial-Laboratories/HyperNetRelayChat/releases/tag/v0.3.0)
 and follow the [signed-package installation guide](Documentation/Installation.md).
-Install the application-menu launcher, open **HyperNet Relay Chat**, then select
-an existing profile or follow the setup wizard. **Operations** remains available
+Run the coordinated package's `Tools/Install.sh`, or use **Install native tools**
+in the first setup window. Open **HyperNet Relay Chat**, then select
+an existing profile or choose **Join a server**. **Operations** remains available
 before connecting and while chatting.
 
-Native hosting uses separately verified Core 0.10.4 and Suite 0.10.3 packages.
-Import them through **Operations > Native packages**. Joining an existing network
-requires its operator's admission. The optional assistant harness is installed
+Native hosting uses separately verified Core 0.11.0 and Suite 0.11.0 packages.
+The shared hosting window installs the coordinated signed package set;
+**Operations > Native packages** retains individual package import. A host can
+allow public, password or invitation joining with restricted default permissions.
+Manual operator approval remains available. The optional assistant harness is installed
 through **Operations > External assistant** and is separate from chat bots.
 
 The GUI supports X11 and Wayland. Package compatibility and full native-network
@@ -85,7 +89,8 @@ qualification have different scopes; the installation guide records both.
 <details>
 <summary>Source requirements and build commands</summary>
 
-Use Linux with Rust 1.96, a C compiler, Make, Tcl, Git, OpenSSL development headers,
+Use Linux with Rust 1.96, a C compiler, Make, Tcl, Git, OpenSSL 3 development headers
+and its static `libcrypto.a` archive,
 pkg-config, Fontconfig, XKB, Wayland and EGL development packages. Install fonts
 for the languages used; Noto core, CJK and colour emoji cover the supplied
 presentation checks.
@@ -118,7 +123,7 @@ silently changes to direct Internet transport. See [confidential conversations](
 
 ## Documentation and development
 
-The [release notes](Documentation/ReleaseNotes.md) describe 0.2.2 and its support
+The [release notes](Documentation/ReleaseNotes.md) describe 0.3.0 and its support
 limits. The [documentation index](Documentation/ReadMe.md) separates everyday tasks,
 operations and protocol references. The [product plan](Documentation/ProductPlan.md)
 and [integration profile](Documentation/IntegrationProfile.md) retain scope and

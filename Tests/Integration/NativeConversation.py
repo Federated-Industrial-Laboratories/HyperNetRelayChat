@@ -155,7 +155,7 @@ class Conversation:
         for name in self.profiles:
             assert self.session(name)['acting']['account'] == accounts[name]
         # Desktop host controls authenticate while the chat owns this same store.
-        with (self.profiles['Alice'] / 'Writer.lock').open('r+b') as writer:
+        with (self.profiles['Alice'] / 'Data' / 'Writer.lock').open('r+b') as writer:
             fcntl.flock(writer.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             checked = self.cli('SessionWithHistoryOpen', 'profile', 'session',
                                '--profile', self.profiles['Alice'])

@@ -6,6 +6,16 @@ export SQLCIPHER_LIB_DIR="$HRC_NATIVE_PREFIX/lib"
 export SQLCIPHER_INCLUDE_DIR="$HRC_NATIVE_PREFIX/include"
 export SQLCIPHER_STATIC=1
 export CARGO_INCREMENTAL=0
+if ! pkg-config --atleast-version=3 libcrypto || ! pkg-config --max-version=3.999 libcrypto; then
+    echo 'Install the OpenSSL 3 development package and pkg-config before building HRC.' >&2
+    return 1
+fi
+export HRC_CRYPTO_LIB_DIR
+HRC_CRYPTO_LIB_DIR=$(pkg-config --variable=libdir libcrypto)
+if [[ $HRC_CRYPTO_LIB_DIR != /* || ! -f "$HRC_CRYPTO_LIB_DIR/libcrypto.a" ]]; then
+    echo 'The selected OpenSSL development package must provide a static libcrypto.a.' >&2
+    return 1
+fi
 if [[ ! -f "$SQLCIPHER_LIB_DIR/libsqlcipher.a" ]]; then
     echo 'Build the controlled SQLCipher dependency with bash Tools/Native.sh first.' >&2
     return 1

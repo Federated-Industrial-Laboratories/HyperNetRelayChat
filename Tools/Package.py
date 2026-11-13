@@ -9,11 +9,12 @@ import mmap
 import os
 from pathlib import Path
 import re
+import stat
 import subprocess
 import tarfile
 import tomllib
 
-from Notices import ROOT, SQLCIPHER_COMMIT, digest, notices
+from Notices import ROOT, SQLCIPHER_COMMIT, digest, native_crypto, notices
 
 
 def command(*args):
@@ -58,17 +59,58 @@ def verify_build_paths(binary):
                 raise SystemExit("Binary retains private build paths; rebuild with package path remapping")
 
 
+def runtime_dependencies(binary):
+    """The same executable must load as the registrar in the native Core image."""
+    needed = re.findall(r"\(NEEDED\).*\[(.+?)\]", command("readelf", "--dynamic", str(binary)))
+    allowed = {"libc.so.6", "libm.so.6", "libgcc_s.so.1", "ld-linux-x86-64.so.2"}
+    if not needed or set(needed) - allowed:
+        raise SystemExit("Binary requires shared libraries outside the native hosting runtime; "
+                         "rebuild with Tools/Environment.sh and static OpenSSL")
+    return needed
+
+
+def native_files(directory, binary):
+    """Include only the supported signed sets; the existing runtime verifies their archives."""
+    directory = directory.resolve(strict=True)
+    versions = json.loads(command(str(binary), "manage", "capabilities"))["nativePackages"]
+    files = {}
+    inventory = {}
+    for label, product in (("Core", "HyperNet"), ("Suite", "HyperNetSuite")):
+        version = versions[label.lower()]
+        if not isinstance(version, str) or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version):
+            raise ValueError("Native package version is invalid")
+        folder = directory / label
+        if folder.is_symlink() or not folder.is_dir():
+            raise ValueError("Coordinated package needs regular Core and Suite folders")
+        base = f"{product}-{version}-linux-x86_64"
+        for name, maximum in [(base + suffix, 512 * 1024 * 1024 if suffix == ".tar" else 32768)
+                              for suffix in (".tar", ".tar.sig", ".target.json", ".target.json.sig")] + [("Publisher.pub", 8192)]:
+            path = folder / name
+            info = path.lstat()
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or not 0 < info.st_size <= maximum:
+                raise ValueError("Native package input is not a bounded regular file: " + name)
+            files[f"Packages/{label}/{name}"] = path
+        verified = json.loads(command(str(binary), "manage", "package", "preview",
+                                      "--product", label.lower(), "--downloads", str(folder)))
+        if verified.get("status") != "VerifiedArchive" or verified.get("product") != product or verified.get("version") != version:
+            raise ValueError("The existing native verifier did not confirm the selected package")
+        inventory[label.lower()] = {"product": product, "version": version, "directory": f"Packages/{label}"}
+    return files, inventory
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--build-rustflags", action="store_true",
                         help="Print encoded flags for capture in CARGO_ENCODED_RUSTFLAGS")
     parser.add_argument("--binary", type=Path)
     parser.add_argument("--sqlcipher-source", type=Path)
+    parser.add_argument("--native-packages", type=Path,
+                        help="Local coordinated Packages folder containing the exact signed Core and Suite sets")
     parser.add_argument("--output", type=Path,
                         help="New .tar.gz path; existing output is refused")
     args = parser.parse_args()
     if args.build_rustflags:
-        if any((args.binary, args.sqlcipher_source, args.output)):
+        if any((args.binary, args.sqlcipher_source, args.output, args.native_packages)):
             parser.error("Build flags do not accept package arguments")
         print(build_rustflags(), end="")
         return
@@ -80,6 +122,8 @@ def main():
     if output.suffixes[-2:] != [".tar", ".gz"] or output.exists():
         raise ValueError("Select a new .tar.gz output")
     verify_build_paths(binary)
+    needed = runtime_dependencies(binary)
+    crypto, crypto_notice = native_crypto()
     if command("git", "status", "--porcelain"):
         raise ValueError("Commit source changes before packaging")
     package = tomllib.loads((ROOT / "Cargo.toml").read_text())["package"]
@@ -96,13 +140,16 @@ def main():
                       key=lambda v: tuple(map(int, v[6:].split("."))))
     if not required:
         raise ValueError("Cannot determine the binary's GNU libc requirement")
-    needed = re.findall(r"\(NEEDED\).*\[(.+?)\]",
-                        command("readelf", "--dynamic", str(binary)))
     revision = command("git", "rev-parse", "HEAD")
     timestamp = int(command("git", "show", "-s", "--format=%ct", "HEAD"))
     notice_text, dependencies, covered_sources = notices(sqlcipher)
+    notice_text += crypto_notice
     files = {"Bin/hrc": binary, "README.md": ROOT / "README.md", "LICENSE": ROOT / "LICENSE"}
     files.update(covered_sources)
+    native_inventory = None
+    if args.native_packages:
+        bundled, native_inventory = native_files(args.native_packages, binary)
+        files.update(bundled)
     for directory in ("Documentation", "Examples", "Tools", "Packaging", "Harness", "Themes", ".github/assets"):
         tracked = command("git", "ls-files", "-z", directory).split("\0")
         for filename in filter(None, tracked):
@@ -123,10 +170,13 @@ def main():
         "target": "x86_64-unknown-linux-gnu", "sourceCommit": revision,
         "rustCompiler": command("rustc", "--version"),
         "sqlcipherSourceCommit": SQLCIPHER_COMMIT,
+        "nativeCrypto": crypto,
         "minimumGlibc": required[-1], "requiredSharedLibraries": needed,
         "files": {name: {"sha256": digest(path), "bytes": path.stat().st_size}
                   for name, path in sorted(files.items())},
     }
+    if native_inventory is not None:
+        manifest["nativePackages"] = native_inventory
     for name, data in generated.items():
         manifest["files"][name] = {"sha256": hashlib.sha256(data).hexdigest(), "bytes": len(data)}
     generated["Package.json"] = (json.dumps(manifest, indent=2) + "\n").encode()

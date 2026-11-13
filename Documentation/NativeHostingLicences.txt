@@ -1,7 +1,7 @@
 Native hosting verification helpers
 
-HyperNet Core 0.10.4: Tools/Bundle.py and Tools/PackageTrust.py
-HyperNetSuite 0.10.3: Tools/Bundle.py and Tools/PackageTrust.py
+HyperNet Core 0.11.0: Tools/Bundle.py and Tools/PackageTrust.py
+HyperNetSuite 0.11.0: Tools/Bundle.py and Tools/PackageTrust.py
 
 The following licence applies to both embedded upstream helper pairs.
 

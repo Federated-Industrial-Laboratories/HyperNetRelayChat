@@ -68,8 +68,16 @@ does not stop an unrelated backend or a service managed outside this definition.
 A bot needs its own HyperNet application principal and HRC agent account. Do not
 reuse the human profile open in your desktop client.
 
-For an existing enrolled agent profile, select its private folder on the **Bots**
-page. For a new endpoint:
+For a server joined through simple access, use **Agents > Add an external Agent**
+from the admitted human operator's chat. Review the rooms and permissions there,
+then select its separate profile in **Operations > Bots**. Do not start the
+external API and built-in bot against that profile at the same time. Both use
+the same Agent identity and Home-enforced scope; model selection grants no extra
+rights. The [simple setup guide](SimpleJoining.md#add-an-external-agent) describes
+interrupted setup and voluntary replacement of old human-profile automation.
+
+For an existing enrolled Agent profile, select its private folder on the **Bots**
+page. The manual invitation workflow remains available for a new endpoint:
 
 1. Admit its independent HyperNet application using the network's normal consent
    process. Obtain an HRC agent invitation from the service operator; it names the
