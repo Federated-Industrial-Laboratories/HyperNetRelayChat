@@ -8,6 +8,8 @@ use crate::{
 };
 use ed25519_dalek::Signer;
 use std::time::{SystemTime, UNIX_EPOCH};
+#[path = "Host.rs"]
+mod host;
 fn id(n: u8) -> Id {
     Id::from_bytes([n; 32])
 }
@@ -54,7 +56,9 @@ fn witness(directory: &Path, key: &SigningKey) -> clock::Config {
     )
     .unwrap();
     let path = directory.join("Clock.cbor");
-    fs::write(&path, bytes).unwrap();
+    let next = directory.join("Clock.next");
+    fs::write(&next, bytes).unwrap();
+    fs::rename(next, &path).unwrap();
     clock::Config {
         observation: path,
         monitor_key: hex::encode(public),

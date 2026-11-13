@@ -119,6 +119,11 @@ fn serve(
                     .map_err(|_| files::Invalid)?;
                 Ok(serde_json::json!({"configured":true}))
             }
+            Control::ConfigureHost { policy } => {
+                home.configure_host_admission(policy, now)
+                    .map_err(|_| files::Invalid)?;
+                Ok(serde_json::json!({"configured":true}))
+            }
             Control::LegacyInvite {
                 principal,
                 id,

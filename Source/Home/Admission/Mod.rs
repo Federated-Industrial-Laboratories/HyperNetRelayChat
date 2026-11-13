@@ -142,8 +142,31 @@ fn fault(error: Fault) -> rusqlite::Result<Response> {
 }
 impl Home {
     pub fn configure_admission(&mut self, policy: Policy, clock: TimeBounds) -> super::Result<()> {
+        self.configure_admission_inner(policy, clock, false)
+    }
+    pub(crate) fn configure_host_admission(
+        &mut self,
+        policy: Policy,
+        clock: TimeBounds,
+    ) -> super::Result<()> {
+        self.configure_admission_inner(policy, clock, true)
+    }
+    fn configure_admission_inner(
+        &mut self,
+        policy: Policy,
+        clock: TimeBounds,
+        once: bool,
+    ) -> super::Result<()> {
         let home = self.home;
         let result = self.store.write(|db| {
+            let encoded = domain::encode(&policy)?;
+            if once {
+                db.execute_batch("CREATE TABLE IF NOT EXISTS hrc_host_admission(singleton INTEGER PRIMARY KEY CHECK(singleton=1),policy BLOB NOT NULL)")?;
+                let retained: Option<Vec<u8>> = db.query_row("SELECT policy FROM hrc_host_admission WHERE singleton=1", [], |r| r.get(0)).optional()?;
+                if let Some(retained) = retained {
+                    return Ok(Commit::new(if retained == encoded { Ok(()) } else { Err("HostAdmissionConfigurationMismatch") }, b"HRC.Host.AdmissionRetry".to_vec()));
+                }
+            }
             let checked = (|| -> Domain<()> {
                 rooms(db, home, &policy.rooms)?;
                 if !(1..=8).contains(&policy.max_agents_per_operator) || VerifyingKey::from_bytes(policy.registrar_key.as_bytes()).map_or(true, |k|k.is_weak()) { return invalid("AdmissionPolicy"); }
@@ -152,7 +175,8 @@ impl Home {
             match checked { Err(Fault::Sql(e)) => return Err(e), Err(Fault::Reject(_,s)) => return Ok(Commit::new(Err(s), b"HRC.Admission.PolicyRefused".to_vec())), Ok(()) => () }
             let time=now(db,clock)?;
             db.execute("UPDATE hrc_meta SET version=2 WHERE singleton=1",[])?;
-            db.execute("INSERT INTO hrc_admission_policy VALUES(1,?1) ON CONFLICT(singleton) DO UPDATE SET policy=excluded.policy", [domain::encode(&policy)?])?;
+            db.execute("INSERT INTO hrc_admission_policy VALUES(1,?1) ON CONFLICT(singleton) DO UPDATE SET policy=excluded.policy", [&encoded])?;
+            if once { db.execute("INSERT INTO hrc_host_admission VALUES(1,?1)", [&encoded])?; }
             db.execute("UPDATE hrc_meta SET clock_floor=?1 WHERE singleton=1", [time.lower_ms])?;
             Ok(Commit::new(Ok(()), domain::encode(&("HRC.Admission.Policy",&policy))?))
         })?;
