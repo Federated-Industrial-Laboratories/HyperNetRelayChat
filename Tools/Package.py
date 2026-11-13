@@ -14,7 +14,7 @@ import subprocess
 import tarfile
 import tomllib
 
-from Notices import ROOT, SQLCIPHER_COMMIT, digest, notices
+from Notices import ROOT, SQLCIPHER_COMMIT, digest, native_crypto, notices
 
 
 def command(*args):
@@ -57,6 +57,16 @@ def verify_build_paths(binary):
         with mmap.mmap(source.fileno(), 0, access=mmap.ACCESS_READ) as contents:
             if any(contents.find(prefix) >= 0 for prefix in prefixes):
                 raise SystemExit("Binary retains private build paths; rebuild with package path remapping")
+
+
+def runtime_dependencies(binary):
+    """The same executable must load as the registrar in the native Core image."""
+    needed = re.findall(r"\(NEEDED\).*\[(.+?)\]", command("readelf", "--dynamic", str(binary)))
+    allowed = {"libc.so.6", "libm.so.6", "libgcc_s.so.1", "ld-linux-x86-64.so.2"}
+    if not needed or set(needed) - allowed:
+        raise SystemExit("Binary requires shared libraries outside the native hosting runtime; "
+                         "rebuild with Tools/Environment.sh and static OpenSSL")
+    return needed
 
 
 def native_files(directory, binary):
@@ -112,6 +122,8 @@ def main():
     if output.suffixes[-2:] != [".tar", ".gz"] or output.exists():
         raise ValueError("Select a new .tar.gz output")
     verify_build_paths(binary)
+    needed = runtime_dependencies(binary)
+    crypto, crypto_notice = native_crypto()
     if command("git", "status", "--porcelain"):
         raise ValueError("Commit source changes before packaging")
     package = tomllib.loads((ROOT / "Cargo.toml").read_text())["package"]
@@ -128,11 +140,10 @@ def main():
                       key=lambda v: tuple(map(int, v[6:].split("."))))
     if not required:
         raise ValueError("Cannot determine the binary's GNU libc requirement")
-    needed = re.findall(r"\(NEEDED\).*\[(.+?)\]",
-                        command("readelf", "--dynamic", str(binary)))
     revision = command("git", "rev-parse", "HEAD")
     timestamp = int(command("git", "show", "-s", "--format=%ct", "HEAD"))
     notice_text, dependencies, covered_sources = notices(sqlcipher)
+    notice_text += crypto_notice
     files = {"Bin/hrc": binary, "README.md": ROOT / "README.md", "LICENSE": ROOT / "LICENSE"}
     files.update(covered_sources)
     native_inventory = None
@@ -159,6 +170,7 @@ def main():
         "target": "x86_64-unknown-linux-gnu", "sourceCommit": revision,
         "rustCompiler": command("rustc", "--version"),
         "sqlcipherSourceCommit": SQLCIPHER_COMMIT,
+        "nativeCrypto": crypto,
         "minimumGlibc": required[-1], "requiredSharedLibraries": needed,
         "files": {name: {"sha256": digest(path), "bytes": path.stat().st_size}
                   for name, path in sorted(files.items())},

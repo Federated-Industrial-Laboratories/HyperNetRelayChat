@@ -13,6 +13,22 @@ The source inventory includes archive checksums from `Cargo.lock`. The MPL-2.0
 HPKE sources are included in the binary package under `ThirdPartySources/` with
 their declared licence and the full licence text.
 
+The normal build statically links SQLCipher's OpenSSL 3 `libcrypto` dependency.
+`Tools/Environment.sh` selects the distribution development archive through
+`pkg-config`; `build.rs` requires it and records it as a rebuild input. Packaging
+uses that same selection and adds the archive digest, exact binary/source package
+versions, package copyright notice and complete Apache 2.0 licence. This notice
+collection requires Debian-format `libssl-dev` ownership and licence files.
+The metadata identifies selected build inputs; it does not establish binary
+provenance independently of the trusted build.
+
+Before executing the candidate, the packager reads its ELF dependency table and
+requires only the libc, libm, libgcc and loader libraries in the native Core image.
+A shared `libcrypto` or another undeclared loader dependency is refused. Package
+qualification also runs the executable and an actual encrypted-store operation
+inside the unchanged native image; ELF metadata alone does not exercise crypto
+provider initialisation or SQLCipher.
+
 `NoticeSources.json` maps exact crate versions to source URLs and SHA-256 digests.
 The filenames are content hashes to share identical texts without changing their
 content. These are licence files, not alternate dependency implementations.

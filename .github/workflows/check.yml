@@ -20,7 +20,7 @@ jobs:
       - name: Install Linux interface dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends pkg-config libfontconfig1-dev libxkbcommon-dev libwayland-dev libegl1-mesa-dev
+          sudo apt-get install -y --no-install-recommends build-essential tcl pkg-config openssl libssl-dev libfontconfig1-dev libxkbcommon-dev libwayland-dev libegl1-mesa-dev
       - name: Build controlled SQLCipher
         run: bash Tools/Native.sh
       - name: Check the HRC crate

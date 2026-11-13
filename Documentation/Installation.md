@@ -10,7 +10,9 @@ its original measured versions. Use its topology and workload limits when planni
 
 ## Requirements
 
-The package target is native Linux x86_64 with GNU libc and OpenSSL 3. `Package.json`
+The package target is native Linux x86_64 with GNU libc. SQLCipher and its OpenSSL 3
+cryptography library are linked statically so the same executable can run as the
+isolated registrar inside the native Core image. `Package.json`
 records the binary's minimum GNU libc symbol version and linked shared libraries.
 The GUI additionally needs a working Wayland or X11 session, EGL/OpenGL, XKB and
 Fontconfig. Install fonts for the languages in use; missing terminal or GUI glyphs
@@ -201,7 +203,11 @@ profiles, service data and HyperNet configuration untouched.
 Use a trusted checkout and the [build dependencies](../README.md). Build the pinned
 SQLCipher source with `Tools/Native.sh`, then source `Tools/Environment.sh` before
 every Cargo build or check. The package tool requires Python 3.11 or later and GNU
-binutils in addition to the build tools.
+binutils in addition to the build tools. The OpenSSL 3 development package must
+include `libcrypto.a`; `pkg-config` selects its library directory. The normal build
+requires that static archive and has no shared-libcrypto fallback. Package notice
+collection currently requires Debian-format ownership records, the selected
+`libssl-dev` copyright file and the installed complete Apache 2.0 licence text.
 
 ```sh
 bash Tools/Native.sh
@@ -218,7 +224,10 @@ python3 Tools/Package.py --binary target/release/hrc \
 When selecting a shared build directory or native source prefix, pass its actual
 paths. The packager requires a clean committed checkout, refuses existing output,
 checks the binary version/architecture, and collects the locked dependency notices
-offline. It neither starts the binary's network workflows nor changes an installed
+offline. Keep the same OpenSSL selection through the build and packaging steps.
+The inventory records the selected static archive digest and exact distribution
+source version; the notices include its copyright and Apache 2.0 licence. It neither
+starts the binary's network workflows nor changes an installed
 copy. It does not establish reproducibility by itself; retain the build and
 qualification evidence for the exact package being distributed.
 
@@ -231,7 +240,10 @@ configuration flags in the selected environment variable before this command.
 Capture the flags as shown, without printing them in build logs.
 
 Before executing the binary or creating an archive, the packager refuses any
-remaining occurrence of these known build paths. Build and package in the same
+remaining occurrence of these known build paths and any required shared library
+outside the Core image's libc, libm, libgcc and ELF-loader set. This catches a
+dynamic OpenSSL dependency before a release can omit the registrar's loader input.
+Build and package in the same
 environment. This is a check for the current build locations, not proof that an
 arbitrary binary built elsewhere contains no private information. Native compiler
 output or embedded application data can require separate remapping; inspect a

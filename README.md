@@ -89,7 +89,8 @@ qualification have different scopes; the installation guide records both.
 <details>
 <summary>Source requirements and build commands</summary>
 
-Use Linux with Rust 1.96, a C compiler, Make, Tcl, Git, OpenSSL development headers,
+Use Linux with Rust 1.96, a C compiler, Make, Tcl, Git, OpenSSL 3 development headers
+and its static `libcrypto.a` archive,
 pkg-config, Fontconfig, XKB, Wayland and EGL development packages. Install fonts
 for the languages used; Noto core, CJK and colour emoji cover the supplied
 presentation checks.
