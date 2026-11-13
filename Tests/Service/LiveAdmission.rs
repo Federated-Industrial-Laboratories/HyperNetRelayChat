@@ -8,6 +8,8 @@ use crate::{
 };
 use ed25519_dalek::Signer;
 use std::time::{SystemTime, UNIX_EPOCH};
+#[path = "AdmissionBridge.rs"]
+mod bridge;
 #[path = "Host.rs"]
 mod host;
 fn id(n: u8) -> Id {
@@ -110,6 +112,10 @@ fn live_private_socket_enrolment_preserves_home_ownership_and_exact_retry() {
         clock,
         motd: String::new(),
         room_creation: crate::home::RoomCreationPolicy::AllowList { accounts: vec![] },
+        admission_bridge: Some(control::Bridge {
+            directory: root.join("Bridge"),
+            uid: unsafe { libc::geteuid() },
+        }),
     };
     files::create_json(&directory.join("Service.json"), &config).unwrap();
     let stop = Arc::new(AtomicBool::new(false));
@@ -131,6 +137,7 @@ fn live_private_socket_enrolment_preserves_home_ownership_and_exact_retry() {
     let registrar = files::create_key(&root.join("Registrar.key")).unwrap();
     let binding = Binding {
         directory: directory.clone(),
+        peer_uid: None,
         home: service,
         service_key: config.descriptor.signing_key,
         registrar_key_file: root.join("Registrar.key"),
@@ -144,7 +151,8 @@ fn live_private_socket_enrolment_preserves_home_ownership_and_exact_retry() {
         agents_enabled: true,
         max_agents_per_operator: 2,
     };
-    control::configure(&directory, p).unwrap();
+    control::configure(&directory, p.clone()).unwrap();
+    bridge::check_boundary(&root, &directory, &shared, &registrar, &p, &clock_key);
     assert!(config.store(&directory).is_err());
     let describe = control::request(&binding_path, &a::Request::new(a::Action::Describe)).unwrap();
     assert!(matches!(describe.result, a::Status::Described { .. }));

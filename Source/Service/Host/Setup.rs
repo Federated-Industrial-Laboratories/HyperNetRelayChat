@@ -67,6 +67,7 @@ fn home(directory: &Path, options: &Options) -> Result<(service::Config, Home)> 
         clock: options.clock.clone(),
         motd: options.motd.clone(),
         room_creation: RoomCreationPolicy::AllowList { accounts: vec![] },
+        admission_bridge: options.bridge()?,
     };
     Ok((config, home))
 }
@@ -156,6 +157,7 @@ pub(super) fn prepare(directory: &Path, options: &Options) -> Result<()> {
         &directory.join("Registrar.json"),
         &service::live_admission::Binding {
             directory: directory.join("Home"),
+            peer_uid: None,
             home: options.home,
             service_key: config.descriptor.signing_key,
             registrar_key_file: directory.join("Registrar.key"),
@@ -174,6 +176,7 @@ pub(super) fn verify(directory: &Path, options: &Options) -> Result<service::Des
         || config.companion != options.receiver_companion
         || config.clock.observation != options.clock.observation
         || config.clock.monitor_key != options.clock.monitor_key
+        || config.admission_bridge != options.bridge()?
     {
         return Err(Error::Configuration);
     }
@@ -197,6 +200,7 @@ pub(super) fn verify(directory: &Path, options: &Options) -> Result<service::Des
     let binding: service::live_admission::Binding = files::json(&directory.join("Registrar.json"))?;
     files::key(&binding.registrar_key_file)?;
     if binding.directory != directory.join("Home")
+        || binding.peer_uid.is_some()
         || binding.home != options.home
         || binding.service_key != descriptor.signing_key
         || binding.registrar_key_file != directory.join("Registrar.key")

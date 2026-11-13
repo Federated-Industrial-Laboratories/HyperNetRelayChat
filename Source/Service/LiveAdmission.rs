@@ -1,10 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Fixed private registrar control; no public listener can select credentials or a command.
+#[path = "AdmissionBridge.rs"]
+pub(crate) mod bridge;
 use super::files;
 use crate::{
     home::admission::{self, Policy, Request, Response},
     protocol::*,
 };
+pub use bridge::Configuration as Bridge;
 use ed25519_dalek::{Signature, Signer};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -26,6 +29,9 @@ const DOMAIN: &[u8] = b"HyperNet.HrcAdmission.Control/1\0";
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Binding {
     pub directory: PathBuf,
+    /// Present only for the socket-only bridge in an isolated registrar namespace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_uid: Option<u32>,
     pub home: ServiceId,
     pub service_key: Id,
     pub registrar_key_file: PathBuf,
@@ -190,6 +196,9 @@ pub(crate) fn call(
     key: &SigningKey,
     control: Control,
 ) -> files::Result<serde_json::Value> {
+    if let Some(owner) = binding.peer_uid {
+        return bridge::call(binding, owner, key, control);
+    }
     files::directory(&binding.directory, false)?;
     let boot: Id = files::json(&binding.directory.join("Admission.boot"))?;
     let nonce = Id::random().map_err(|_| files::Invalid)?;
@@ -201,7 +210,8 @@ pub(crate) fn call(
         control,
     };
     let (_directory, socket) = socket_directory(&binding.directory)?;
-    let mut stream = UnixStream::connect(socket).map_err(|_| files::Invalid)?;
+    let mut stream = bridge::connect(&socket)?;
+    bridge::peer(&stream, unsafe { libc::geteuid() })?;
     let end = Instant::now() + Duration::from_secs(5);
     send(&mut stream, &payload, key, end)?;
     let envelope = receive(&mut stream, end)?;
@@ -232,6 +242,7 @@ fn owner(directory: &Path) -> files::Result<(Binding, SigningKey)> {
     Ok((
         Binding {
             directory: directory.to_owned(),
+            peer_uid: None,
             home: config.descriptor.home,
             service_key: config.descriptor.signing_key,
             registrar_key_file: directory.join("Signing.key"),

@@ -9,8 +9,11 @@ The public join listener is not an HRC administrator. An installed, fixed Suite
 registrar authenticates the public claim, obtains the exact certified Core native
 principal, and calls the configured HRC extension. Its signing key and HRC private
 binding must remain outside the public listener's operating-system account and mounts.
-The HRC socket uses a private service directory and mode 0600. The registrar runs
-in that private owner context. Socket credentials alone do not replace process isolation.
+The default HRC control socket uses a private service directory and mode 0600.
+An isolated registrar instead uses the [request-only hosting bridge](SharedHosting.md#isolated-registrar-bridge):
+a separate socket directory, exact mapped peer UID and typed signed requests.
+The Home administrative socket and private files stay outside that container.
+Socket signatures alone do not replace process isolation.
 
 ## Host configuration
 
@@ -32,6 +35,10 @@ private-room creation, delegation, hosting, or administrator privileges.
 The private registrar binding contains `directory`, `home`, `serviceKey`, and
 `registrarKeyFile`. `directory` is the running HRC service directory; the two identity
 fields pin its descriptor. Store both policy and binding files with mode 0600.
+For an isolated bridge, `directory` identifies the socket-only mount and optional
+`peerUid` pins the Home server's translated UID. Its scoped key file must be owned
+by the registrar inside its private state mount. A binding without `peerUid`
+retains the owner-only default; it does not expose a bridge automatically.
 
 ## Registrar extension
 

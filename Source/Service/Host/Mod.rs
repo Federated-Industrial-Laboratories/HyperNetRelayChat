@@ -62,9 +62,28 @@ pub struct Options {
     pub motd: String,
     pub agents_enabled: bool,
     pub max_agents_per_operator: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admission_bridge: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admission_uid: Option<u32>,
 }
 impl Options {
+    fn bridge(&self) -> Result<Option<service::live_admission::Bridge>> {
+        match (&self.admission_bridge, self.admission_uid) {
+            (None, None) => Ok(None),
+            (Some(directory), Some(uid)) => {
+                let bridge = service::live_admission::Bridge {
+                    directory: directory.clone(),
+                    uid,
+                };
+                bridge.validate()?;
+                Ok(Some(bridge))
+            }
+            _ => Err(Error::Configuration),
+        }
+    }
     fn validate(&self) -> Result<()> {
+        self.bridge()?;
         for path in [
             &self.receiver_companion,
             &self.owner_companion,
@@ -183,6 +202,13 @@ pub fn request(directory: &Path, request: Request) -> Result<Response> {
     }
     if let Action::Prepare(options) = &request.action {
         options.validate()?;
+        if options
+            .admission_bridge
+            .as_ref()
+            .is_some_and(|bridge| bridge.starts_with(directory) || directory.starts_with(bridge))
+        {
+            return Err(Error::Configuration);
+        }
     }
     let _lock = lock(directory, matches!(request.action, Action::Prepare(_)))?;
     if let Action::Prepare(options) = &request.action {
