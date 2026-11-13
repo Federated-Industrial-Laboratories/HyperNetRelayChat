@@ -23,6 +23,7 @@ pub struct Selection {
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Step {
+    Simple,
     Existing,
     Runtime,
     PrivateInvitation,
@@ -33,7 +34,8 @@ enum Step {
     Activation,
 }
 impl Step {
-    const ALL: [(Self, &'static str); 8] = [
+    const ALL: [(Self, &'static str); 9] = [
+        (Self::Simple, "Join a server"),
         (Self::Existing, "Open a profile"),
         (Self::Runtime, "Local runtime"),
         (Self::PrivateInvitation, "Private invitation"),
@@ -87,6 +89,8 @@ struct Browser {
 
 pub struct Wizard {
     config: RuntimeConfig,
+    location: String,
+    saved: Vec<(PathBuf, String)>,
     step: Step,
     profile: String,
     configuration: String,
@@ -126,6 +130,11 @@ impl Wizard {
             .unwrap_or_else(|| base.join("OnboardingRuntime.json"));
         let config =
             RuntimeConfig::load(&configuration).unwrap_or_else(|_| RuntimeConfig::at(base));
+        let step = if initial_profile.is_some() {
+            Step::Existing
+        } else {
+            Step::Simple
+        };
         let profile = initial_profile
             .unwrap_or_else(|| config.hrc_profile.clone())
             .display()
@@ -135,7 +144,9 @@ impl Wizard {
             config,
             configuration: configuration.display().to_string(),
             profile,
-            step: Step::Existing,
+            step,
+            location: String::new(),
+            saved: Vec::new(),
             bootstrap: String::new(),
             bootstrap_pin: String::new(),
             bundle: String::new(),
@@ -152,6 +163,20 @@ impl Wizard {
             browser: None,
             open: None,
         }
+    }
+    pub(crate) fn saved_profiles(&mut self, profiles: Vec<PathBuf>) {
+        self.saved = profiles
+            .into_iter()
+            .map(|profile| {
+                let name = super::simple::load(&profile)
+                    .ok()
+                    .flatten()
+                    .and_then(|b| b.name)
+                    .map(|s| hrc::text::identity_display(&s))
+                    .unwrap_or_else(|| profile.display().to_string());
+                (profile, name)
+            })
+            .collect();
     }
     pub fn take_open(&mut self) -> Option<Selection> {
         self.open.take()
@@ -379,14 +404,44 @@ impl Wizard {
         if let Some(job) = &self.job {
             ui.horizontal(|ui| {
                 ui.spinner();
-                ui.label("Working…");
+                ui.label(if self.step == Step::Simple {
+                    "Continue in the HyperNet join window. You can cancel here."
+                } else {
+                    "Working…"
+                });
                 if components::button(ui, "Cancel").clicked() {
                     job.cancel.store(true, Ordering::Release);
                 }
             });
         }
         ui.add_enabled_ui(self.job.is_none(), |ui| match self.step {
+            Step::Simple => {
+                ui.label("Join using a server address, private link, or QR code. HyperNet will show the server and any password request before you connect.");
+                ui.label("Server address or invitation link (optional)");
+                ui.add(egui::TextEdit::singleline(&mut self.location).password(true).char_limit(8192).desired_width(f32::INFINITY));
+                if components::primary(ui, "Continue to HyperNet").clicked() {
+                    let location = (!self.location.trim().is_empty()).then(|| self.location.trim().to_owned());
+                    self.start(&ctx, Task::SimpleJoin { location }, None);
+                    self.location.clear();
+                }
+                ui.collapsing("Installed HyperNet tools", |ui| {
+                    ui.label(self.config.suite.display().to_string());
+                    if components::button(ui, "Choose HyperNetSuite…").clicked() {
+                        self.browse(&ctx, Pick::Suite, &self.config.suite.display().to_string());
+                    }
+                });
+                ui.small("Manual setup and existing private invitations remain available in the other setup tabs.");
+            }
             Step::Existing => {
+                if !self.saved.is_empty() {
+                    ui.strong("Saved profiles");
+                    for (profile,name) in self.saved.clone() {
+                        if ui.selectable_label(self.profile == profile.display().to_string(), name).on_hover_text(profile.display().to_string()).clicked() {
+                            self.profile = profile.display().to_string();
+                        }
+                    }
+                    ui.separator();
+                }
                 ui.label("Profile folder");
                 ui.horizontal(|ui| {
                     ui.text_edit_singleline(&mut self.profile);

@@ -12,6 +12,8 @@ mod instance;
 mod operations;
 #[path = "Settings.rs"]
 mod settings;
+#[path = "Simple.rs"]
+mod simple;
 use crate::{gui, interaction::Model, onboarding};
 use eframe::egui;
 pub use installation::{BundleOptions, bundle, install};
@@ -76,7 +78,7 @@ pub fn run(options: Options) -> Result<(), &'static str> {
 struct Opening {
     profile: PathBuf,
     cancel: Arc<AtomicBool>,
-    receiver: mpsc::Receiver<Result<Model, String>>,
+    receiver: mpsc::Receiver<Result<(Model, Option<String>), String>>,
     worker: Option<thread::JoinHandle<()>>,
 }
 impl Drop for Opening {
@@ -104,6 +106,7 @@ struct Desktop {
     browser_settings: browser_settings::Settings,
     renewal_requested: bool,
     next_renewal_check: Instant,
+    simple: simple::Runtime,
 }
 impl Desktop {
     fn new(instance: instance::Instance, mut options: Options, ctx: &egui::Context) -> Self {
@@ -127,7 +130,9 @@ impl Desktop {
             browser_settings: browser_settings::Settings::default(),
             renewal_requested: false,
             next_renewal_check: Instant::now(),
+            simple: simple::Runtime::default(),
         };
+        app.wizard.saved_profiles(settings::saved_profiles());
         if !options.setup
             && let Some(profile) = options.profile
         {
@@ -149,14 +154,24 @@ impl Desktop {
         let worker = thread::Builder::new()
             .name("hrc-open-profile".into())
             .spawn(move || {
-                let result = onboarding::prepare_existing(&path, offline, &cancelled)
-                    .map_err(|e| e.to_string())
-                    .and_then(|()| {
-                        if cancelled.load(Ordering::Acquire) {
-                            return Err("Opening cancelled".into());
+                let result = (|| {
+                    let mut warning = None;
+                    let effective_offline = if offline { true } else {
+                        match onboarding::simple::saved_offline(&path, &cancelled) {
+                            Ok(saved) => saved,
+                            Err(error) => {
+                                warning = Some(format!("Opened retained history offline because saved server status was unavailable: {error}"));
+                                true
+                            }
                         }
-                        Model::open(&path, offline).map_err(str::to_owned)
-                    });
+                    };
+                    if let Err(error) = onboarding::prepare_existing(&path, effective_offline, &cancelled) {
+                        if !effective_offline { return Err(error.to_string()); }
+                        warning = Some(format!("Chat is offline. The saved server's offline setting could not be confirmed: {error}"));
+                    }
+                    if cancelled.load(Ordering::Acquire) { return Err("Opening cancelled".into()); }
+                    Model::open(&path, effective_offline).map(|model|(model,warning)).map_err(str::to_owned)
+                })();
                 let _ = sender.send(result);
                 wake.request_repaint();
             });
@@ -184,6 +199,7 @@ impl Desktop {
         self.leave_page_context();
         self.chat = None;
         self.wizard = onboarding::Wizard::new(self.profile.clone());
+        self.wizard.saved_profiles(settings::saved_profiles());
         gui::theme::configure(ctx, false, false, 1.0);
     }
     fn leave_page_context(&mut self) {
@@ -249,12 +265,16 @@ impl eframe::App for Desktop {
             let job = self.opening.take().expect("opening result has its job");
             if !job.cancel.load(Ordering::Acquire) {
                 match result {
-                    Ok(model) => {
+                    Ok((model, warning)) => {
+                        self.error = warning;
                         self.profile = Some(job.profile.clone());
                         if settings::remember_profile(&job.profile).is_err() {
                             self.error = Some("The profile opened, but its launcher preference could not be saved.".into());
                         }
-                        self.chat = Some(gui::App::new(model, ctx));
+                        let mut chat = gui::App::new(model, ctx);
+                        chat.configure_simple_server(&job.profile);
+                        self.simple.opened(&job.profile, chat.wants_online());
+                        self.chat = Some(chat);
                     }
                     Err(error) => self.error = Some(error),
                 }
@@ -262,6 +282,16 @@ impl eframe::App for Desktop {
         }
         if let Some(chat) = &mut self.chat {
             chat.logic(ctx, frame);
+            if let Some(result) = self.simple.poll(chat.wants_online(), ctx) {
+                match result {
+                    Ok(true) => chat.runtime_ready(),
+                    Ok(false) => (),
+                    Err(error) => {
+                        chat.go_offline();
+                        self.error = Some(error);
+                    }
+                }
+            }
             if let Some(request) = chat.take_page() {
                 self.error = self
                     .profile

@@ -14,6 +14,8 @@ mod encryption;
 pub(crate) mod page_links;
 #[path = "Panels.rs"]
 mod panels;
+#[path = "SimpleAgents.rs"]
+mod simple_agents;
 #[path = "Sound.rs"]
 mod sound;
 #[path = "Theme.rs"]
@@ -67,6 +69,17 @@ impl App {
     pub(crate) fn go_offline(&mut self) {
         self.model.dispatch(Command::Disconnect);
     }
+    pub(crate) fn runtime_ready(&mut self) {
+        if self.model.online_requested
+            && !matches!(
+                self.model.snapshot.connection,
+                hrc::client::ConnectionState::Online
+            )
+        {
+            // A Connect attempted before the companion was ready may have stopped.
+            self.model.dispatch(Command::Connect);
+        }
+    }
     pub(crate) fn wants_online(&self) -> bool {
         self.model.online_requested
     }
@@ -114,6 +127,7 @@ impl eframe::App for App {
         if self.model.tick() {
             self.sound.play();
         }
+        self.simple_agent_logic(ctx);
         if self.model.notified {
             ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
                 egui::UserAttentionType::Informational,

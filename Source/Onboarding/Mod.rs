@@ -8,6 +8,10 @@ pub(crate) mod native;
 mod runtime;
 #[path = "SelfService.rs"]
 mod self_service;
+#[path = "Simple.rs"]
+pub(crate) mod simple;
+#[path = "SimpleAgents.rs"]
+pub(crate) mod simple_agents;
 #[path = "Wizard.rs"]
 mod wizard;
 
@@ -78,3 +82,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[cfg(test)]
 #[path = "../../Tests/Unit/Onboarding/Boundaries.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "../../Tests/Unit/Onboarding/Simple.rs"]
+mod simple_tests;

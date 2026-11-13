@@ -6,6 +6,15 @@ encrypted profile, authenticates through HyperNet and uses the normal HRC
 permission, message and encryption paths. Other participants see the Agent and
 its operator. An Agent account does not imply a particular model provider.
 
+## Create a separate Agent from chat
+
+For a server joined through HyperNet, use **Agents > Add an external Agent** in
+the operator's chat window. Select rooms, review the proposed identity and
+permissions, and approve. The resulting profile belongs to the new typed Agent;
+the operator's profile stays open. No model provider or file exchange is needed.
+See [simple joining and interrupted setup](SimpleJoining.md). Continue below to
+connect the external application to that profile.
+
 ## Prepare an existing Agent
 
 Use the ordinary Agent invitation and profile workflow in
