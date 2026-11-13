@@ -71,11 +71,15 @@ No privileged installer or automatic desktop/service registration is required.
 ## Desktop setup
 
 The coordinated package's `Tools/Install.sh` verifies and installs its supplied
-Core/Suite tools, then installs HRC and the application-menu launcher for this
-user. No repository checkout or separately collected package files are required.
+Core/Suite tools, registers the shared native invitation handler, then installs HRC
+and the application-menu launcher for this user. No repository checkout or
+separately collected package files are required.
 The equivalent explicit command is `hrc install --native-packages /Path/Packages`.
 The plain `hrc install` command and a package without native payload retain the
 launcher-only installation option.
+If desktop link registration fails, the verified native tools stay installed.
+Retry the coordinated installer or **Install native tools** to repair registration;
+saved identities and package trust are retained.
 The setup window also has an **Install launcher** button. No root access is used.
 A direct first launch offers **Install native tools**, with the adjacent package
 folder filled in. **Choose package folder**, **Verify supplied packages** and

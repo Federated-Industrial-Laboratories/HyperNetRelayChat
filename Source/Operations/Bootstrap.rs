@@ -236,6 +236,20 @@ pub fn inspect(cancel: &AtomicBool) -> Result<Tools> {
         suite,
     })
 }
+fn register_desktop(suite: &Path, cancel: &AtomicBool) -> Result<()> {
+    const RETRY: &str = "The native tools remain installed, but desktop link registration did not complete. Retry Install native tools to repair the links without replacing saved identities.";
+    let result = native::json(
+        suite,
+        &native::strings(&["join", "install"]),
+        cancel,
+        Instant::now() + Duration::from_secs(30),
+    )
+    .map_err(|_| RETRY.to_owned())?;
+    if result["status"] != "DesktopInstalled" {
+        return Err(RETRY.into());
+    }
+    Ok(())
+}
 pub fn install(review: &Preview, cancel: &AtomicBool) -> Result<Tools> {
     let current = preview(&review.release, cancel)?;
     if current.digest != review.digest || current.installation != review.installation {
@@ -269,7 +283,11 @@ pub fn install(review: &Preview, cancel: &AtomicBool) -> Result<Tools> {
     {
         return Err("The native package result differs from the reviewed selection.".into());
     }
-    inspect(cancel)
+    let tools = inspect(cancel)?;
+    // Register only the exact installed Suite after its package inspection succeeds.
+    // A desktop failure preserves the admitted packages for the same install retry.
+    register_desktop(&tools.suite, cancel)?;
+    Ok(tools)
 }
 
 #[cfg(test)]
